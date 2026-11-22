@@ -1,0 +1,1 @@
+pub struct RiskConfig{ pub max_position_usd:f64, pub max_drawdown_pct:f64 } impl Default for RiskConfig{ fn default()->Self{ Self{max_position_usd:50000.0, max_drawdown_pct:10.0} } } pub fn check_order(_c:&RiskConfig, notional:f64)->Result<(),String>{ if notional>_c.max_position_usd{ Err("exceeds max_position_usd".into()) } else { Ok(()) } }
