@@ -1,0 +1,50 @@
+name: Build (portable test)
+
+on:
+  workflow_dispatch:
+  push:
+    branches-ignore: [main]
+  pull_request:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20, cache: npm }
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with: { workspaces: src-tauri }
+      - run: npm ci
+      - run: python scripts/gen_icon.py
+      - run: npm run build
+      - name: Build portable exe (no installer)
+        run: npx tauri build --no-bundle
+      - name: Stage portable folder
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path portable/DeSSS
+          Copy-Item src-tauri/target/release/desss.exe portable/DeSSS/
+          New-Item -ItemType Directory -Force -Path portable/DeSSS/data
+          New-Item -ItemType File -Force -Path portable/DeSSS/data/.keep
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DeSSS-windows-portable
+          path: portable/DeSSS
+          if-no-files-found: error
+  check-linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20, cache: npm }
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Tauri system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libsoup-3.0-dev
+      - run: npm ci
+      - run: python scripts/gen_icon.py
+      - run: npm run build
+      - run: cargo check --manifest-path src-tauri/Cargo.toml
