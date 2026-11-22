@@ -1,3 +1,11 @@
-import React from "react"; 
-const Empty=()=> (<div className="border border-dashed border-slate-700 rounded p-8 text-slate-500 text-sm">空壳页面 — 接口契约已就绪，业务待接入（不接真实交易所）</div>);
-export default function RiskPage(){  return (<div><h1 className="text-xl font-semibold mb-4">风控</h1><Empty/></div>); }
+import React from "react";
+import { EmptyState, PageHeader } from "../components/ui";
+
+export default function RiskPage() {
+  return (
+    <div>
+      <PageHeader title="风控" />
+      <EmptyState>空壳页面 — 接口契约已就绪，业务待接入（不接真实交易所）</EmptyState>
+    </div>
+  );
+}

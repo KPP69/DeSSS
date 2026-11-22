@@ -1,0 +1,20 @@
+/**
+ * DeSSS design tokens — single source of truth for the dark quant-terminal
+ * theme. Tailwind semantic colors in tailwind.config.js mirror these values;
+ * components should use the Tailwind names (bg-app, bg-panel, bg-overlay,
+ * border-line, text-t1/t2/t3, bg-primary, text-profit/loss/warn).
+ */
+:root {
+  --ds-bg: #0b0e14;
+  --ds-panel: #121722;
+  --ds-overlay: #181f2e;
+  --ds-border: #1e2636;
+  --ds-primary: #3b82f6;
+  --ds-profit: #10b981;
+  --ds-loss: #ef4444;
+  --ds-warn: #f59e0b;
+  --ds-text-1: #f1f5f9;
+  --ds-text-2: #94a3b8;
+  --ds-text-3: #64748b;
+  --ds-radius: 0.5rem;
+}

@@ -1,3 +1,44 @@
-import React from "react"; import { useAppStore, type PageKey } from "../store/useAppStore"; import { useMarketStore } from "../store/useMarketStore";
-const items:{key:PageKey;label:string}[]=[{key:"account",label:"账户"},{key:"strategy",label:"策略"},{key:"trading",label:"交易"},{key:"data",label:"数据"},{key:"risk",label:"风控"},{key:"system",label:"系统"}];
-export default function Sidebar(){ const {page,setPage}=useAppStore(); const connected=useMarketStore(s=>s.connected); return (<aside className="w-52 shrink-0 h-full bg-[#0d131a] border-r border-slate-800 flex flex-col"><div className="p-4 font-bold text-lg">DeSSS</div><div className="px-4 pb-3 text-xs"><span className={connected?"text-emerald-400":"text-slate-500"}>● {connected?"Mock 已连接":"Mock 未启动"}</span></div><nav className="flex flex-col gap-1 px-2">{items.map(i=>(<button key={i.key} onClick={()=>setPage(i.key)} className={"text-left px-3 py-2 rounded "+(page===i.key?"bg-slate-800 text-white":"text-slate-400 hover:bg-slate-900")}>{i.label}</button>))}</nav><div className="mt-auto p-3 text-[11px] text-slate-600">Portable · ./data/desss.db</div></aside>); }
+import React from "react";
+import { useAppStore, type PageKey } from "../store/useAppStore";
+import { useMarketStore } from "../store/useMarketStore";
+
+const items: { key: PageKey; label: string }[] = [
+  { key: "account", label: "账户" },
+  { key: "strategy", label: "策略" },
+  { key: "trading", label: "交易" },
+  { key: "data", label: "数据" },
+  { key: "risk", label: "风控" },
+  { key: "system", label: "系统" },
+];
+
+export default function Sidebar() {
+  const { page, setPage } = useAppStore();
+  const connected = useMarketStore((s) => s.connected);
+  return (
+    <aside className="w-52 shrink-0 h-full bg-panel border-r border-line flex flex-col">
+      <div className="p-4 font-bold text-lg text-t1">DeSSS</div>
+      <div className="px-4 pb-3 text-xs">
+        <span className={connected ? "text-profit" : "text-t3"}>
+          ● {connected ? "Mock 已连接" : "Mock 未启动"}
+        </span>
+      </div>
+      <nav className="flex flex-col gap-1 px-2">
+        {items.map((i) => (
+          <button
+            key={i.key}
+            onClick={() => setPage(i.key)}
+            className={
+              "text-left px-3 py-2 rounded transition-colors " +
+              (page === i.key
+                ? "bg-overlay text-t1"
+                : "text-t2 hover:bg-overlay/60 hover:text-t1")
+            }
+          >
+            {i.label}
+          </button>
+        ))}
+      </nav>
+      <div className="mt-auto p-3 text-[11px] text-t3">Portable · ./data/desss.db</div>
+    </aside>
+  );
+}

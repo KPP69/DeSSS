@@ -1,3 +1,33 @@
-import React from "react"; import { useMarketStore } from "../store/useMarketStore";
-const Empty=()=> (<div className="border border-dashed border-slate-700 rounded p-8 text-slate-500 text-sm">空壳页面 — 接口契约已就绪，业务待接入（不接真实交易所）</div>);
-export default function TradingPage(){  const ticks=useMarketStore(s=>s.ticks); const list=Object.values(ticks); return (<div><h1 className="text-xl font-semibold mb-4">交易</h1><div className="space-y-3"><div className="text-sm text-slate-400">Mock 行情 · 每 500ms 推送 · 来自 EventBus → Tauri event <code>market://tick</code></div>{list.length===0?<Empty/>:<div className="grid gap-2">{list.map(t=>(<div key={t.symbol} className="flex justify-between bg-slate-900 rounded p-3"><span className="font-mono">{t.symbol}</span><span className="font-mono">{t.last.toFixed(2)}</span><span className="text-slate-400 text-sm">bid {t.bid.toFixed(2)} / ask {t.ask.toFixed(2)}</span></div>))}</div>}</div></div>); }
+import React from "react";
+import { Badge, DataTable, EmptyState, PageHeader } from "../components/ui";
+import { useMarketStore } from "../store/useMarketStore";
+
+export default function TradingPage() {
+  const ticks = useMarketStore((s) => s.ticks);
+  const list = Object.values(ticks);
+  return (
+    <div>
+      <PageHeader title="交易">
+        <Badge tone="mock">Mock 行情</Badge>
+      </PageHeader>
+      <div className="text-sm text-t2 mb-3">
+        Mock 行情 · 每 500ms 推送 · 来自 EventBus → Tauri event <code className="num">market://tick</code>
+      </div>
+      {list.length === 0 ? (
+        <EmptyState>等待 Mock 行情推送…</EmptyState>
+      ) : (
+        <DataTable
+          headers={["交易对", "最新价", "买一 / 卖一"]}
+          minWidth={560}
+          rows={list.map((t) => [
+            <span key="s" className="num">{t.symbol}</span>,
+            <span key="l" className="num">{t.last.toFixed(2)}</span>,
+            <span key="ba" className="num text-t2">
+              {t.bid.toFixed(2)} / {t.ask.toFixed(2)}
+            </span>,
+          ])}
+        />
+      )}
+    </div>
+  );
+}
