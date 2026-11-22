@@ -29,10 +29,17 @@ impl Default for InMemoryVault {
 
 impl Vault for InMemoryVault {
     fn get(&self, k: &str) -> Option<String> {
-        self.store.lock().unwrap().get(k).cloned()
+        self.store
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(k)
+            .cloned()
     }
 
     fn set(&self, k: &str, v: String) {
-        self.store.lock().unwrap().insert(k.into(), v);
+        self.store
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(k.into(), v);
     }
 }
