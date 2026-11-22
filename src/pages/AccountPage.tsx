@@ -1,0 +1,3 @@
+import React from "react"; import { useMarketStore } from "../store/useMarketStore";
+const Empty=()=> (<div className="border border-dashed border-slate-700 rounded p-8 text-slate-500 text-sm">空壳页面 — 接口契约已就绪，业务待接入（不接真实交易所）</div>);
+export default function AccountPage(){  const balances=useMarketStore(s=>s.balances); return (<div><h1 className="text-xl font-semibold mb-4">账户</h1><div className="space-y-2">{balances.length===0?<Empty/>:balances.map(b=>(<div key={b.asset} className="flex justify-between bg-slate-900 rounded p-3"><span>{b.asset}</span><span className="font-mono">{b.total.toFixed(4)} (可用 {b.free.toFixed(4)})</span><span className="text-slate-400">${b.equityUsd.toFixed(2)}</span></div>))}</div></div>); }

@@ -1,0 +1,3 @@
+use rusqlite::Connection; use std::sync::Mutex; use crate::portable::PortablePaths;
+pub struct DataEngine { pub conn: Mutex<Connection>, pub paths: PortablePaths }
+impl DataEngine { pub fn open(paths: PortablePaths)->Result<Self, Box<dyn std::error::Error>>{ paths.ensure_dirs()?; let conn=Connection::open(&paths.db_path)?; conn.execute_batch("CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT); CREATE TABLE IF NOT EXISTS orders(id TEXT PRIMARY KEY, symbol TEXT, side TEXT, qty REAL, status TEXT, ts INTEGER); CREATE TABLE IF NOT EXISTS ticks(symbol TEXT, last REAL, ts INTEGER);")?; Ok(Self{conn:Mutex::new(conn),paths}) } }
