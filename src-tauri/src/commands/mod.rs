@@ -1,4 +1,4 @@
-use tauri::{State, AppHandle, Emitter}; use std::sync::Arc; use crate::{AppState, adapters::types::*};
+use tauri::{State, AppHandle, Emitter}; use std::sync::Arc; use crate::AppState;
 #[derive(serde::Serialize)] #[serde(rename_all="camelCase")] pub struct AppInfo{ pub name:String, pub version:String, pub data_dir:String, pub db_path:String, pub portable:bool }
 #[tauri::command] pub fn get_app_info(state: State<'_, Arc<AppState>>)->AppInfo{ AppInfo{name:"DeSSS".into(),version:env!("CARGO_PKG_VERSION").into(),data_dir:state.paths.data_dir.display().to_string(),db_path:state.paths.db_path.display().to_string(),portable:true} }
 #[tauri::command] pub async fn start_mock(state: State<'_, Arc<AppState>>)->Result<(),String>{ state.mock.clone().start_loops(); Ok(()) }
