@@ -1,3 +1,4 @@
+pub mod accounts;
 pub mod adapters;
 pub mod bus;
 pub mod commands;
@@ -18,6 +19,7 @@ pub struct AppState {
     pub bus: EventBus,
     pub mock: Arc<MockAdapter>,
     pub db: data_engine::DataEngine,
+    pub vault: Arc<vault::VaultHandle>,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -29,6 +31,13 @@ pub fn run() {
     let paths = PortablePaths::resolve();
     paths.ensure_dirs().expect("create ./data");
     let db = data_engine::DataEngine::open(paths.clone()).expect("open desss.db");
+    // The vault never aborts startup: if vault.enc is corrupted or vault.key
+    // is missing, the handle keeps the error and account commands surface it,
+    // while the original files stay untouched.
+    let vault = Arc::new(vault::VaultHandle::open(&paths));
+    if let Some(err) = vault.init_error() {
+        eprintln!("[vault] running with vault unavailable: {err}");
+    }
     let bus = EventBus::new(1024);
     let mock = Arc::new(MockAdapter::new(bus.clone()));
     let state = Arc::new(AppState {
@@ -36,6 +45,7 @@ pub fn run() {
         bus,
         mock,
         db,
+        vault,
     });
     let s2 = state.clone();
     tauri::Builder::default()
@@ -50,7 +60,12 @@ pub fn run() {
             commands::get_app_info,
             commands::start_mock,
             commands::stop_mock,
-            commands::get_snapshot
+            commands::get_snapshot,
+            commands::list_accounts,
+            commands::create_account,
+            commands::update_account,
+            commands::delete_account,
+            commands::get_vault_status
         ])
         .run(tauri::generate_context!())
         .expect("error while running DeSSS");

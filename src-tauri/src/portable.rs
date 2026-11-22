@@ -8,6 +8,8 @@ pub struct PortablePaths {
     pub data_dir: PathBuf,
     pub db_path: PathBuf,
     pub log_dir: PathBuf,
+    pub vault_key_path: PathBuf,
+    pub vault_enc_path: PathBuf,
 }
 
 impl PortablePaths {
@@ -20,11 +22,15 @@ impl PortablePaths {
         let data_dir = root.join("data");
         let log_dir = data_dir.join("logs");
         let db_path = data_dir.join("desss.db");
+        let vault_key_path = data_dir.join("vault.key");
+        let vault_enc_path = data_dir.join("vault.enc");
         Self {
             root,
             data_dir,
             db_path,
             log_dir,
+            vault_key_path,
+            vault_enc_path,
         }
     }
 
