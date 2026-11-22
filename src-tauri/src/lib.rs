@@ -9,7 +9,7 @@ pub fn run(){
   let state=Arc::new(AppState{paths,bus,mock,db});
   let s2=state.clone();
   tauri::Builder::default().plugin(tauri_plugin_opener::init()).manage(state)
-    .setup(move |app|{ use tauri::Manager; let handle=app.handle().clone(); commands::spawn_bus_forwarder(handle, s2.clone()); Ok(()) })
+    .setup(move |app|{ let handle=app.handle().clone(); commands::spawn_bus_forwarder(handle, s2.clone()); Ok(()) })
     .invoke_handler(tauri::generate_handler![commands::get_app_info, commands::start_mock, commands::stop_mock, commands::get_snapshot])
     .run(tauri::generate_context!()).expect("error while running DeSSS");
 }
