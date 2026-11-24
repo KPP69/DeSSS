@@ -82,12 +82,32 @@ fn decrypt_bytes(key: &[u8; KEY_LEN], data: &[u8]) -> VaultResult<Vec<u8>> {
         .map_err(|_| VaultError::DecryptFailed)
 }
 
+/// Create the temp file for an atomic write. On Unix the file is created
+/// with mode 0600 in the same open() call, so sensitive material (the vault
+/// key) never exists on disk with looser permissions — no create-then-chmod
+/// window. Windows keeps the default permissions.
+#[cfg(unix)]
+fn create_tmp_file(tmp: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(tmp)
+}
+
+#[cfg(not(unix))]
+fn create_tmp_file(tmp: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::File::create(tmp)
+}
+
 /// Write `bytes` to `path` via a temp file + atomic rename, so a crash
 /// mid-write can never corrupt the previous good file.
 fn atomic_write(path: &Path, bytes: &[u8]) -> VaultResult<()> {
     let tmp = path.with_extension("tmp");
     {
-        let mut f = std::fs::File::create(&tmp)?;
+        let mut f = create_tmp_file(&tmp)?;
         f.write_all(bytes)?;
         f.sync_all()?;
     }
@@ -95,24 +115,8 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> VaultResult<()> {
     Ok(())
 }
 
-#[cfg(unix)]
-fn set_key_permissions(path: &Path) -> VaultResult<()> {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn set_key_permissions(_path: &Path) -> VaultResult<()> {
-    // Windows: keep normal file permissions so the portable build can
-    // create/read/update the key file without special handling.
-    Ok(())
-}
-
 fn write_key_file(path: &Path, key: &[u8; KEY_LEN]) -> VaultResult<()> {
-    atomic_write(path, key)?;
-    set_key_permissions(path)?;
-    Ok(())
+    atomic_write(path, key)
 }
 
 fn read_key_file(path: &Path) -> VaultResult<[u8; KEY_LEN]> {

@@ -20,11 +20,14 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self' customprotocol: asset:; img-src 'self' asset: http://asset.localhost; style-src 'self' 'unsafe-inline'; connect-src 'self' ipc: http://ipc.localhost"
     }
   },
   "bundle": {
     "active": true,
+    "publisher": "KPP69",
+    "copyright": "Copyright (c) 2026 KPP69",
+    "shortDescription": "DeSSS — portable desktop quant trading tool",
     "targets": [
       "nsis",
       "msi",

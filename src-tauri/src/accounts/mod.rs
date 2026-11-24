@@ -13,7 +13,7 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 
 use crate::data_engine::{AccountRow, DataEngine};
-use crate::vault::VaultStore;
+use crate::vault::{VaultError, VaultStore};
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -190,6 +190,16 @@ fn has_new_credentials(creds: &Map<String, Value>) -> bool {
     })
 }
 
+/// Combine a primary failure with a rollback outcome. A failed rollback is
+/// never swallowed: the caller gets both errors in one message so a
+/// SQLite/vault divergence is visible to the user instead of silent.
+fn with_rollback_error(main_err: String, rollback: Result<(), VaultError>) -> String {
+    match rollback {
+        Ok(()) => main_err,
+        Err(rb) => format!("{main_err} (rollback also failed: {rb})"),
+    }
+}
+
 pub fn list_accounts(db: &DataEngine) -> Result<Vec<AccountView>, String> {
     Ok(db
         .list_accounts()?
@@ -228,8 +238,7 @@ pub fn create_account(
         credential_configured: true,
     };
     if let Err(e) = db.insert_account(&row) {
-        let _ = vault.remove(&id);
-        return Err(e);
+        return Err(with_rollback_error(e, vault.remove(&id).map(|_| ())));
     }
     Ok(AccountView::from(&row))
 }
@@ -270,15 +279,11 @@ pub fn update_account(
             .map_err(|e| format!("failed to store credentials: {e}"))?;
         if let Err(e) = db.update_account_meta(id, &label, &masked, true, now) {
             // Roll the vault back to the previous credentials.
-            match old_creds {
-                Some(old) => {
-                    let _ = vault.set(id, old);
-                }
-                None => {
-                    let _ = vault.remove(id);
-                }
-            }
-            return Err(e);
+            let rollback = match old_creds {
+                Some(old) => vault.set(id, old),
+                None => vault.remove(id).map(|_| ()),
+            };
+            return Err(with_rollback_error(e, rollback));
         }
         let mut view = AccountView::from(&existing);
         view.label = label;
@@ -311,10 +316,11 @@ pub fn delete_account(db: &DataEngine, vault: &VaultStore, id: &str) -> Result<(
         .remove(id)
         .map_err(|e| format!("failed to remove credentials: {e}"))?;
     if let Err(e) = db.delete_account(id) {
-        if let Some(old) = old_creds {
-            let _ = vault.set(id, old);
-        }
-        return Err(e);
+        let rollback = match old_creds {
+            Some(old) => vault.set(id, old),
+            None => Ok(()),
+        };
+        return Err(with_rollback_error(e, rollback));
     }
     Ok(())
 }
@@ -481,5 +487,22 @@ mod tests {
         let key_bytes = std::fs::read(&paths.vault_key_path).unwrap();
         assert_ne!(key_bytes.len(), 0);
         let _ = PathBuf::new();
+    }
+
+    #[test]
+    fn rollback_error_keeps_main_error_when_rollback_succeeds() {
+        let msg = with_rollback_error("db insert failed".to_string(), Ok(()));
+        assert_eq!(msg, "db insert failed");
+    }
+
+    #[test]
+    fn rollback_error_reports_failed_rollback() {
+        let msg = with_rollback_error(
+            "db insert failed".to_string(),
+            Err(VaultError::MissingKeyWithData),
+        );
+        assert!(msg.contains("db insert failed"));
+        assert!(msg.contains("rollback also failed"));
+        assert!(msg.contains("vault.key is missing"));
     }
 }
