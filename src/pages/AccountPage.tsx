@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import AccountModal from "../components/AccountModal";
-import { Badge, Button, ConfirmDialog, DataTable, PageHeader, StatCard, tdCls, trCls } from "../components/ui";
+import { Badge, Button, ConfirmDialog, DataTable, PageHeader, StatCard, tdClsCompact, trCls } from "../components/ui";
 import { getExchange } from "../lib/exchanges";
 import { api } from "../lib/tauri";
 import type { AccountView } from "../lib/types";
@@ -18,6 +18,7 @@ const SYNCABLE = new Set(["hyperliquid", "entropy", "lighter", "lighter_robinhoo
 const STATUS_LABEL: Record<string, string> = {
   connecting: "连接中",
   connected: "已连接",
+  "rest-only": "仅 REST（WS 断线）",
   reconnecting: "重连中",
   error: "连接异常",
   disconnected: "已断开",
@@ -36,7 +37,7 @@ function latencyDot(tone: string): string {
   }
 }
 
-const HEADERS = ["账户名", "交易所", "权益", "可用权益", "盈亏", "操作"];
+const HEADERS = ["账户名", "账户信息", "交易所", "权益 / 可用", "盈亏", "操作"];
 
 export default function AccountPage() {
   const accounts = useAccountStore((s) => s.accounts);
@@ -126,19 +127,22 @@ export default function AccountPage() {
         <StatCard title="总盈亏" value={`$${fmt(mock.pnl)}`} sub="模拟数据 · Mock" />
       </div>
 
-      <DataTable headers={HEADERS} minWidth={760}>
+      <DataTable headers={HEADERS} minWidth={760} compact>
         {/* Built-in mock account row */}
         <tr className={trCls}>
-          <td className={tdCls}>
+          <td className={tdClsCompact}>
             <span className="inline-flex items-center gap-2">
               模拟账户 <Badge tone="mock">Mock</Badge>
             </span>
           </td>
-          <td className={tdCls}>MockAdapter</td>
-          <td className={`${tdCls} num`}>${fmt(mock.totalEquity)}</td>
-          <td className={`${tdCls} num`}>${fmt(mock.available)}</td>
-          <td className={`${tdCls} num`}>${fmt(mock.pnl)}</td>
-          <td className={`${tdCls} text-t3`}>—</td>
+          <td className={`${tdClsCompact} text-t3`}>模拟数据</td>
+          <td className={tdClsCompact}>MockAdapter</td>
+          <td className={`${tdClsCompact} num`}>
+            <div>${fmt(mock.totalEquity)}</div>
+            <div className="text-t3 text-[11px]">可用 ${fmt(mock.available)}</div>
+          </td>
+          <td className={`${tdClsCompact} num`}>${fmt(mock.pnl)}</td>
+          <td className={`${tdClsCompact} text-t3`}>—</td>
         </tr>
         {accounts.map((a) => {
           const lv = live[a.id];
@@ -146,10 +150,10 @@ export default function AccountPage() {
           const tone = lv ? latencyTone(lv.latencyMs, lv.status) : "offline";
           return (
           <tr key={a.id} className={trCls}>
-            <td className={tdCls}>
-              {a.label}
-              <div className="text-[11px] text-t3 num">{a.maskedIdentifier}</div>
-              <div className="mt-0.5 flex items-center gap-1.5 flex-wrap justify-center">
+            <td className={tdClsCompact}>{a.label}</td>
+            <td className={tdClsCompact}>
+              <div className="flex flex-col items-center gap-0.5 leading-tight">
+                <span className="text-[11px] text-t3 num">{a.maskedIdentifier}</span>
                 <Badge tone={a.credentialConfigured ? "configured" : "warn"}>
                   {a.credentialConfigured ? "凭证已配置" : "未配置凭证"}
                 </Badge>
@@ -157,29 +161,32 @@ export default function AccountPage() {
                   <Badge tone={tone}>
                     <span className={`inline-block w-1.5 h-1.5 rounded-full ${latencyDot(tone)}`} />
                     {STATUS_LABEL[lv.status] ?? lv.status}
-                    {lv.latencyMs !== null && lv.status === "connected" ? ` · ${lv.latencyMs}ms` : ""}
+                    {lv.latencyMs !== null && (lv.status === "connected" || lv.status === "rest-only")
+                      ? ` · ${lv.latencyMs}ms`
+                      : ""}
                   </Badge>
                 )}
               </div>
-              {lv?.error && <div className="text-[11px] text-loss mt-0.5">{lv.error}</div>}
+              {lv?.error && <div className="text-[11px] text-loss mt-0.5 leading-tight">{lv.error}</div>}
             </td>
-            <td className={tdCls}>{getExchange(a.exchangeId).name}</td>
+            <td className={tdClsCompact}>{getExchange(a.exchangeId).name}</td>
             {lv ? (
               <>
-                <td className={`${tdCls} num`}>${fmt(lv.equityUsd)} <span className="text-t3 text-[11px]">{lv.currency}</span></td>
-                <td className={`${tdCls} num`}>${fmt(lv.availableUsd)} <span className="text-t3 text-[11px]">{lv.currency}</span></td>
-                <td className={`${tdCls} num ${lv.pnlUsd > 0 ? "text-profit" : lv.pnlUsd < 0 ? "text-loss" : ""}`}>
+                <td className={`${tdClsCompact} num`}>
+                  <div>${fmt(lv.equityUsd)} <span className="text-t3 text-[11px]">{lv.currency}</span></div>
+                  <div className="text-t3 text-[11px]">可用 ${fmt(lv.availableUsd)}</div>
+                </td>
+                <td className={`${tdClsCompact} num ${lv.pnlUsd > 0 ? "text-profit" : lv.pnlUsd < 0 ? "text-loss" : ""}`}>
                   {lv.pnlUsd > 0 ? "+" : ""}${fmt(lv.pnlUsd)}
                 </td>
               </>
             ) : (
               <>
-                <td className={`${tdCls} text-t3`}>{syncable ? "未连接" : "本阶段不支持"}</td>
-                <td className={`${tdCls} text-t3`}>—</td>
-                <td className={`${tdCls} text-t3`}>—</td>
+                <td className={`${tdClsCompact} text-t3`}>{syncable ? "未连接" : "本阶段不支持"}</td>
+                <td className={`${tdClsCompact} text-t3`}>—</td>
               </>
             )}
-            <td className={tdCls}>
+            <td className={tdClsCompact}>
               <div className="flex items-center justify-center gap-2">
                 {syncable && a.credentialConfigured && !lv && (
                   <Button

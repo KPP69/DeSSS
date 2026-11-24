@@ -41,6 +41,13 @@ impl PortablePaths {
     }
 }
 
+/// Exe-adjacent `./data` directory (the folder itself is created by
+/// `PortablePaths::ensure_dirs`; subdirectories such as `webview` are
+/// created on demand by their owners, e.g. WebView2).
+pub fn data_dir() -> PathBuf {
+    PortablePaths::resolve().data_dir
+}
+
 /// Install a panic hook that appends every panic (message, location and
 /// backtrace) to ./data/logs/crash.log next to the exe, so a release build
 /// with the Windows GUI subsystem never dies silently. Call this as the

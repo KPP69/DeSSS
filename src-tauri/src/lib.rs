@@ -56,6 +56,20 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .manage(state)
         .setup(move |app| {
+            // Portable WebView2 cache: the main window is created here (not
+            // from the static `windows` array in tauri.conf.json) so its
+            // user-data directory can be forced to exe-adjacent
+            // ./data/webview, leaving no browser cache on C:.
+            tauri::WebviewWindowBuilder::new(
+                app,
+                "main",
+                tauri::WebviewUrl::App("index.html".into()),
+            )
+            .title("DeSSS")
+            .inner_size(1280.0, 800.0)
+            .min_inner_size(960.0, 640.0)
+            .data_directory(portable::data_dir().join("webview"))
+            .build()?;
             let handle = app.handle().clone();
             commands::spawn_bus_forwarder(handle, s2.clone());
             Ok(())

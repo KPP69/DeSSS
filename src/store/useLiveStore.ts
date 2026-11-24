@@ -30,8 +30,11 @@ export const useLiveStore = create<S>((set) => ({
     set((s) => ({ books: { ...s.books, [`${b.adapterId}:${b.symbol}`]: b } })),
 }));
 
-/** Latency light: green < 200ms, yellow < 1000ms, red otherwise/offline. */
+/** Latency light: green < 200ms, yellow < 1000ms, red otherwise/offline.
+ * "rest-only" (WS down, REST ok) is yellow: the numbers are real, the
+ * live book is not. */
 export function latencyTone(latencyMs: number | null, status: string): "online" | "warn" | "danger" | "offline" {
+  if (status === "rest-only") return "warn";
   if (status !== "connected") return status === "connecting" || status === "reconnecting" ? "warn" : "offline";
   if (latencyMs === null) return "warn";
   if (latencyMs < 200) return "online";

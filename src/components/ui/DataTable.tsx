@@ -12,12 +12,15 @@ export default function DataTable({
   emptyText,
   minWidth = 720,
   children,
+  compact = false,
 }: {
   headers: string[];
   rows?: React.ReactNode[][];
   emptyText?: string;
   minWidth?: number;
   children?: React.ReactNode;
+  /** Compact rows: tighter padding and smaller text (e.g. account list). */
+  compact?: boolean;
 }) {
   const isEmpty = !children && (!rows || rows.length === 0);
   return (
@@ -28,7 +31,9 @@ export default function DataTable({
             {headers.map((h) => (
               <th
                 key={h}
-                className="text-center text-xs font-medium text-t2 px-4 py-3 whitespace-nowrap"
+                className={`text-center font-medium text-t2 whitespace-nowrap ${
+                  compact ? "px-3 py-1.5 text-[11px]" : "px-4 py-3 text-xs"
+                }`}
               >
                 {h}
               </th>
@@ -40,7 +45,10 @@ export default function DataTable({
           {rows?.map((cells, i) => (
             <tr key={i} className="border-t border-line hover:bg-overlay/50 transition-colors">
               {cells.map((cell, j) => (
-                <td key={j} className="text-center px-4 py-3 text-sm text-t1">
+                <td
+                  key={j}
+                  className={`text-center text-t1 ${compact ? "px-3 py-1.5 text-[13px]" : "px-4 py-3 text-sm"}`}
+                >
                   {cell}
                 </td>
               ))}
@@ -65,3 +73,5 @@ export default function DataTable({
 /** Shared centered cell classes for hand-built rows inside DataTable. */
 export const tdCls = "text-center px-4 py-3 text-sm text-t1";
 export const trCls = "border-t border-line hover:bg-overlay/50 transition-colors";
+/** Compact variant: tighter padding and smaller text for dense lists. */
+export const tdClsCompact = "text-center px-3 py-1.5 text-[13px] text-t1";

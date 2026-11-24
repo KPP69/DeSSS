@@ -1,14 +1,14 @@
 //! Pure in-memory order-book state machine shared by the real adapters.
 //!
-//! No I/O, no timers — every transition is a pure function, so the offset
-//! and gap rules are covered by unit tests here instead of against a live
-//! exchange.
+//! No I/O, no timers — every transition is a pure function, so the
+//! continuity rules are covered by unit tests here instead of against a
+//! live exchange.
 //!
 //! - Hyperliquid `l2Book` frames carry the full book: use `apply_snapshot`.
 //! - Lighter `order_book` frames are incremental: use `apply_delta`, which
-//!   requires the frame `offset` to be strictly greater than the previous
-//!   one. A stale or repeated offset is a gap: the caller must clear the
-//!   book and resubscribe for a fresh snapshot.
+//!   validates continuity with `begin_nonce` only. Lighter's `offset` is
+//!   explicitly NOT a continuity counter (the docs say it is server-scoped
+//!   and may jump), so it is never used as a gap signal.
 
 use crate::adapters::types::{OrderBook, PriceLevel};
 
@@ -72,9 +72,9 @@ impl Side {
 pub struct BookState {
     bids: Side,
     asks: Side,
-    /// Offset of the last accepted incremental frame (Lighter). None until
+    /// Nonce of the last accepted frame (Lighter continuity). None until
     /// the first snapshot arrives.
-    last_offset: Option<u64>,
+    last_nonce: Option<u64>,
 }
 
 impl BookState {
@@ -82,14 +82,14 @@ impl BookState {
         Self {
             bids: Side::new(true),
             asks: Side::new(false),
-            last_offset: None,
+            last_nonce: None,
         }
     }
 
     pub fn clear(&mut self) {
         self.bids.levels.clear();
         self.asks.levels.clear();
-        self.last_offset = None;
+        self.last_nonce = None;
     }
 
     pub fn is_empty(&self) -> bool {
@@ -100,43 +100,47 @@ impl BookState {
     pub fn apply_snapshot(&mut self, bids: &[(f64, f64)], asks: &[(f64, f64)]) {
         self.bids.replace(bids);
         self.asks.replace(asks);
-        self.last_offset = None;
+        self.last_nonce = None;
     }
 
-    /// Incremental frame (Lighter order_book). The frame `offset` must be
-    /// strictly greater than the previous one; otherwise the stream has a
-    /// gap and the caller must clear + resubscribe.
+    /// Incremental frame (Lighter order_book). Continuity is checked with
+    /// `begin_nonce` only: it must equal the previous frame's `nonce`.
+    /// A mismatch means the stream has a gap and the caller must clear +
+    /// resubscribe for a fresh snapshot.
     pub fn apply_delta(
         &mut self,
-        offset: u64,
         bids: &[(f64, f64)],
         asks: &[(f64, f64)],
+        begin_nonce: Option<u64>,
+        nonce: Option<u64>,
     ) -> Result<(), BookGap> {
-        match self.last_offset {
-            Some(last) if offset <= last => Err(BookGap {
-                expected_gt: last,
-                got: offset,
-            }),
-            _ => {
-                self.bids.apply(bids);
-                self.asks.apply(asks);
-                self.last_offset = Some(offset);
-                Ok(())
+        if let (Some(begin), Some(prev)) = (begin_nonce, self.last_nonce) {
+            if begin != prev {
+                return Err(BookGap {
+                    expected: prev,
+                    got: begin,
+                });
             }
         }
+        self.bids.apply(bids);
+        self.asks.apply(asks);
+        if nonce.is_some() {
+            self.last_nonce = nonce;
+        }
+        Ok(())
     }
 
-    /// Snapshot frame with an offset (Lighter resync): replace both sides
-    /// and record the offset as the new baseline.
-    pub fn apply_snapshot_with_offset(
+    /// Snapshot frame with a nonce (Lighter resync): replace both sides
+    /// and record the nonce as the new baseline.
+    pub fn apply_snapshot_with_nonce(
         &mut self,
-        offset: u64,
+        nonce: Option<u64>,
         bids: &[(f64, f64)],
         asks: &[(f64, f64)],
     ) {
         self.bids.replace(bids);
         self.asks.replace(asks);
-        self.last_offset = Some(offset);
+        self.last_nonce = nonce;
     }
 
     pub fn to_book(&self, adapter_id: &str, symbol: &str, depth: usize, ts: i64) -> OrderBook {
@@ -150,10 +154,11 @@ impl BookState {
     }
 }
 
-/// Incremental offset went backwards or repeated: the local book is stale.
+/// Incremental `begin_nonce` does not match the previous frame's nonce:
+/// the local book is stale.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BookGap {
-    pub expected_gt: u64,
+    pub expected: u64,
     pub got: u64,
 }
 
@@ -161,8 +166,8 @@ impl std::fmt::Display for BookGap {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "order book offset gap: expected offset > {}, got {}",
-            self.expected_gt, self.got
+            "order book nonce gap: expected begin_nonce == {}, got {}",
+            self.expected, self.got
         )
     }
 }
@@ -189,9 +194,14 @@ mod tests {
     #[test]
     fn delta_upserts_and_removes_zero_qty() {
         let mut b = state();
-        b.apply_snapshot_with_offset(10, &[(100.0, 1.0)], &[(101.0, 1.0)]);
-        b.apply_delta(11, &[(100.0, 0.0), (99.0, 5.0)], &[(101.0, 2.0)])
-            .expect("delta");
+        b.apply_snapshot_with_nonce(Some(10), &[(100.0, 1.0)], &[(101.0, 1.0)]);
+        b.apply_delta(
+            &[(100.0, 0.0), (99.0, 5.0)],
+            &[(101.0, 2.0)],
+            Some(10),
+            Some(12),
+        )
+        .expect("delta");
         let book = b.to_book("li", "BTC-USDC", 10, 0);
         assert_eq!(book.bids.len(), 1);
         assert_eq!(book.bids[0].0, 99.0);
@@ -199,20 +209,24 @@ mod tests {
     }
 
     #[test]
-    fn delta_rejects_stale_or_equal_offset() {
+    fn delta_rejects_nonce_gap() {
         let mut b = state();
-        b.apply_snapshot_with_offset(10, &[], &[]);
-        assert!(b.apply_delta(10, &[], &[]).is_err());
-        assert!(b.apply_delta(9, &[], &[]).is_err());
-        assert!(b.apply_delta(11, &[], &[]).is_ok());
+        b.apply_snapshot_with_nonce(Some(10), &[], &[]);
+        assert!(b.apply_delta(&[], &[], Some(9), Some(11)).is_err());
+        assert!(b.apply_delta(&[], &[], Some(10), Some(11)).is_ok());
+        // After the accepted frame the baseline is its nonce (11).
+        assert!(b.apply_delta(&[], &[], Some(10), Some(12)).is_err());
+        assert!(b.apply_delta(&[], &[], Some(11), Some(12)).is_ok());
     }
 
     #[test]
-    fn clear_resets_offset_baseline() {
+    fn clear_resets_nonce_baseline() {
         let mut b = state();
-        b.apply_snapshot_with_offset(10, &[(100.0, 1.0)], &[]);
+        b.apply_snapshot_with_nonce(Some(10), &[(100.0, 1.0)], &[]);
         b.clear();
         assert!(b.is_empty());
-        assert!(b.apply_delta(5, &[(100.0, 1.0)], &[]).is_ok());
+        assert!(b
+            .apply_delta(&[(100.0, 1.0)], &[], Some(5), Some(6))
+            .is_ok());
     }
 }
