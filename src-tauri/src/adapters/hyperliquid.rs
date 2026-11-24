@@ -187,7 +187,7 @@ impl HyperliquidAdapter {
             dex: dex.map(|d| d.to_string()),
             address,
             account_id,
-            http: super::new_http_client(),
+            http: crate::net::new_http_client(),
             bus,
             live,
             running: Arc::new(AtomicBool::new(false)),
@@ -553,7 +553,8 @@ impl HyperliquidAdapter {
             self.poll_account().await;
             self.resolve_symbols().await?;
         }
-        let (mut ws, _) = super::proxy::connect_ws(HL_WS_URL, WS_CONNECT_TIMEOUT).await?;
+        let (mut ws, _) =
+            crate::net::ws::connect_ws(HL_WS_URL, WS_CONNECT_TIMEOUT, &self.bus).await?;
         for sym in self.symbols() {
             let sub = serde_json::json!({
                 "method": "subscribe",
@@ -589,8 +590,8 @@ impl HyperliquidAdapter {
                     match msg {
                         Some(Ok(Message::Text(t))) => {
                             let text: &str = t.as_ref();
-                            if let Ok(v) = serde_json::from_str::<Value>(text) {
-                                match v["channel"].as_str() {
+                            match serde_json::from_str::<Value>(text) {
+                                Ok(v) => match v["channel"].as_str() {
                                     Some("l2Book") => {
                                         let coin = v["data"]["coin"].as_str().unwrap_or("").to_string();
                                         if !coin.is_empty() {
@@ -604,7 +605,14 @@ impl HyperliquidAdapter {
                                         }
                                     }
                                     _ => {}
-                                }
+                                },
+                                Err(e) => self.log(
+                                    "error",
+                                    format!(
+                                        "ws frame json parse failed: {e} (first 200 chars: {})",
+                                        text.chars().take(200).collect::<String>().as_str()
+                                    ),
+                                ),
                             }
                         }
                         Some(Ok(Message::Close(_))) => return Err("hyperliquid ws closed".to_string()),

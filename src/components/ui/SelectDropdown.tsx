@@ -107,7 +107,7 @@ export default function SelectDropdown({
         onKeyDown={onTriggerKey}
         aria-haspopup="listbox"
         aria-expanded={open}
-        className={`w-full text-left px-3 py-2 text-sm rounded border transition-colors focus:outline-none focus:ring-2 focus:ring-primary/50 ${
+        className={`w-full text-left px-3 py-2 rounded border transition-colors focus:outline-none focus:ring-2 focus:ring-primary/50 ${
           disabled
             ? "bg-panel/50 border-line text-t3 cursor-not-allowed"
             : "bg-panel border-line text-t1 hover:border-t3"
@@ -136,9 +136,9 @@ export default function SelectDropdown({
                   onChange(o.value);
                   close();
                 }}
-                className={`block w-full text-left px-3 py-2 text-sm ${
-                  i === highlight ? "bg-primary/15" : ""
-                } ${o.value === value ? "text-primary" : "text-t1"}`}
+                className={`block w-full text-left px-3 py-2 ${
+                  i === highlight ? "bg-white/5" : ""
+                } ${o.value === value ? "text-t1 font-medium" : "text-t1"}`}
               >
                 {o.label}
               </button>

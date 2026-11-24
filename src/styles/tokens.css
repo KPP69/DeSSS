@@ -1,20 +1,22 @@
 /**
- * DeSSS design tokens — single source of truth for the dark quant-terminal
- * theme. Tailwind semantic colors in tailwind.config.js mirror these values;
- * components should use the Tailwind names (bg-app, bg-panel, bg-overlay,
- * border-line, text-t1/t2/t3, bg-primary, text-profit/loss/warn).
+ * DeSSS design tokens — single source of truth for the theme.
+ * 90/10 rule: 90% neutral gray-white, 10% semantic color (PnL numbers,
+ * 6px status dots, error badge only). Tailwind semantic colors in
+ * tailwind.config.js mirror these values; components use the Tailwind
+ * names (bg-app, bg-panel, bg-overlay, border-line, text-t1/t2/t3,
+ * bg-primary, text-profit/loss/warn).
  */
 :root {
-  --ds-bg: #0b0e14;
-  --ds-panel: #121722;
-  --ds-overlay: #181f2e;
-  --ds-border: #1e2636;
-  --ds-primary: #3b82f6;
+  --ds-bg: #0d1117;
+  --ds-panel: #131720;
+  --ds-overlay: #171d29;
+  --ds-border: rgba(255, 255, 255, 0.06);
+  --ds-primary: #3d6fb4;
   --ds-profit: #10b981;
   --ds-loss: #ef4444;
   --ds-warn: #f59e0b;
-  --ds-text-1: #f1f5f9;
-  --ds-text-2: #94a3b8;
-  --ds-text-3: #64748b;
+  --ds-text-1: #e6edf3;
+  --ds-text-2: #8b949e;
+  --ds-text-3: #5c6574;
   --ds-radius: 0.5rem;
 }

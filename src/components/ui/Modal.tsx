@@ -40,10 +40,10 @@ export default function Modal({
         aria-label={title}
       >
         <div className="flex items-center justify-between px-6 py-4 shrink-0">
-          <h2 className="text-lg font-semibold text-t1">{title}</h2>
+          <h2 className="text-[15px] font-semibold text-t1">{title}</h2>
           <button
             onClick={onClose}
-            className="text-t2 hover:text-t1 text-xl leading-none px-1"
+            className="text-t2 hover:text-t1 text-base leading-none px-1"
             aria-label="关闭"
           >
             ×

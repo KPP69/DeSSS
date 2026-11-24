@@ -8,17 +8,19 @@ const p = (n: number) => String(n).padStart(2, "0");
 return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
-function levelTone(level: string): string {
-if (level === "error") return "text-loss";
-if (level === "warn") return "text-warn";
-return "text-t3";
+/** 6px status dot by level — the only color in a log row. */
+function levelDot(level: string): string {
+if (level === "error") return "bg-loss";
+if (level === "warn") return "bg-warn";
+return "bg-t3";
 }
 
 function Row({ log}: { log: LogEntry}) {
 return (
 <div className="flex items-baseline gap-2 px-3 py-1 text-[12px] leading-snug border-b border-line/50">
 <span className="num text-t3 shrink-0">{fmtTime(log.ts)}</span>
-<span className={`shrink-0 w-10 font-medium ${levelTone(log.level)}`}>
+<span className="shrink-0 w-10 flex items-center gap-1.5 text-t2">
+<span className={`inline-block w-1.5 h-1.5 rounded-full ${levelDot(log.level)}`} />
 {log.level === "error"? "错误": log.level === "warn"? "警告": "信息"}
 </span>
 <span className="shrink-0 text-t2">{log.source}</span>
@@ -58,7 +60,7 @@ style={{ height: 300}}
 aria-hidden={!open}
 >
 <div className="shrink-0 flex items-center gap-2 px-3 py-2 border-b border-line">
-<span className="text-sm font-medium text-t1">控制台</span>
+<span className="text-[13px] font-medium text-t1">控制台</span>
 <div className="flex items-center gap-1 ml-2">
 <button
 onClick={() => setFilter("all")}

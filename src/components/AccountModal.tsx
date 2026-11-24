@@ -108,7 +108,7 @@ export default function AccountModal({ open, editing, onClose }: Props) {
   }
 
   const inputCls =
-    "w-full bg-panel border border-line rounded px-3 py-2 text-sm text-t1 outline-none focus:border-primary";
+    "w-full bg-panel border border-line rounded px-3 py-2 text-t1 outline-none focus:border-primary";
   const labelCls = "block text-xs text-t2 mb-1";
 
   return (
@@ -162,7 +162,7 @@ export default function AccountModal({ open, editing, onClose }: Props) {
               </p>
               <p>
                 凭证状态：
-                <span className={editing.credentialConfigured ? "text-profit" : "text-warn"}>
+                <span className="text-t2">
                   {editing.credentialConfigured ? "已配置" : "未配置"}
                 </span>
               </p>
@@ -185,9 +185,9 @@ export default function AccountModal({ open, editing, onClose }: Props) {
                       setMode(m.id);
                       setValues({});
                     }}
-                    className={`px-3 py-1.5 text-sm rounded border ${
+                    className={`px-3 py-1.5 rounded border ${
                       mode === m.id
-                        ? "border-primary text-primary bg-panel"
+                        ? "border-line text-t1 bg-overlay"
                         : "border-line text-t2 bg-panel/50"
                     }`}
                   >
@@ -201,7 +201,7 @@ export default function AccountModal({ open, editing, onClose }: Props) {
             <div key={f.key}>
               <label className={labelCls}>
                 {f.label}
-                {f.required && <span className="text-loss"> *</span>}
+                {f.required && <span className="text-t3"> *</span>}
               </label>
               <input
                 className={inputCls}
@@ -211,7 +211,7 @@ export default function AccountModal({ open, editing, onClose }: Props) {
                 onChange={(e) => setValues((v) => ({ ...v, [f.key]: e.target.value }))}
                 placeholder={isEdit ? "留空保留原凭证" : undefined}
               />
-              {f.hint && <p className="text-xs text-warn/80 mt-1">{f.hint}</p>}
+              {f.hint && <p className="text-xs text-t3 mt-1">{f.hint}</p>}
             </div>
           ))}
           <p className="text-xs text-t3">
@@ -221,7 +221,7 @@ export default function AccountModal({ open, editing, onClose }: Props) {
       </div>
 
       {formError && (
-        <div className="mt-4 text-sm text-loss bg-loss/10 border border-loss/30 rounded px-3 py-2">
+        <div className="mt-4 text-loss bg-panel border border-line rounded px-3 py-2">
           {formError}
         </div>
       )}

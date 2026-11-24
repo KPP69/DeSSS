@@ -43,29 +43,47 @@ pub async fn get_snapshot(state: State<'_, Arc<AppState>>) -> Result<serde_json:
 pub fn spawn_bus_forwarder(handle: AppHandle, state: Arc<AppState>) {
     tauri::async_runtime::spawn(async move {
         let mut rx = state.bus.subscribe();
-        while let Ok(ev) = rx.recv().await {
-            match ev {
-                crate::bus::AppEvent::Tick(t) => {
-                    let _ = handle.emit("market://tick", t);
-                }
-                crate::bus::AppEvent::Balance(b) => {
-                    let _ = handle.emit("account://balance", b);
-                }
-                crate::bus::AppEvent::Book(b) => {
-                    let _ = handle.emit("market://book", b);
-                }
-                crate::bus::AppEvent::AccountLive(a) => {
-                    let _ = handle.emit("account://live", a);
-                }
-                crate::bus::AppEvent::Log {
-                    level,
-                    source,
-                    message,
-                    ts,
-                } => {
-                    let _=handle.emit("app://log", serde_json::json!({"level":level,"source":source,"message":message,"ts":ts}));
-                }
-                _ => {}
+        // Announce the console pipeline itself, after subscribing: if
+        // this line shows up in the drawer, the whole log path works.
+        // (A log published before subscribe would be lost.)
+        state.bus.log(
+            "info",
+            "DeSSS",
+            format!(
+                "runtime log connected · proxy: {}",
+                crate::net::proxy::resolve_proxy().unwrap_or_else(|| "direct".to_string())
+            ),
+        );
+        loop {
+            match rx.recv().await {
+                Ok(ev) => match ev {
+                    crate::bus::AppEvent::Tick(t) => {
+                        let _ = handle.emit("market://tick", t);
+                    }
+                    crate::bus::AppEvent::Balance(b) => {
+                        let _ = handle.emit("account://balance", b);
+                    }
+                    crate::bus::AppEvent::Book(b) => {
+                        let _ = handle.emit("market://book", b);
+                    }
+                    crate::bus::AppEvent::AccountLive(a) => {
+                        let _ = handle.emit("account://live", a);
+                    }
+                    crate::bus::AppEvent::Log {
+                        level,
+                        source,
+                        message,
+                        ts,
+                    } => {
+                        let _=handle.emit("app://log", serde_json::json!({"level":level,"source":source,"message":message,"ts":ts}));
+                    }
+                    _ => {}
+                },
+                // A burst (book flood) must lag the forwarder, never kill
+                // it: dropping the loop here used to silence the console
+                // while live data still looked fine (snapshot restore).
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
         }
     });
@@ -73,14 +91,15 @@ pub fn spawn_bus_forwarder(handle: AppHandle, state: Arc<AppState>) {
 
 // ---- Runtime snapshot + proxy settings ----
 
-/// Latest in-memory books + account states, for the frontend to show
-/// numbers immediately after a refresh instead of waiting for the next
-/// WS frame / REST poll.
+/// Latest in-memory books + account states + recent logs, for the
+/// frontend to show numbers immediately after a refresh instead of
+/// waiting for the next WS frame / REST poll.
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeSnapshot {
     pub books: Vec<crate::adapters::types::OrderBook>,
     pub live: Vec<crate::adapters::types::AccountLive>,
+    pub logs: Vec<crate::bus::LogLine>,
 }
 
 #[tauri::command]
@@ -88,6 +107,7 @@ pub fn get_runtime_snapshot(state: State<'_, Arc<AppState>>) -> RuntimeSnapshot 
     RuntimeSnapshot {
         books: state.bus.snapshot_books(),
         live: state.sync.live_states(),
+        logs: state.bus.snapshot_logs(),
     }
 }
 
@@ -102,10 +122,10 @@ pub struct ProxyState {
 
 #[tauri::command]
 pub fn get_proxy() -> ProxyState {
-    let custom = crate::adapters::proxy::read_proxy_file_pub();
+    let custom = crate::net::proxy::read_proxy_file_pub();
     ProxyState {
         custom,
-        effective: crate::adapters::proxy::resolve_proxy(),
+        effective: crate::net::proxy::resolve_proxy(),
     }
 }
 
@@ -115,14 +135,14 @@ pub fn get_proxy() -> ProxyState {
 #[tauri::command]
 pub fn set_proxy(url: String) -> Result<ProxyState, String> {
     let trimmed = url.trim();
-    crate::adapters::proxy::write_proxy_file(if trimmed.is_empty() {
+    crate::net::proxy::write_proxy_file(if trimmed.is_empty() {
         None
     } else {
         Some(trimmed)
     })?;
     Ok(ProxyState {
-        custom: crate::adapters::proxy::read_proxy_file_pub(),
-        effective: crate::adapters::proxy::resolve_proxy(),
+        custom: crate::net::proxy::read_proxy_file_pub(),
+        effective: crate::net::proxy::resolve_proxy(),
     })
 }
 

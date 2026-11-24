@@ -1,11 +1,12 @@
-import React, { useEffect, useState } from "react";
-import Sidebar from "./components/Sidebar";
-import ConsoleDrawer from "./components/ConsoleDrawer";
+import React, { useEffect } from "react";
+import AppShell from "./components/AppShell";
+import { Button } from "./components/ui";
 import { useAppStore, type PageKey } from "./store/useAppStore";
 import { useMarketStore } from "./store/useMarketStore";
 import { api, onTick, onBalance, onBook, onAccountLive, onLog } from "./lib/tauri";
 import { useLiveStore } from "./store/useLiveStore";
-import { useConsoleStore, errorCount } from "./store/useConsoleStore";
+import { useConsoleStore } from "./store/useConsoleStore";
+import { useAccountUiStore } from "./store/useAccountUiStore";
 import AccountPage from "./pages/AccountPage";
 import StrategyPage from "./pages/StrategyPage";
 import TradingPage from "./pages/TradingPage";
@@ -24,17 +25,16 @@ const PAGE_TITLES: Record<PageKey, string> = {
 
 const PAGE_KEYS: PageKey[] = ["account", "strategy", "trading", "data", "risk", "system"];
 
-/** Fixed three-zone layout: title bar (top) / scrollable page (middle) /
- * console drawer (bottom, slides up). The current page is synced to the
- * URL hash so a refresh stays on the same page. */
+/** Shell + wiring. The current page is synced to the URL hash so a
+ * refresh stays on the same page, and the runtime snapshot restores
+ * books, account states and recent logs instantly (0 delay). */
 export default function App() {
   const page = useAppStore((s) => s.page);
   const setPage = useAppStore((s) => s.setPage);
   const setTick = useMarketStore((s) => s.setTick);
   const setBalance = useMarketStore((s) => s.setBalance);
   const setConnected = useMarketStore((s) => s.setConnected);
-  const consoleLogs = useConsoleStore((s) => s.logs);
-  const [consoleOpen, setConsoleOpen] = useState(false);
+  const openAdd = useAccountUiStore((s) => s.openAdd);
 
   // Current page <-> URL hash (#/account, #/trading, ...).
   useEffect(() => {
@@ -60,14 +60,15 @@ export default function App() {
     onAccountLive((a) => useLiveStore.getState().setLive(a)).then((u) => (u4 = u));
     onLog((l) => useConsoleStore.getState().addLog(l)).then((u) => (u5 = u));
     api.startMock().then(() => setConnected(true)).catch(() => {});
-    // Instant numbers after a refresh: latest books + account states the
-    // backend already holds in memory, instead of waiting for the next
-    // WS frame / REST poll.
+    // Instant numbers after a refresh: latest books + account states +
+    // recent console logs the backend already holds in memory, instead
+    // of waiting for the next WS frame / REST poll.
     api
       .getRuntimeSnapshot()
       .then((snap) => {
         snap.live.forEach((a) => useLiveStore.getState().setLive(a));
         snap.books.forEach((b) => useLiveStore.getState().setBook(b));
+        useConsoleStore.getState().addLogs(snap.logs ?? []);
       })
       .catch(() => {});
     return () => {
@@ -79,36 +80,17 @@ export default function App() {
     };
   }, []);
 
-  const errors = errorCount(consoleLogs);
+  const toolbar =
+    page === "account" ? <Button onClick={openAdd}>添加账户</Button> : undefined;
 
   return (
-    <div className="flex h-screen bg-app overflow-hidden">
-      <Sidebar />
-      <div className="flex-1 min-w-0 flex flex-col">
-        <header className="shrink-0 h-12 flex items-center justify-between px-4 border-b border-line bg-panel">
-          <h1 className="text-base font-semibold text-t1">{PAGE_TITLES[page]}</h1>
-          <button
-            onClick={() => setConsoleOpen((o) => !o)}
-            className="relative px-3 py-1.5 rounded text-sm text-t1 bg-overlay hover:bg-line transition-colors"
-          >
-            控制台
-            {errors > 0 && (
-              <span className="absolute -top-1.5 -right-1.5 min-w-5 h-5 px-1 rounded-full bg-loss text-white text-[11px] num flex items-center justify-center">
-                {errors}
-              </span>
-            )}
-          </button>
-        </header>
-        <main className="flex-1 min-w-0 overflow-y-auto p-6">
-          {page === "account" && <AccountPage />}
-          {page === "strategy" && <StrategyPage />}
-          {page === "trading" && <TradingPage />}
-          {page === "data" && <DataPage />}
-          {page === "risk" && <RiskPage />}
-          {page === "system" && <SystemPage />}
-        </main>
-      </div>
-      <ConsoleDrawer open={consoleOpen} onClose={() => setConsoleOpen(false)} />
-    </div>
+    <AppShell title={PAGE_TITLES[page]} toolbar={toolbar}>
+      {page === "account" && <AccountPage />}
+      {page === "strategy" && <StrategyPage />}
+      {page === "trading" && <TradingPage />}
+      {page === "data" && <DataPage />}
+      {page === "risk" && <RiskPage />}
+      {page === "system" && <SystemPage />}
+    </AppShell>
   );
 }

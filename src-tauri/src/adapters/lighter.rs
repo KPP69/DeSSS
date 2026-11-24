@@ -204,7 +204,7 @@ impl LighterAdapter {
             network,
             account_index,
             account_id,
-            http: super::new_http_client_with_timeout(20),
+            http: crate::net::new_http_client_with_timeout(20),
             bus,
             live,
             running: Arc::new(AtomicBool::new(false)),
@@ -547,7 +547,8 @@ impl LighterAdapter {
         }
 
         let (mut ws, _) =
-            super::proxy::connect_ws(self.network.ws_url(), WS_CONNECT_TIMEOUT).await?;
+            crate::net::ws::connect_ws(self.network.ws_url(), WS_CONNECT_TIMEOUT, &self.bus)
+                .await?;
 
         let market_ids: Vec<u64> = self.market_ids.lock().unwrap().values().copied().collect();
         for mid in &market_ids {
@@ -585,22 +586,31 @@ impl LighterAdapter {
                     match msg {
                         Some(Ok(Message::Text(t))) => {
                             let text: &str = t.as_ref();
-                            if let Ok(v) = serde_json::from_str::<Value>(text) {
-                                if v["type"].as_str() == Some("ping") {
-                                    let pong = serde_json::json!({"type": "pong"});
-                                    let _ = ws.send(Message::Text(pong.to_string().into())).await;
-                                } else if v["type"].as_str() == Some("pong") {
-                                    if let Some(sent) = ping_sent.take() {
-                                        *self.last_rtt.lock().unwrap() = Some(sent.elapsed());
-                                        self.publish_live();
+                            match serde_json::from_str::<Value>(text) {
+                                Ok(v) => {
+                                    if v["type"].as_str() == Some("ping") {
+                                        let pong = serde_json::json!({"type": "pong"});
+                                        let _ = ws.send(Message::Text(pong.to_string().into())).await;
+                                    } else if v["type"].as_str() == Some("pong") {
+                                        if let Some(sent) = ping_sent.take() {
+                                            *self.last_rtt.lock().unwrap() = Some(sent.elapsed());
+                                            self.publish_live();
+                                        }
+                                    } else if v["type"].as_str().is_some_and(|t| t.ends_with("/order_book")) {
+                                        if let Err(e) = self.handle_book_frame(&v) {
+                                            return Err(e);
+                                        }
+                                    } else if v.get("error").is_some() {
+                                        self.log("error", format!("ws error message: {v}"));
                                     }
-                                } else if v["type"].as_str().is_some_and(|t| t.ends_with("/order_book")) {
-                                    if let Err(e) = self.handle_book_frame(&v) {
-                                        return Err(e);
-                                    }
-                                } else if v.get("error").is_some() {
-                                    self.log("error", format!("ws error message: {v}"));
                                 }
+                                Err(e) => self.log(
+                                    "error",
+                                    format!(
+                                        "ws frame json parse failed: {e} (first 200 chars: {})",
+                                        text.chars().take(200).collect::<String>().as_str()
+                                    ),
+                                ),
                             }
                         }
                         Some(Ok(Message::Close(_))) => return Err("lighter ws closed".to_string()),

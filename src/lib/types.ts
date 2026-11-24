@@ -34,9 +34,9 @@ export type LogEntry = {
   ts: number;
 };
 
-/** Latest in-memory books + account states, fetched once on load so a
- * refresh shows numbers instantly. */
-export type RuntimeSnapshot = { books: OrderBook[]; live: AccountLive[] };
+/** Latest in-memory books + account states + recent logs, fetched once
+ * on load so a refresh shows numbers instantly. */
+export type RuntimeSnapshot = { books: OrderBook[]; live: AccountLive[]; logs: LogEntry[] };
 
 /** Proxy configuration: the user-set value plus what is actually in effect. */
 export type ProxyState = { custom: string | null; effective: string | null };

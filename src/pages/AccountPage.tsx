@@ -3,8 +3,9 @@ import AccountModal from "../components/AccountModal";
 import { Badge, Button, ConfirmDialog, DataTable, StatCard, tdClsCompact, trCls } from "../components/ui";
 import { getExchange } from "../lib/exchanges";
 import { api } from "../lib/tauri";
-import type { AccountView } from "../lib/types";
 import { useAccountStore } from "../store/useAccountStore";
+import type { AccountView } from "../lib/types";
+import { useAccountUiStore } from "../store/useAccountUiStore";
 import { useLiveStore, latencyTone } from "../store/useLiveStore";
 import { useMarketStore } from "../store/useMarketStore";
 
@@ -51,8 +52,10 @@ export default function AccountPage() {
   const setLive = useLiveStore((s) => s.setLive);
   const removeLive = useLiveStore((s) => s.removeLive);
 
-  const [modalOpen, setModalOpen] = useState(false);
-  const [editing, setEditing] = useState<AccountView | null>(null);
+  const modalOpen = useAccountUiStore((s) => s.modalOpen);
+  const editing = useAccountUiStore((s) => s.editing);
+  const openEdit = useAccountUiStore((s) => s.openEdit);
+  const closeModal = useAccountUiStore((s) => s.close);
   const [pendingDelete, setPendingDelete] = useState<AccountView | null>(null);
   const connectTried = useRef<Set<string>>(new Set());
 
@@ -93,27 +96,14 @@ export default function AccountPage() {
 
   return (
     <div>
-      {/* Fixed secondary toolbar: sticks under the title bar, holds the
-          page's main action. */}
-      <div className="sticky top-0 z-10 -mx-6 -mt-6 px-6 py-2 bg-app/95 border-b border-line flex items-center">
-        <Button
-          onClick={() => {
-            setEditing(null);
-            setModalOpen(true);
-          }}
-        >
-          添加账户
-        </Button>
-      </div>
-
       {vaultError && (
-        <div className="mb-4 text-sm text-loss bg-loss/10 border border-loss/30 rounded px-4 py-3">
+        <div className="mb-4 text-loss bg-panel border border-line rounded px-4 py-3">
           Vault 初始化失败，账户凭证功能不可用：{vaultError}
-          <span className="text-loss/70">（原有 vault 文件未被修改，请检查 data 目录下的 vault.key / vault.enc）</span>
+          <span className="text-t3">（原有 vault 文件未被修改，请检查 data 目录下的 vault.key / vault.enc）</span>
         </div>
       )}
       {error && !vaultError && (
-        <div className="mb-4 text-sm text-loss bg-loss/10 border border-loss/30 rounded px-4 py-3">
+        <div className="mb-4 text-loss bg-panel border border-line rounded px-4 py-3">
           {error}
         </div>
       )}
@@ -141,7 +131,7 @@ export default function AccountPage() {
           <td className={tdClsCompact}>MockAdapter</td>
           <td className={`${tdClsCompact} num`}>
             <div>${fmt(mock.totalEquity)}</div>
-            <div className="text-t3 text-[11px]">可用 ${fmt(mock.available)}</div>
+            <div className="text-t3 text-xs">可用 ${fmt(mock.available)}</div>
           </td>
           <td className={`${tdClsCompact} num`}>${fmt(mock.pnl)}</td>
           <td className={`${tdClsCompact} text-t3`}>—</td>
@@ -157,7 +147,7 @@ export default function AccountPage() {
             </td>
             <td className={tdClsCompact}>
               <div className="flex flex-col items-center gap-0.5 leading-tight w-full">
-                <span className="block w-full truncate text-[11px] text-t3 num">{a.maskedIdentifier}</span>
+                <span className="block w-full truncate text-xs text-t3 num">{a.maskedIdentifier}</span>
                 <Badge tone={a.credentialConfigured ? "configured" : "warn"}>
                   {a.credentialConfigured ? "凭证已配置" : "未配置凭证"}
                 </Badge>
@@ -176,8 +166,8 @@ export default function AccountPage() {
             {lv ? (
               <>
                 <td className={`${tdClsCompact} num`}>
-                  <div>${fmt(lv.equityUsd)} <span className="text-t3 text-[11px]">{lv.currency}</span></div>
-                  <div className="text-t3 text-[11px]">可用 ${fmt(lv.availableUsd)}</div>
+                  <div>${fmt(lv.equityUsd)} <span className="text-t3 text-xs">{lv.currency}</span></div>
+                  <div className="text-t3 text-xs">可用 ${fmt(lv.availableUsd)}</div>
                 </td>
                 <td className={`${tdClsCompact} num ${lv.pnlUsd > 0 ? "text-profit" : lv.pnlUsd < 0 ? "text-loss" : ""}`}>
                   {lv.pnlUsd > 0 ? "+" : ""}${fmt(lv.pnlUsd)}
@@ -217,15 +207,12 @@ export default function AccountPage() {
                 <Button
                   variant="secondary"
                   size="sm"
-                  onClick={() => {
-                    setEditing(a);
-                    setModalOpen(true);
-                  }}
+                  onClick={() => openEdit(a)}
                 >
                   编辑
                 </Button>
                 <Button variant="ghost" size="sm" onClick={() => setPendingDelete(a)}>
-                  <span className="text-loss">删除</span>
+                  删除
                 </Button>
               </div>
             </td>
@@ -234,14 +221,14 @@ export default function AccountPage() {
         })}
         {accounts.length === 0 && (
           <tr className="border-t border-line">
-            <td colSpan={HEADERS.length} className="text-center px-4 py-8 text-sm text-t3">
-              {loading ? "加载中…" : "暂无真实账户，点击右上角「添加账户」创建。账户凭证只加密保存在本机。"}
+            <td colSpan={HEADERS.length} className="text-center px-4 py-8 text-t3">
+              {loading ? "加载中…" : "暂无真实账户，点击上方「添加账户」创建。账户凭证只加密保存在本机。"}
             </td>
           </tr>
         )}
       </DataTable>
 
-      <AccountModal open={modalOpen} editing={editing} onClose={() => setModalOpen(false)} />
+      <AccountModal open={modalOpen} editing={editing} onClose={closeModal} />
 
       <ConfirmDialog
         open={pendingDelete !== null}

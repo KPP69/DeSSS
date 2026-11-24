@@ -10,6 +10,8 @@ type S = {
   logs: LogEntry[];
   filter: Filter;
   addLog: (l: LogEntry) => void;
+  /** Merge snapshot logs (newest first), deduping lines already present. */
+  addLogs: (ls: LogEntry[]) => void;
   setFilter: (f: Filter) => void;
   clear: () => void;
 };
@@ -19,6 +21,12 @@ export const useConsoleStore = create<S>((set) => ({
   filter: "all",
   addLog: (l) =>
     set((s) => ({ logs: [l, ...s.logs].slice(0, MAX_LOGS) })),
+  addLogs: (ls) =>
+    set((s) => {
+      const seen = new Set(s.logs.map((l) => `${l.ts}|${l.source}|${l.message}`));
+      const fresh = ls.filter((l) => !seen.has(`${l.ts}|${l.source}|${l.message}`));
+      return { logs: [...fresh, ...s.logs].slice(0, MAX_LOGS) };
+    }),
   setFilter: (filter) => set({ filter }),
   clear: () => set({ logs: [] }),
 }));

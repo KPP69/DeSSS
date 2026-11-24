@@ -28,9 +28,9 @@ export default function StatCard({
         compact ? "px-3 py-2" : "p-5"
       }`}
     >
-      <div className={`${compact ? "text-xs" : "text-sm"} text-t2 text-center`}>{title}</div>
-      <div className={`num font-semibold text-center ${compact ? "text-xl mt-1" : "text-2xl mt-2"} ${valueColor}`}>{value}</div>
-      {sub && <div className="text-[11px] text-t3 mt-1 text-center">{sub}</div>}
+      <div className="text-xs text-t2 text-center">{title}</div>
+      <div className={`num font-semibold text-center ${compact ? "text-[15px] mt-1" : "text-base mt-1"} ${valueColor}`}>{value}</div>
+      {sub && <div className="text-xs text-t3 mt-1 text-center">{sub}</div>}
     </div>
   );
 }

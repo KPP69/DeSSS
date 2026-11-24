@@ -3,6 +3,7 @@ pub mod adapters;
 pub mod bus;
 pub mod commands;
 pub mod data_engine;
+pub mod net;
 pub mod portable;
 pub mod risk;
 pub mod strategy_engine;
@@ -40,7 +41,9 @@ pub fn run() {
     if let Some(err) = vault.init_error() {
         eprintln!("[vault] running with vault unavailable: {err}");
     }
-    let bus = EventBus::new(1024);
+    // 4096: the bus carries high-frequency book frames; a burst must lag
+    // the forwarder, never kill it (see spawn_bus_forwarder).
+    let bus = EventBus::new(4096);
     let mock = Arc::new(MockAdapter::new(bus.clone()));
     let sync = Arc::new(SyncManager::new());
     let state = Arc::new(AppState {

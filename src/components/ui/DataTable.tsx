@@ -36,13 +36,13 @@ export default function DataTable({
             ))}
           </colgroup>
         )}
-        <thead className="bg-overlay/60">
+        <thead>
           <tr>
             {headers.map((h) => (
               <th
                 key={h}
                 className={`text-center font-medium text-t2 whitespace-nowrap ${
-                  compact ? "px-3 py-1.5 text-[11px]" : "px-4 py-3 text-xs"
+                  compact ? "px-3 py-1.5 text-xs" : "px-4 py-3 text-xs"
                 }`}
               >
                 {h}
@@ -57,7 +57,7 @@ export default function DataTable({
               {cells.map((cell, j) => (
                 <td
                   key={j}
-                  className={`text-center text-t1 ${compact ? "px-3 py-1.5 text-[13px]" : "px-4 py-3 text-sm"}`}
+                  className={`text-center text-t1 ${compact ? "px-3 py-1.5 text-[13px]" : "px-4 py-3"}`}
                 >
                   {cell}
                 </td>
@@ -68,7 +68,7 @@ export default function DataTable({
             <tr className="border-t border-line">
               <td
                 colSpan={headers.length}
-                className="text-center px-4 py-8 text-sm text-t3"
+                className="text-center px-4 py-8 text-t3"
               >
                 {emptyText ?? "暂无数据"}
               </td>
@@ -81,7 +81,7 @@ export default function DataTable({
 }
 
 /** Shared centered cell classes for hand-built rows inside DataTable. */
-export const tdCls = "text-center px-4 py-3 text-sm text-t1";
+export const tdCls = "text-center px-4 py-3 text-t1";
 export const trCls = "border-t border-line hover:bg-overlay/50 transition-colors";
 /** Compact variant: tighter padding and smaller text for dense lists. */
 export const tdClsCompact = "text-center px-3 py-1.5 text-[13px] text-t1";

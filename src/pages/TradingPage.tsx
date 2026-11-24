@@ -21,7 +21,7 @@ export default function TradingPage() {
   return (
     <div>
       {/* Real market data */}
-      <div className="text-sm font-medium text-t1 mb-2 flex items-center gap-2">
+      <div className="font-medium text-t1 mb-2 flex items-center gap-2">
         真实行情 · 交易所 WebSocket 实时订阅 <Badge tone="mock">Mock 行情</Badge>
       </div>
       {bookList.length === 0 ? (
@@ -34,8 +34,8 @@ export default function TradingPage() {
             rows={bookList.map((b) => [
               <span key="e">{getExchange(b.adapterId).name}</span>,
               <span key="s" className="num">{b.symbol}</span>,
-              <span key="bid" className="num text-profit">{b.bids[0] ? b.bids[0][0].toFixed(2) : "—"}</span>,
-              <span key="ask" className="num text-loss">{b.asks[0] ? b.asks[0][0].toFixed(2) : "—"}</span>,
+              <span key="bid" className="num text-t1">{b.bids[0] ? b.bids[0][0].toFixed(2) : "—"}</span>,
+              <span key="ask" className="num text-t1">{b.asks[0] ? b.asks[0][0].toFixed(2) : "—"}</span>,
               <span key="mid" className="num">
                 {b.bids[0] && b.asks[0] ? ((b.bids[0][0] + b.asks[0][0]) / 2).toFixed(2) : "—"}
               </span>,
@@ -55,7 +55,7 @@ export default function TradingPage() {
                     <div className="text-t3 mb-1">买盘</div>
                     {b.bids.slice(0, 5).map(([p, q], i) => (
                       <div key={i} className="flex justify-between py-0.5">
-                        <span className="text-profit">{p.toFixed(2)}</span>
+                        <span className="text-t1">{p.toFixed(2)}</span>
                         <span className="text-t2">{q}</span>
                       </div>
                     ))}
@@ -64,7 +64,7 @@ export default function TradingPage() {
                     <div className="text-t3 mb-1">卖盘</div>
                     {b.asks.slice(0, 5).map(([p, q], i) => (
                       <div key={i} className="flex justify-between py-0.5">
-                        <span className="text-loss">{p.toFixed(2)}</span>
+                        <span className="text-t1">{p.toFixed(2)}</span>
                         <span className="text-t2">{q}</span>
                       </div>
                     ))}
@@ -77,7 +77,7 @@ export default function TradingPage() {
       )}
 
       {/* Real positions */}
-      <div className="text-sm font-medium text-t1 mb-2">真实持仓 · 来自已连接账户的只读同步</div>
+      <div className="font-medium text-t1 mb-2">真实持仓 · 来自已连接账户的只读同步</div>
       {positions.length === 0 ? (
         <EmptyState>暂无真实持仓 — 连接账户后，交易所同步到的当前持仓会显示在这里。</EmptyState>
       ) : (
@@ -89,7 +89,7 @@ export default function TradingPage() {
               <span key="a">{labelOf(p.accountId)}</span>,
               <span key="e">{getExchange(p.adapterId).name}</span>,
               <span key="s" className="num">{p.symbol}</span>,
-              <span key="d" className={p.side === "long" ? "text-profit" : "text-loss"}>
+              <span key="d" className="text-t1">
                 {p.side === "long" ? "多" : "空"}
               </span>,
               <span key="q" className="num">{p.qty}</span>,
@@ -108,8 +108,8 @@ export default function TradingPage() {
       )}
 
       {/* Mock data, kept separate and labelled */}
-      <div className="text-sm font-medium text-t1 mb-2">模拟行情</div>
-      <div className="text-sm text-t2 mb-3">
+      <div className="font-medium text-t1 mb-2">模拟行情</div>
+      <div className="text-t2 mb-3">
         Mock 行情 · 每 500ms 推送 · 来自 EventBus → Tauri event <code className="num">market://tick</code>
       </div>
       {mockList.length === 0 ? (

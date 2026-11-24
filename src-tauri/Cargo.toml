@@ -32,3 +32,8 @@ webpki-roots = "0.26"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52"
+
+# Test-only: generate a self-signed cert for the local mock CONNECT +
+# TLS WebSocket integration test (net/ws.rs).
+[dev-dependencies]
+rcgen = "0.13"
