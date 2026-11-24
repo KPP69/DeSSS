@@ -32,7 +32,7 @@ use serde_json::Value;
 use tokio_tungstenite::tungstenite::Message;
 
 use super::book::BookState;
-use super::types::{AccountLive, Balance, LivePosition, OrderRequest, Order, Position, Tick};
+use super::types::{AccountLive, Balance, LivePosition, Order, OrderRequest, Position, Tick};
 use super::{AdapterResult, ExchangeAdapter};
 use crate::bus::{AppEvent, EventBus};
 
@@ -59,6 +59,59 @@ fn u64_from(v: &Value) -> Option<u64> {
         Value::Number(n) => n.as_u64(),
         Value::String(s) => s.parse().ok(),
         _ => None,
+    }
+}
+
+/// Parse the market list from a `GET /api/v1/orderBooks` response, lenient
+/// about the wire shape: the outer list is `order_books` (snake_case) on
+/// the live API, with `orderBooks` accepted as a fallback. Only active
+/// perpetual markets are kept (`market_type == "perp"` when present,
+/// `status == "active"` when present). Returns symbol -> market_id.
+fn parse_order_books(v: &Value) -> Result<Vec<(String, u64)>, String> {
+    let list = v
+        .get("order_books")
+        .or_else(|| v.get("orderBooks"))
+        .and_then(|l| l.as_array())
+        .ok_or_else(|| {
+            let keys: Vec<&str> = v
+                .as_object()
+                .map(|o| o.keys().map(|k| k.as_str()).collect())
+                .unwrap_or_default();
+            format!("no order_books/orderBooks array in response (top-level keys: {keys:?})")
+        })?;
+    let mut out = Vec::new();
+    for m in list {
+        if let Some(t) = m.get("market_type").and_then(|t| t.as_str()) {
+            if t != "perp" {
+                continue;
+            }
+        }
+        if let Some(s) = m.get("status").and_then(|s| s.as_str()) {
+            if s != "active" {
+                continue;
+            }
+        }
+        let Some(sym) = m.get("symbol").and_then(|s| s.as_str()) else {
+            continue;
+        };
+        let Some(mid) = m.get("market_id").and_then(u64_from) else {
+            continue;
+        };
+        // Perpetual markets are named "BTC"/"ETH"; spot pairs ("BTC/USDC")
+        // never match the exact names below.
+        if sym == "BTC" || sym == "ETH" {
+            out.push((sym.to_string(), mid));
+        }
+    }
+    Ok(out)
+}
+
+/// First `n` characters of a response body (char-boundary safe), for error
+/// messages that would otherwise hide the real payload.
+fn body_snippet(text: &str, n: usize) -> &str {
+    match text.char_indices().nth(n) {
+        Some((i, _)) => &text[..i],
+        None => text,
     }
 }
 
@@ -147,7 +200,7 @@ impl LighterAdapter {
             network,
             account_index,
             account_id,
-            http: reqwest::Client::builder().timeout(REST_TIMEOUT).build().unwrap_or_default(),
+            http: super::new_http_client(),
             bus,
             live,
             running: Arc::new(AtomicBool::new(false)),
@@ -212,7 +265,9 @@ impl LighterAdapter {
         let symbol = self.symbol_for(market_id);
         let ts = now_ms();
         let books = self.books.lock().unwrap();
-        let Some(state) = books.get(&market_id) else { return };
+        let Some(state) = books.get(&market_id) else {
+            return;
+        };
         let book = state.to_book(&self.id, &symbol, BOOK_DEPTH, ts);
         let (best_bid, best_ask) = (
             book.bids.first().map(|l| l.0).unwrap_or(0.0),
@@ -237,30 +292,47 @@ impl LighterAdapter {
     /// differ between deployments and over time, so they are never hardcoded.
     async fn fetch_markets(&self) -> Result<(), String> {
         let url = format!("{}/api/v1/orderBooks", self.network.rest_base());
-        let resp = self.http.get(&url).send().await.map_err(|e| format!("lighter orderBooks request failed: {e}"))?;
+        let resp = self
+            .http
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| format!("lighter orderBooks request failed: {e:?}"))?;
         if !resp.status().is_success() {
-            return Err(format!("lighter orderBooks returned HTTP {}", resp.status()));
+            return Err(format!(
+                "lighter orderBooks returned HTTP {}",
+                resp.status()
+            ));
         }
-        let v: Value = resp.json().await.map_err(|e| format!("bad orderBooks response: {e}"))?;
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| format!("lighter orderBooks read failed: {e:?}"))?;
+        let v: Value = serde_json::from_str(&text).map_err(|e| {
+            format!(
+                "lighter orderBooks: invalid JSON ({e}); body: {}",
+                body_snippet(&text, 500)
+            )
+        })?;
+        let parsed = parse_order_books(&v).map_err(|e| {
+            format!(
+                "lighter orderBooks: {e}; body: {}",
+                body_snippet(&text, 500)
+            )
+        })?;
         let mut ids = HashMap::new();
         let mut names = HashMap::new();
-        if let Some(list) = v["orderBooks"].as_array() {
-            for m in list {
-                let Some(mid) = u64_from(&m["market_id"]) else { continue };
-                let Some(sym) = m["symbol"].as_str() else { continue };
-                // Perpetual markets are named "BTC"/"ETH"; skip spot pairs
-                // ("BTC/USDC") and frozen/inactive books.
-                if m["status"].as_str().is_some_and(|s| s != "active") {
-                    continue;
-                }
-                if (sym == "BTC" || sym == "ETH") && !ids.contains_key(sym) {
-                    ids.insert(sym.to_string(), mid);
-                    names.insert(mid, sym.to_string());
-                }
+        for (sym, mid) in parsed {
+            if !ids.contains_key(&sym) {
+                names.insert(mid, sym.clone());
+                ids.insert(sym, mid);
             }
         }
         if !ids.contains_key("BTC") || !ids.contains_key("ETH") {
-            return Err(format!("lighter market list has no active BTC/ETH perps (got {ids:?})"));
+            return Err(format!(
+                "lighter market list has no active BTC/ETH perps (got {ids:?}); body: {}",
+                body_snippet(&text, 500)
+            ));
         }
         *self.market_ids.lock().unwrap() = ids;
         *self.symbols.lock().unwrap() = names;
@@ -274,11 +346,19 @@ impl LighterAdapter {
             self.network.rest_base(),
             self.account_index
         );
-        let resp = self.http.get(&url).send().await.map_err(|e| format!("lighter account request failed: {e}"))?;
+        let resp = self
+            .http
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| format!("lighter account request failed: {e:?}"))?;
         if !resp.status().is_success() {
             return Err(format!("lighter account returned HTTP {}", resp.status()));
         }
-        let v: Value = resp.json().await.map_err(|e| format!("bad account response: {e}"))?;
+        let v: Value = resp
+            .json()
+            .await
+            .map_err(|e| format!("bad account response: {e}"))?;
         let Some(acc) = v["accounts"].as_array().and_then(|a| a.first()) else {
             return Err(format!("lighter account {} not found", self.account_index));
         };
@@ -297,14 +377,24 @@ impl LighterAdapter {
                     .map(|s| s.to_string())
                     .or_else(|| u64_from(&p["market_id"]).map(|id| self.symbol_for(id)))
                     .unwrap_or_default();
-                let sign = p["sign"].as_i64().unwrap_or(if qty_raw >= 0.0 { 1 } else { -1 });
+                let sign = p["sign"]
+                    .as_i64()
+                    .unwrap_or(if qty_raw >= 0.0 { 1 } else { -1 });
                 let qty = qty_raw.abs();
                 let entry = f64_from(&p["avg_entry_price"]);
                 let value = f64_from(&p["position_value"]);
-                let mark = if qty > 0.0 && value != 0.0 { value / qty } else { entry };
+                let mark = if qty > 0.0 && value != 0.0 {
+                    value / qty
+                } else {
+                    entry
+                };
                 positions.push(LivePosition {
                     symbol,
-                    side: if sign >= 0 { "long".to_string() } else { "short".to_string() },
+                    side: if sign >= 0 {
+                        "long".to_string()
+                    } else {
+                        "short".to_string()
+                    },
                     qty,
                     entry_price: entry,
                     mark_price: mark,
@@ -312,7 +402,12 @@ impl LighterAdapter {
                 });
             }
         }
-        let snap = Snapshot { equity, available, pnl, positions };
+        let snap = Snapshot {
+            equity,
+            available,
+            pnl,
+            positions,
+        };
         let currency = self.network.currency().to_string();
         let balance = Balance {
             adapter_id: self.id.clone(),
@@ -382,7 +477,9 @@ impl LighterAdapter {
             if let Some(off) = offset {
                 if let Err(gap) = state.apply_delta(off, &bids, &asks) {
                     state.clear();
-                    return Err(format!("lighter order_book gap for market {market_id}: {gap}"));
+                    return Err(format!(
+                        "lighter order_book gap for market {market_id}: {gap}"
+                    ));
                 }
             }
             if let (Some(begin), Some(n)) = (begin_nonce, nonce) {
@@ -543,12 +640,18 @@ impl ExchangeAdapter for LighterAdapter {
     }
 
     async fn get_balances(&self, _account_id: &str) -> AdapterResult<Vec<Balance>> {
-        let (_, balance) = self.fetch_account().await.map_err(super::AdapterError::Other)?;
+        let (_, balance) = self
+            .fetch_account()
+            .await
+            .map_err(super::AdapterError::Other)?;
         Ok(vec![balance])
     }
 
     async fn get_positions(&self, _account_id: &str) -> AdapterResult<Vec<Position>> {
-        let (snap, _) = self.fetch_account().await.map_err(super::AdapterError::Other)?;
+        let (snap, _) = self
+            .fetch_account()
+            .await
+            .map_err(super::AdapterError::Other)?;
         Ok(snap
             .positions
             .iter()
@@ -592,20 +695,77 @@ mod tests {
 
     #[test]
     fn network_endpoints_are_distinct() {
-        assert_eq!(LighterNetwork::Mainnet.rest_base(), "https://mainnet.zklighter.elliot.ai");
-        assert_eq!(LighterNetwork::Mainnet.ws_url(), "wss://mainnet.zklighter.elliot.ai/stream");
+        assert_eq!(
+            LighterNetwork::Mainnet.rest_base(),
+            "https://mainnet.zklighter.elliot.ai"
+        );
+        assert_eq!(
+            LighterNetwork::Mainnet.ws_url(),
+            "wss://mainnet.zklighter.elliot.ai/stream"
+        );
         assert_eq!(LighterNetwork::Mainnet.chain_id(), 304);
         assert_eq!(LighterNetwork::Mainnet.currency(), "USDC");
-        assert_eq!(LighterNetwork::Robinhood.rest_base(), "https://api.rh.lighter.xyz");
-        assert_eq!(LighterNetwork::Robinhood.ws_url(), "wss://api.rh.lighter.xyz/stream");
+        assert_eq!(
+            LighterNetwork::Robinhood.rest_base(),
+            "https://api.rh.lighter.xyz"
+        );
+        assert_eq!(
+            LighterNetwork::Robinhood.ws_url(),
+            "wss://api.rh.lighter.xyz/stream"
+        );
         assert_eq!(LighterNetwork::Robinhood.chain_id(), 466324);
         assert_eq!(LighterNetwork::Robinhood.currency(), "USDG");
     }
 
     #[test]
+    fn order_books_parses_snake_case_and_filters_perps() {
+        let v = serde_json::json!({
+            "code": 200,
+            "order_books": [
+                {"symbol": "BTC", "market_id": 1, "market_type": "perp", "status": "active"},
+                {"symbol": "ETH", "market_id": 0, "market_type": "perp", "status": "active"},
+                {"symbol": "BTC/USDC", "market_id": 2049, "market_type": "spot", "status": "active"},
+                {"symbol": "SOL", "market_id": 2, "market_type": "perp", "status": "inactive"}
+            ]
+        });
+        let parsed = parse_order_books(&v).expect("parse");
+        assert_eq!(parsed.len(), 2);
+        assert!(parsed.contains(&("BTC".to_string(), 1)));
+        assert!(parsed.contains(&("ETH".to_string(), 0)));
+    }
+
+    #[test]
+    fn order_books_accepts_camel_case_fallback_and_reports_keys() {
+        let v = serde_json::json!({
+            "orderBooks": [
+                {"symbol": "BTC", "market_id": 1},
+                {"symbol": "ETH", "market_id": 0}
+            ]
+        });
+        assert_eq!(parse_order_books(&v).expect("parse").len(), 2);
+        let bad = serde_json::json!({"code": 200, "total": 0});
+        let err = parse_order_books(&bad).unwrap_err();
+        assert!(
+            err.contains("order_books"),
+            "error must name the expected fields: {err}"
+        );
+        assert!(
+            err.contains("code"),
+            "error must list the keys present: {err}"
+        );
+    }
+
+    #[test]
     fn book_frame_gap_triggers_resync_error() {
         let (bus, live) = test_ctx();
-        let a = LighterAdapter::new("lighter", LighterNetwork::Mainnet, 1, "acc-1".into(), bus, live);
+        let a = LighterAdapter::new(
+            "lighter",
+            LighterNetwork::Mainnet,
+            1,
+            "acc-1".into(),
+            bus,
+            live,
+        );
         let snap = serde_json::json!({
             "type": "subscribed/order_book",
             "channel": "order_book:0",

@@ -26,7 +26,10 @@ pub struct SyncManager {
 
 impl SyncManager {
     pub fn new() -> Self {
-        Self { live: Arc::new(RwLock::new(HashMap::new())), running: Mutex::new(HashMap::new()) }
+        Self {
+            live: Arc::new(RwLock::new(HashMap::new())),
+            running: Mutex::new(HashMap::new()),
+        }
     }
 
     pub fn live_map(&self) -> Arc<RwLock<HashMap<String, AccountLive>>> {
@@ -34,11 +37,17 @@ impl SyncManager {
     }
 
     pub fn live_states(&self) -> Vec<AccountLive> {
-        self.live.read().map(|m| m.values().cloned().collect()).unwrap_or_default()
+        self.live
+            .read()
+            .map(|m| m.values().cloned().collect())
+            .unwrap_or_default()
     }
 
     pub fn is_running(&self, account_id: &str) -> bool {
-        self.running.lock().map(|m| m.contains_key(account_id)).unwrap_or(false)
+        self.running
+            .lock()
+            .map(|m| m.contains_key(account_id))
+            .unwrap_or(false)
     }
 
     pub fn insert(&self, account_id: String, adapter: Arc<dyn ExchangeAdapter>) {
@@ -48,7 +57,10 @@ impl SyncManager {
     }
 
     pub fn remove(&self, account_id: &str) -> Option<Arc<dyn ExchangeAdapter>> {
-        self.running.lock().ok().and_then(|mut m| m.remove(account_id))
+        self.running
+            .lock()
+            .ok()
+            .and_then(|mut m| m.remove(account_id))
     }
 
     pub fn remove_live(&self, account_id: &str) {
@@ -70,7 +82,11 @@ pub fn build_adapter(
     let account_id = row.id.clone();
     match row.exchange_id.as_str() {
         "hyperliquid" | "entropy" => {
-            let dex = if row.exchange_id == "entropy" { Some("io") } else { None };
+            let dex = if row.exchange_id == "entropy" {
+                Some("io")
+            } else {
+                None
+            };
             let address = credentials
                 .get("wallet_address")
                 .and_then(|v| v.as_str())
@@ -80,7 +96,12 @@ pub fn build_adapter(
                 return Err("stored wallet_address is not a valid 0x address".to_string());
             }
             Ok(Arc::new(HyperliquidAdapter::new(
-                &row.exchange_id, dex, address, account_id, bus, live,
+                &row.exchange_id,
+                dex,
+                address,
+                account_id,
+                bus,
+                live,
             )))
         }
         "lighter" | "lighter_robinhood" => {
@@ -92,11 +113,20 @@ pub fn build_adapter(
             let index = credentials
                 .get("account_index")
                 .and_then(|v| v.as_u64())
-                .ok_or_else(|| "account_index is missing from the stored credentials".to_string())?;
+                .ok_or_else(|| {
+                    "account_index is missing from the stored credentials".to_string()
+                })?;
             Ok(Arc::new(LighterAdapter::new(
-                &row.exchange_id, network, index, account_id, bus, live,
+                &row.exchange_id,
+                network,
+                index,
+                account_id,
+                bus,
+                live,
             )))
         }
-        other => Err(format!("read-only sync is not implemented for {other} in this phase")),
+        other => Err(format!(
+            "read-only sync is not implemented for {other} in this phase"
+        )),
     }
 }

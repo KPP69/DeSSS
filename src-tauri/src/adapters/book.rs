@@ -22,7 +22,10 @@ struct Side {
 
 impl Side {
     fn new(desc: bool) -> Self {
-        Self { levels: Vec::new(), desc }
+        Self {
+            levels: Vec::new(),
+            desc,
+        }
     }
 
     fn replace(&mut self, levels: &[(f64, f64)]) {
@@ -47,14 +50,20 @@ impl Side {
 
     fn sort(&mut self) {
         if self.desc {
-            self.levels.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+            self.levels
+                .sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
         } else {
-            self.levels.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+            self.levels
+                .sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
         }
     }
 
     fn top(&self, depth: usize) -> Vec<PriceLevel> {
-        self.levels.iter().take(depth).map(|&(p, q)| PriceLevel(p, q)).collect()
+        self.levels
+            .iter()
+            .take(depth)
+            .map(|&(p, q)| PriceLevel(p, q))
+            .collect()
     }
 }
 
@@ -70,7 +79,11 @@ pub struct BookState {
 
 impl BookState {
     pub fn new() -> Self {
-        Self { bids: Side::new(true), asks: Side::new(false), last_offset: None }
+        Self {
+            bids: Side::new(true),
+            asks: Side::new(false),
+            last_offset: None,
+        }
     }
 
     pub fn clear(&mut self) {
@@ -100,7 +113,10 @@ impl BookState {
         asks: &[(f64, f64)],
     ) -> Result<(), BookGap> {
         match self.last_offset {
-            Some(last) if offset <= last => Err(BookGap { expected_gt: last, got: offset }),
+            Some(last) if offset <= last => Err(BookGap {
+                expected_gt: last,
+                got: offset,
+            }),
             _ => {
                 self.bids.apply(bids);
                 self.asks.apply(asks);
@@ -174,7 +190,8 @@ mod tests {
     fn delta_upserts_and_removes_zero_qty() {
         let mut b = state();
         b.apply_snapshot_with_offset(10, &[(100.0, 1.0)], &[(101.0, 1.0)]);
-        b.apply_delta(11, &[(100.0, 0.0), (99.0, 5.0)], &[(101.0, 2.0)]).expect("delta");
+        b.apply_delta(11, &[(100.0, 0.0), (99.0, 5.0)], &[(101.0, 2.0)])
+            .expect("delta");
         let book = b.to_book("li", "BTC-USDC", 10, 0);
         assert_eq!(book.bids.len(), 1);
         assert_eq!(book.bids[0].0, 99.0);
