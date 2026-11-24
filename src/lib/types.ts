@@ -18,3 +18,26 @@ export type AccountView = {
 
 /** Credential values keyed by the field keys defined in lib/exchanges.ts. */
 export type CredentialMap = Record<string, string | number>;
+
+/** One price level of an order book: [price, quantity]. */
+export type PriceLevel = [number, number];
+
+export type OrderBook = { adapterId: string; symbol: string; bids: PriceLevel[]; asks: PriceLevel[]; ts: number };
+
+export type LivePosition = { symbol: string; side: string; qty: number; entryPrice: number; markPrice: number; unrealizedPnl: number };
+
+/** Live read-only state of one connected real account (phase 3). */
+export type AccountLive = {
+  accountId: string;
+  adapterId: string;
+  /** "connecting" | "connected" | "reconnecting" | "error" | "disconnected" */
+  status: string;
+  latencyMs: number | null;
+  equityUsd: number;
+  availableUsd: number;
+  pnlUsd: number;
+  currency: string;
+  positions: LivePosition[];
+  error: string | null;
+  ts: number;
+};

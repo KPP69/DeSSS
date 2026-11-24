@@ -1,13 +1,39 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import AccountModal from "../components/AccountModal";
 import { Badge, Button, ConfirmDialog, DataTable, PageHeader, StatCard, tdCls, trCls } from "../components/ui";
 import { getExchange } from "../lib/exchanges";
+import { api } from "../lib/tauri";
 import type { AccountView } from "../lib/types";
 import { useAccountStore } from "../store/useAccountStore";
+import { useLiveStore, latencyTone } from "../store/useLiveStore";
 import { useMarketStore } from "../store/useMarketStore";
 
 function fmt(n: number): string {
   return n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+/** Exchanges with a read-only adapter in phase 3. */
+const SYNCABLE = new Set(["hyperliquid", "entropy", "lighter", "lighter_robinhood"]);
+
+const STATUS_LABEL: Record<string, string> = {
+  connecting: "连接中",
+  connected: "已连接",
+  reconnecting: "重连中",
+  error: "连接异常",
+  disconnected: "已断开",
+};
+
+function latencyDot(tone: string): string {
+  switch (tone) {
+    case "online":
+      return "bg-profit";
+    case "warn":
+      return "bg-warn";
+    case "danger":
+      return "bg-loss";
+    default:
+      return "bg-t3";
+  }
 }
 
 const HEADERS = ["账户名", "交易所", "权益", "可用权益", "盈亏", "操作"];
@@ -20,14 +46,40 @@ export default function AccountPage() {
   const fetchAll = useAccountStore((s) => s.fetchAll);
   const remove = useAccountStore((s) => s.remove);
   const balances = useMarketStore((s) => s.balances);
+  const live = useLiveStore((s) => s.live);
+  const setLive = useLiveStore((s) => s.setLive);
+  const removeLive = useLiveStore((s) => s.removeLive);
 
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState<AccountView | null>(null);
   const [pendingDelete, setPendingDelete] = useState<AccountView | null>(null);
+  const connectTried = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     fetchAll();
   }, [fetchAll]);
+
+  // Hydrate live states, then auto-connect every supported account that has
+  // credentials and is not already live. Private keys are never involved:
+  // the backend only reads the public address / account index from the vault.
+  useEffect(() => {
+    api
+      .listAccountLive()
+      .then((list) => list.forEach(setLive))
+      .catch(() => {});
+  }, [setLive]);
+
+  useEffect(() => {
+    for (const a of accounts) {
+      if (!SYNCABLE.has(a.exchangeId) || !a.credentialConfigured) continue;
+      if (live[a.id] || connectTried.current.has(a.id)) continue;
+      connectTried.current.add(a.id);
+      api
+        .connectAccount(a.id)
+        .then(setLive)
+        .catch(() => {});
+    }
+  }, [accounts, live, setLive]);
 
   // Overview cards show Mock data only, clearly labelled as simulated.
   const mock = useMemo(() => {
@@ -65,7 +117,7 @@ export default function AccountPage() {
 
       {/* Overview: mock data, clearly labelled */}
       <div className="mb-2 text-xs text-t3 flex items-center gap-2">
-        以下为模拟账户数据，非真实资产；真实账户本阶段尚未连接交易所。
+        以下为模拟账户数据，非真实资产；下方真实账户会单独显示交易所同步到的真实权益。
         <Badge tone="mock">Mock 模拟</Badge>
       </div>
       <div className="grid grid-cols-3 gap-4 mb-6">
@@ -88,23 +140,70 @@ export default function AccountPage() {
           <td className={`${tdCls} num`}>${fmt(mock.pnl)}</td>
           <td className={`${tdCls} text-t3`}>—</td>
         </tr>
-        {accounts.map((a) => (
+        {accounts.map((a) => {
+          const lv = live[a.id];
+          const syncable = SYNCABLE.has(a.exchangeId);
+          const tone = lv ? latencyTone(lv.latencyMs, lv.status) : "offline";
+          return (
           <tr key={a.id} className={trCls}>
             <td className={tdCls}>
               {a.label}
               <div className="text-[11px] text-t3 num">{a.maskedIdentifier}</div>
-              <div className="mt-0.5">
+              <div className="mt-0.5 flex items-center gap-1.5 flex-wrap justify-center">
                 <Badge tone={a.credentialConfigured ? "configured" : "warn"}>
                   {a.credentialConfigured ? "凭证已配置" : "未配置凭证"}
                 </Badge>
+                {lv && (
+                  <Badge tone={tone}>
+                    <span className={`inline-block w-1.5 h-1.5 rounded-full ${latencyDot(tone)}`} />
+                    {STATUS_LABEL[lv.status] ?? lv.status}
+                    {lv.latencyMs !== null && lv.status === "connected" ? ` · ${lv.latencyMs}ms` : ""}
+                  </Badge>
+                )}
               </div>
+              {lv?.error && <div className="text-[11px] text-loss mt-0.5">{lv.error}</div>}
             </td>
             <td className={tdCls}>{getExchange(a.exchangeId).name}</td>
-            <td className={`${tdCls} text-t3`}>未连接</td>
-            <td className={`${tdCls} text-t3`}>—</td>
-            <td className={`${tdCls} text-t3`}>—</td>
+            {lv ? (
+              <>
+                <td className={`${tdCls} num`}>${fmt(lv.equityUsd)} <span className="text-t3 text-[11px]">{lv.currency}</span></td>
+                <td className={`${tdCls} num`}>${fmt(lv.availableUsd)} <span className="text-t3 text-[11px]">{lv.currency}</span></td>
+                <td className={`${tdCls} num ${lv.pnlUsd > 0 ? "text-profit" : lv.pnlUsd < 0 ? "text-loss" : ""}`}>
+                  {lv.pnlUsd > 0 ? "+" : ""}${fmt(lv.pnlUsd)}
+                </td>
+              </>
+            ) : (
+              <>
+                <td className={`${tdCls} text-t3`}>{syncable ? "未连接" : "本阶段不支持"}</td>
+                <td className={`${tdCls} text-t3`}>—</td>
+                <td className={`${tdCls} text-t3`}>—</td>
+              </>
+            )}
             <td className={tdCls}>
               <div className="flex items-center justify-center gap-2">
+                {syncable && a.credentialConfigured && !lv && (
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => api.connectAccount(a.id).then(setLive).catch(() => {})}
+                  >
+                    连接
+                  </Button>
+                )}
+                {lv && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() =>
+                      api
+                        .disconnectAccount(a.id)
+                        .then(() => removeLive(a.id))
+                        .catch(() => {})
+                    }
+                  >
+                    断开
+                  </Button>
+                )}
                 <Button
                   variant="secondary"
                   size="sm"
@@ -121,7 +220,8 @@ export default function AccountPage() {
               </div>
             </td>
           </tr>
-        ))}
+          );
+        })}
         {accounts.length === 0 && (
           <tr className="border-t border-line">
             <td colSpan={HEADERS.length} className="text-center px-4 py-8 text-sm text-t3">
@@ -147,6 +247,8 @@ export default function AccountPage() {
         onCancel={() => setPendingDelete(null)}
         onConfirm={async () => {
           if (!pendingDelete) return;
+          await api.disconnectAccount(pendingDelete.id).catch(() => {});
+          removeLive(pendingDelete.id);
           const ok = await remove(pendingDelete.id);
           if (ok) setPendingDelete(null);
         }}

@@ -2,7 +2,8 @@ import React, { useEffect } from "react";
 import Sidebar from "./components/Sidebar";
 import { useAppStore } from "./store/useAppStore";
 import { useMarketStore } from "./store/useMarketStore";
-import { api, onTick, onBalance } from "./lib/tauri";
+import { api, onTick, onBalance, onBook, onAccountLive } from "./lib/tauri";
+import { useLiveStore } from "./store/useLiveStore";
 import AccountPage from "./pages/AccountPage";
 import StrategyPage from "./pages/StrategyPage";
 import TradingPage from "./pages/TradingPage";
@@ -18,12 +19,17 @@ export default function App() {
 
   useEffect(() => {
     let u1: (() => void) | undefined, u2: (() => void) | undefined;
+    let u3: (() => void) | undefined, u4: (() => void) | undefined;
     onTick(setTick).then((u) => (u1 = u));
     onBalance(setBalance).then((u) => (u2 = u));
+    onBook((b) => useLiveStore.getState().setBook(b)).then((u) => (u3 = u));
+    onAccountLive((a) => useLiveStore.getState().setLive(a)).then((u) => (u4 = u));
     api.startMock().then(() => setConnected(true)).catch(() => {});
     return () => {
       u1?.();
       u2?.();
+      u3?.();
+      u4?.();
     };
   }, []);
 

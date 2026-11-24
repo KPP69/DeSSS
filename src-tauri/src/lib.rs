@@ -11,6 +11,7 @@ pub mod vault;
 use std::sync::Arc;
 
 use adapters::mock::MockAdapter;
+use adapters::sync::SyncManager;
 use bus::EventBus;
 use portable::PortablePaths;
 
@@ -20,6 +21,7 @@ pub struct AppState {
     pub mock: Arc<MockAdapter>,
     pub db: data_engine::DataEngine,
     pub vault: Arc<vault::VaultHandle>,
+    pub sync: Arc<SyncManager>,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -40,12 +42,14 @@ pub fn run() {
     }
     let bus = EventBus::new(1024);
     let mock = Arc::new(MockAdapter::new(bus.clone()));
+    let sync = Arc::new(SyncManager::new());
     let state = Arc::new(AppState {
         paths,
         bus,
         mock,
         db,
         vault,
+        sync,
     });
     let s2 = state.clone();
     tauri::Builder::default()
@@ -65,7 +69,10 @@ pub fn run() {
             commands::create_account,
             commands::update_account,
             commands::delete_account,
-            commands::get_vault_status
+            commands::get_vault_status,
+            commands::connect_account,
+            commands::disconnect_account,
+            commands::list_account_live
         ])
         .run(tauri::generate_context!())
         .expect("error while running DeSSS");
