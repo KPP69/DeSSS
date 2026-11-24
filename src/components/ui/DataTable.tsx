@@ -13,6 +13,7 @@ export default function DataTable({
   minWidth = 720,
   children,
   compact = false,
+  colWidths,
 }: {
   headers: string[];
   rows?: React.ReactNode[][];
@@ -21,11 +22,20 @@ export default function DataTable({
   children?: React.ReactNode;
   /** Compact rows: tighter padding and smaller text (e.g. account list). */
   compact?: boolean;
+  /** Fixed column widths (px or CSS length), one per header. */
+  colWidths?: (number | string)[];
 }) {
   const isEmpty = !children && (!rows || rows.length === 0);
   return (
     <div className="bg-panel border border-line rounded-lg overflow-x-auto">
-      <table className="w-full" style={{ minWidth }}>
+      <table className={`w-full ${colWidths ? "table-fixed" : ""}`} style={{ minWidth }}>
+        {colWidths && (
+          <colgroup>
+            {colWidths.map((w, i) => (
+              <col key={i} style={{ width: w }} />
+            ))}
+          </colgroup>
+        )}
         <thead className="bg-overlay/60">
           <tr>
             {headers.map((h) => (

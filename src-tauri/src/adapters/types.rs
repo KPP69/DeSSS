@@ -98,7 +98,8 @@ pub struct AccountLive {
     pub adapter_id: String,
     /// "connecting" | "connected" | "reconnecting" | "error" | "disconnected"
     pub status: String,
-    /// Last measured round-trip (ping/pong) or frame staleness in ms, if known.
+    /// Last measured single round-trip: WS ping -> pong RTT, else the REST
+    /// request time. Never frame staleness.
     pub latency_ms: Option<u64>,
     pub equity_usd: f64,
     pub available_usd: f64,

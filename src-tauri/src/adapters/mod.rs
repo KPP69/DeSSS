@@ -2,6 +2,7 @@ pub mod book;
 pub mod hyperliquid;
 pub mod lighter;
 pub mod mock;
+pub mod proxy;
 pub mod sync;
 pub mod types;
 use self::types::*;
@@ -25,13 +26,24 @@ pub fn new_http_client() -> reqwest::Client {
 
 /// Same client with a custom REST timeout (Lighter / RH use 20s — their
 /// endpoints can be slow). Connection pooling stays at the reqwest default
-/// (unlimited idle per host); nothing here disables it.
+/// (unlimited idle per host); nothing here disables it. When a proxy is
+/// configured (custom file, env vars, or the Windows system proxy), it is
+/// applied explicitly — reqwest's own default only reads env vars.
 pub fn new_http_client_with_timeout(secs: u64) -> reqwest::Client {
-    reqwest::Client::builder()
+    let mut b = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(secs))
-        .user_agent("DeSSS/0.1.0")
-        .build()
-        .unwrap_or_default()
+        .user_agent("DeSSS/0.1.0");
+    if let Some(url) = proxy::resolve_proxy() {
+        match reqwest::Proxy::all(&url) {
+            Ok(p) => {
+                b = b.proxy(p);
+            }
+            Err(e) => {
+                tracing::warn!("[proxy] ignoring invalid proxy url {url}: {e}");
+            }
+        }
+    }
+    b.build().unwrap_or_default()
 }
 
 /// Account live status from the two independent health signals, so a dead

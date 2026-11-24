@@ -1,5 +1,5 @@
 import React from "react";
-import { Badge, DataTable, EmptyState, PageHeader } from "../components/ui";
+import { Badge, DataTable, EmptyState } from "../components/ui";
 import { useMarketStore } from "../store/useMarketStore";
 import { useLiveStore } from "../store/useLiveStore";
 import { useAccountStore } from "../store/useAccountStore";
@@ -20,12 +20,10 @@ export default function TradingPage() {
 
   return (
     <div>
-      <PageHeader title="交易">
-        <Badge tone="mock">Mock 行情</Badge>
-      </PageHeader>
-
       {/* Real market data */}
-      <div className="text-sm font-medium text-t1 mb-2">真实行情 · 交易所 WebSocket 实时订阅</div>
+      <div className="text-sm font-medium text-t1 mb-2 flex items-center gap-2">
+        真实行情 · 交易所 WebSocket 实时订阅 <Badge tone="mock">Mock 行情</Badge>
+      </div>
       {bookList.length === 0 ? (
         <EmptyState>暂无真实行情 — 请先在「账户」页面连接 Hyperliquid / Entropy / Lighter 账户。</EmptyState>
       ) : (

@@ -86,7 +86,10 @@ pub fn run() {
             commands::get_vault_status,
             commands::connect_account,
             commands::disconnect_account,
-            commands::list_account_live
+            commands::list_account_live,
+            commands::get_runtime_snapshot,
+            commands::get_proxy,
+            commands::set_proxy
         ])
         .run(tauri::generate_context!())
         .expect("error while running DeSSS");

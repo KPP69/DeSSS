@@ -26,3 +26,9 @@ aes-gcm = "0.10"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
 tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
 futures-util = "0.3"
+tokio-rustls = "0.26"
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring", "logging"] }
+webpki-roots = "0.26"
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.52"

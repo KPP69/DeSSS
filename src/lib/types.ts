@@ -26,7 +26,21 @@ export type OrderBook = { adapterId: string; symbol: string; bids: PriceLevel[];
 
 export type LivePosition = { symbol: string; side: string; qty: number; entryPrice: number; markPrice: number; unrealizedPnl: number };
 
-/** Live read-only state of one connected real account (phase 3). */
+/** One runtime log line pushed by the Rust backend for the console drawer. */
+export type LogEntry = {
+  level: "info" | "warn" | "error" | string;
+  source: string;
+  message: string;
+  ts: number;
+};
+
+/** Latest in-memory books + account states, fetched once on load so a
+ * refresh shows numbers instantly. */
+export type RuntimeSnapshot = { books: OrderBook[]; live: AccountLive[] };
+
+/** Proxy configuration: the user-set value plus what is actually in effect. */
+export type ProxyState = { custom: string | null; effective: string | null };
+
 export type AccountLive = {
   accountId: string;
   adapterId: string;

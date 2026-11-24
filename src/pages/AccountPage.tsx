@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import AccountModal from "../components/AccountModal";
-import { Badge, Button, ConfirmDialog, DataTable, PageHeader, StatCard, tdClsCompact, trCls } from "../components/ui";
+import { Badge, Button, ConfirmDialog, DataTable, StatCard, tdClsCompact, trCls } from "../components/ui";
 import { getExchange } from "../lib/exchanges";
 import { api } from "../lib/tauri";
 import type { AccountView } from "../lib/types";
@@ -93,7 +93,9 @@ export default function AccountPage() {
 
   return (
     <div>
-      <PageHeader title="账户中心">
+      {/* Fixed secondary toolbar: sticks under the title bar, holds the
+          page's main action. */}
+      <div className="sticky top-0 z-10 -mx-6 -mt-6 px-6 py-2 bg-app/95 border-b border-line flex items-center">
         <Button
           onClick={() => {
             setEditing(null);
@@ -102,7 +104,7 @@ export default function AccountPage() {
         >
           添加账户
         </Button>
-      </PageHeader>
+      </div>
 
       {vaultError && (
         <div className="mb-4 text-sm text-loss bg-loss/10 border border-loss/30 rounded px-4 py-3">
@@ -121,13 +123,13 @@ export default function AccountPage() {
         以下为模拟账户数据，非真实资产；下方真实账户会单独显示交易所同步到的真实权益。
         <Badge tone="mock">Mock 模拟</Badge>
       </div>
-      <div className="grid grid-cols-3 gap-4 mb-6">
-        <StatCard title="总权益" value={`$${fmt(mock.totalEquity)}`} sub="模拟数据 · Mock" />
-        <StatCard title="可用权益" value={`$${fmt(mock.available)}`} sub="模拟数据 · Mock" />
-        <StatCard title="总盈亏" value={`$${fmt(mock.pnl)}`} sub="模拟数据 · Mock" />
+      <div className="grid grid-cols-3 gap-3 mb-3 mt-4">
+        <StatCard compact title="总权益" value={`$${fmt(mock.totalEquity)}`} sub="模拟数据 · Mock" />
+        <StatCard compact title="可用权益" value={`$${fmt(mock.available)}`} sub="模拟数据 · Mock" />
+        <StatCard compact title="总盈亏" value={`$${fmt(mock.pnl)}`} sub="模拟数据 · Mock" />
       </div>
 
-      <DataTable headers={HEADERS} minWidth={760} compact>
+      <DataTable headers={HEADERS} minWidth={970} compact colWidths={[150, 250, 120, 170, 100, 180]}>
         {/* Built-in mock account row */}
         <tr className={trCls}>
           <td className={tdClsCompact}>
@@ -150,10 +152,12 @@ export default function AccountPage() {
           const tone = lv ? latencyTone(lv.latencyMs, lv.status) : "offline";
           return (
           <tr key={a.id} className={trCls}>
-            <td className={tdClsCompact}>{a.label}</td>
             <td className={tdClsCompact}>
-              <div className="flex flex-col items-center gap-0.5 leading-tight">
-                <span className="text-[11px] text-t3 num">{a.maskedIdentifier}</span>
+              <span className="block truncate">{a.label}</span>
+            </td>
+            <td className={tdClsCompact}>
+              <div className="flex flex-col items-center gap-0.5 leading-tight w-full">
+                <span className="block w-full truncate text-[11px] text-t3 num">{a.maskedIdentifier}</span>
                 <Badge tone={a.credentialConfigured ? "configured" : "warn"}>
                   {a.credentialConfigured ? "凭证已配置" : "未配置凭证"}
                 </Badge>
@@ -167,7 +171,6 @@ export default function AccountPage() {
                   </Badge>
                 )}
               </div>
-              {lv?.error && <div className="text-[11px] text-loss mt-0.5 leading-tight">{lv.error}</div>}
             </td>
             <td className={tdClsCompact}>{getExchange(a.exchangeId).name}</td>
             {lv ? (

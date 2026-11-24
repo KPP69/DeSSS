@@ -1,12 +1,15 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { Tick, Balance, AppInfo, AccountView, CredentialMap, OrderBook, AccountLive } from "./types";
+import type { Tick, Balance, AppInfo, AccountView, CredentialMap, OrderBook, AccountLive, LogEntry, RuntimeSnapshot, ProxyState } from "./types";
 
 export const api = {
   getAppInfo: () => invoke<AppInfo>("get_app_info"),
   startMock: () => invoke<void>("start_mock"),
   stopMock: () => invoke<void>("stop_mock"),
   getSnapshot: () => invoke<{ ticks: Tick[]; balances: Balance[] }>("get_snapshot"),
+  getRuntimeSnapshot: () => invoke<RuntimeSnapshot>("get_runtime_snapshot"),
+  getProxy: () => invoke<ProxyState>("get_proxy"),
+  setProxy: (url: string) => invoke<ProxyState>("set_proxy", { url }),
   // Account center (phase 2). Credentials go to the Rust vault exactly once;
   // nothing secret is ever returned.
   listAccounts: () => invoke<AccountView[]>("list_accounts"),
@@ -34,4 +37,7 @@ export function onBook(cb: (b: OrderBook) => void): Promise<UnlistenFn> {
 }
 export function onAccountLive(cb: (a: AccountLive) => void): Promise<UnlistenFn> {
   return listen<AccountLive>("account://live", (e) => cb(e.payload));
+}
+export function onLog(cb: (l: LogEntry) => void): Promise<UnlistenFn> {
+  return listen<LogEntry>("app://log", (e) => cb(e.payload));
 }

@@ -186,7 +186,6 @@ pub struct LighterAdapter {
     ws_up: AtomicBool,
     rest_ok: AtomicBool,
     last_error: Mutex<Option<String>>,
-    last_frame: Mutex<Instant>,
     last_rtt: Mutex<Option<Duration>>,
     last_rest_rtt: Mutex<Option<Duration>>,
 }
@@ -216,25 +215,28 @@ impl LighterAdapter {
             ws_up: AtomicBool::new(false),
             rest_ok: AtomicBool::new(false),
             last_error: Mutex::new(None),
-            last_frame: Mutex::new(Instant::now()),
             last_rtt: Mutex::new(None),
             last_rest_rtt: Mutex::new(None),
         }
     }
 
+    /// Latency is always one measured round-trip: the WS ping -> pong RTT
+    /// while the WS is up, else the last REST request time. Frame
+    /// staleness and wall-clock subtraction are never used — a stale frame
+    /// timestamp is what made latency run away to 1.5M ms.
     fn latency_ms(&self) -> Option<u64> {
         if self.ws_up.load(Ordering::SeqCst) {
-            if let Some(rtt) = *self.last_rtt.lock().unwrap() {
-                return Some(rtt.as_millis() as u64);
-            }
-            return Some(self.last_frame.lock().unwrap().elapsed().as_millis() as u64);
+            return self.last_rtt.lock().unwrap().map(|r| r.as_millis() as u64);
         }
-        // WS down: fall back to the REST round-trip so the latency light
-        // still reflects something real.
         self.last_rest_rtt
             .lock()
             .unwrap()
             .map(|r| r.as_millis() as u64)
+    }
+
+    /// One console log line for the in-app drawer.
+    fn log(&self, level: &str, message: String) {
+        self.bus.log(level, self.name(), message);
     }
 
     fn publish_live(&self) {
@@ -464,7 +466,7 @@ impl LighterAdapter {
                 self.set_rest(true, Some(started.elapsed()));
             }
             Err(e) => {
-                tracing::warn!("[lighter] account poll failed: {e}");
+                self.log("error", format!("account poll failed: {e}"));
                 self.set_rest(false, None);
             }
         }
@@ -544,13 +546,8 @@ impl LighterAdapter {
             }
         }
 
-        let (mut ws, _) = tokio::time::timeout(
-            WS_CONNECT_TIMEOUT,
-            tokio_tungstenite::connect_async(self.network.ws_url()),
-        )
-        .await
-        .map_err(|_| "lighter ws connect timed out".to_string())
-        .and_then(|r| r.map_err(|e| format!("lighter ws connect failed: {e}")))?;
+        let (mut ws, _) =
+            super::proxy::connect_ws(self.network.ws_url(), WS_CONNECT_TIMEOUT).await?;
 
         let market_ids: Vec<u64> = self.market_ids.lock().unwrap().values().copied().collect();
         for mid in &market_ids {
@@ -563,6 +560,10 @@ impl LighterAdapter {
                 .map_err(|e| format!("subscribe failed: {e}"))?;
         }
         self.set_ws(true, None);
+        self.log(
+            "info",
+            format!("ws connected, subscribed to {} markets", market_ids.len()),
+        );
 
         let mut ping_i = tokio::time::interval(PING_INTERVAL);
         let mut stop_i = tokio::time::interval(Duration::from_secs(1));
@@ -583,7 +584,6 @@ impl LighterAdapter {
                 msg = ws.next() => {
                     match msg {
                         Some(Ok(Message::Text(t))) => {
-                            *self.last_frame.lock().unwrap() = Instant::now();
                             let text: &str = t.as_ref();
                             if let Ok(v) = serde_json::from_str::<Value>(text) {
                                 if v["type"].as_str() == Some("ping") {
@@ -599,7 +599,7 @@ impl LighterAdapter {
                                         return Err(e);
                                     }
                                 } else if v.get("error").is_some() {
-                                    tracing::warn!("[lighter] ws error message: {v}");
+                                    self.log("error", format!("ws error message: {v}"));
                                 }
                             }
                         }
@@ -616,20 +616,28 @@ impl LighterAdapter {
         }
     }
 
-    /// WS reconnect loop with backoff. A dead WS only flips ws_up off —
-    /// the account keeps its REST-driven live state (see live_status).
+    /// WS reconnect loop with a ladder backoff (5s -> 15s -> 30s cap).
+    /// A dead WS only flips ws_up off — the account keeps its REST-driven
+    /// live state (see live_status). A session that lived longer than 30s
+    /// resets the ladder, so a healthy link that drops once retries fast.
     async fn ws_loop(&self) {
-        let mut backoff: u64 = 1;
+        let mut attempt: usize = 0;
         while self.running.load(Ordering::SeqCst) {
+            let started = Instant::now();
             match self.ws_once().await {
                 Ok(()) => break,
                 Err(e) => {
                     if !self.running.load(Ordering::SeqCst) {
                         break;
                     }
-                    self.set_ws(false, Some(e));
-                    tokio::time::sleep(Duration::from_secs(backoff)).await;
-                    backoff = (backoff * 2).min(30);
+                    if started.elapsed() > Duration::from_secs(30) {
+                        attempt = 0;
+                    }
+                    self.set_ws(false, Some(e.clone()));
+                    self.log("error", format!("ws down: {e}"));
+                    let delay = [5, 15, 30][attempt.min(2)];
+                    attempt += 1;
+                    tokio::time::sleep(Duration::from_secs(delay)).await;
                 }
             }
         }
