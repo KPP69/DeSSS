@@ -33,26 +33,13 @@ use tokio_tungstenite::tungstenite::Message;
 
 use super::book::BookState;
 use super::types::{AccountLive, Balance, LivePosition, Order, OrderRequest, Position, Tick};
-use super::{AdapterResult, ExchangeAdapter};
+use super::{f64_from, now_ms, AdapterResult, ExchangeAdapter};
 use crate::bus::{AppEvent, EventBus};
 
-const REST_TIMEOUT: Duration = Duration::from_secs(10);
 const WS_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const PING_INTERVAL: Duration = Duration::from_secs(20);
 const POLL_INTERVAL: Duration = Duration::from_secs(10);
 const BOOK_DEPTH: usize = 20;
-
-fn now_ms() -> i64 {
-    chrono::Utc::now().timestamp_millis()
-}
-
-fn f64_from(v: &Value) -> f64 {
-    match v {
-        Value::String(s) => s.parse().unwrap_or(0.0),
-        Value::Number(n) => n.as_f64().unwrap_or(0.0),
-        _ => 0.0,
-    }
-}
 
 fn u64_from(v: &Value) -> Option<u64> {
     match v {
@@ -332,7 +319,7 @@ impl LighterAdapter {
             .get(&url)
             .send()
             .await
-            .map_err(|e| format!("lighter orderBooks request failed: {e:?}"))?;
+            .map_err(|e| format!("Lighter 盘口请求失败：{e:?}"))?;
         if !resp.status().is_success() {
             return Err(format!(
                 "lighter orderBooks returned HTTP {}",
@@ -342,10 +329,10 @@ impl LighterAdapter {
         let text = resp
             .text()
             .await
-            .map_err(|e| format!("lighter orderBooks read failed: {e:?}"))?;
+            .map_err(|e| format!("Lighter 盘口读取失败：{e:?}"))?;
         let v: Value = serde_json::from_str(&text).map_err(|e| {
             format!(
-                "lighter orderBooks: invalid JSON ({e}); body: {}",
+                "Lighter 盘口响应不是有效 JSON（{e}）；内容：{}",
                 body_snippet(&text, 500)
             )
         })?;
@@ -386,16 +373,16 @@ impl LighterAdapter {
             .get(&url)
             .send()
             .await
-            .map_err(|e| format!("lighter account request failed: {e:?}"))?;
+            .map_err(|e| format!("Lighter 账户请求失败：{e:?}"))?;
         if !resp.status().is_success() {
             return Err(format!("lighter account returned HTTP {}", resp.status()));
         }
         let v: Value = resp
             .json()
             .await
-            .map_err(|e| format!("bad account response: {e}"))?;
+            .map_err(|e| format!("账户响应解析失败：{e}"))?;
         let Some(acc) = v["accounts"].as_array().and_then(|a| a.first()) else {
-            return Err(format!("lighter account {} not found", self.account_index));
+            return Err(format!("Lighter 账户 {} 不存在", self.account_index));
         };
         let equity = f64_from(&acc["total_asset_value"]);
         let available = f64_from(&acc["available_balance"]);
@@ -466,7 +453,7 @@ impl LighterAdapter {
                 self.set_rest(true, Some(started.elapsed()));
             }
             Err(e) => {
-                self.log("error", format!("account poll failed: {e}"));
+                self.log("error", format!("账户轮询失败：{e}"));
                 self.set_rest(false, None);
             }
         }
@@ -558,12 +545,12 @@ impl LighterAdapter {
             });
             ws.send(Message::Text(sub.to_string().into()))
                 .await
-                .map_err(|e| format!("subscribe failed: {e}"))?;
+                .map_err(|e| format!("订阅失败：{e}"))?;
         }
         self.set_ws(true, None);
         self.log(
             "info",
-            format!("ws connected, subscribed to {} markets", market_ids.len()),
+            format!("行情已连接，已订阅 {} 个市场", market_ids.len()),
         );
 
         let mut ping_i = tokio::time::interval(PING_INTERVAL);
@@ -577,7 +564,7 @@ impl LighterAdapter {
                 _ = ping_i.tick() => {
                     let ping = serde_json::json!({"type": "ping"});
                     if ws.send(Message::Text(ping.to_string().into())).await.is_err() {
-                        return Err("ws send ping failed".to_string());
+                        return Err("行情心跳发送失败".to_string());
                     }
                     ping_sent = Some(Instant::now());
                 }
@@ -601,21 +588,21 @@ impl LighterAdapter {
                                             return Err(e);
                                         }
                                     } else if v.get("error").is_some() {
-                                        self.log("error", format!("ws error message: {v}"));
+                                        self.log("error", format!("行情收到错误消息：{v}"));
                                     }
                                 }
                                 Err(e) => self.log(
                                     "error",
                                     format!(
-                                        "ws frame json parse failed: {e} (first 200 chars: {})",
+                                        "行情数据解析失败：{e}（前 200 字符：{}）",
                                         text.chars().take(200).collect::<String>().as_str()
                                     ),
                                 ),
                             }
                         }
-                        Some(Ok(Message::Close(_))) => return Err("lighter ws closed".to_string()),
-                        Some(Err(e)) => return Err(format!("lighter ws error: {e}")),
-                        None => return Err("lighter ws stream ended".to_string()),
+                        Some(Ok(Message::Close(_))) => return Err("Lighter 行情连接已关闭".to_string()),
+                        Some(Err(e)) => return Err(format!("Lighter 行情出错：{e}")),
+                        None => return Err("Lighter 行情流已结束".to_string()),
                         _ => {}
                     }
                 }
@@ -644,8 +631,8 @@ impl LighterAdapter {
                         attempt = 0;
                     }
                     self.set_ws(false, Some(e.clone()));
-                    self.log("error", format!("ws down: {e}"));
                     let delay = [5, 15, 30][attempt.min(2)];
+                    self.log("error", format!("行情连接断开：{e}，{delay} 秒后重连"));
                     attempt += 1;
                     tokio::time::sleep(Duration::from_secs(delay)).await;
                 }
@@ -719,15 +706,11 @@ impl ExchangeAdapter for LighterAdapter {
     }
 
     async fn place_order(&self, _req: OrderRequest) -> AdapterResult<Order> {
-        Err(super::AdapterError::Other(
-            "order placement is not supported in the read-only phase".to_string(),
-        ))
+        Err(super::AdapterError::Other("只读阶段不支持下单".to_string()))
     }
 
     async fn cancel_order(&self, _account_id: &str, _order_id: &str) -> AdapterResult<()> {
-        Err(super::AdapterError::Other(
-            "order cancellation is not supported in the read-only phase".to_string(),
-        ))
+        Err(super::AdapterError::Other("只读阶段不支持撤单".to_string()))
     }
 
     async fn run(&self) {

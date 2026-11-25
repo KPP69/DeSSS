@@ -29,8 +29,6 @@ const HEADERS = ["账户名", "账户信息", "交易所", "权益 / 可用", "�
 export default function AccountPage() {
   const accounts = useAccountStore((s) => s.accounts);
   const loading = useAccountStore((s) => s.loading);
-  const error = useAccountStore((s) => s.error);
-  const vaultError = useAccountStore((s) => s.vaultError);
   const fetchAll = useAccountStore((s) => s.fetchAll);
   const remove = useAccountStore((s) => s.remove);
   const live = useLiveStore((s) => s.live);
@@ -42,7 +40,6 @@ export default function AccountPage() {
   const openEdit = useAccountUiStore((s) => s.openEdit);
   const closeModal = useAccountUiStore((s) => s.close);
   const [pendingDelete, setPendingDelete] = useState<AccountView | null>(null);
-  const [connectError, setConnectError] = useState<string | null>(null);
   const connectTried = useRef<Set<string>>(new Set());
 
   useEffect(() => {
@@ -67,31 +64,14 @@ export default function AccountPage() {
       api
         .connectAccount(a.id)
         .then(setLive)
-        // Do not swallow connect errors: a failed auto-connect used to
-        // leave the account on "未连接" with no feedback at all.
-        .catch((e) => setConnectError(`连接失败：${e}`));
+        // Connect failures are logged to the console by the backend;
+        // nothing is shown here so the list never shifts.
+        .catch(() => {});
     }
   }, [accounts, live, setLive]);
 
   return (
     <div>
-      {vaultError && (
-        <div className="mb-4 text-ds-down bg-ds-panel border border-ds-line rounded px-4 py-3">
-          Vault 初始化失败，账户凭证功能不可用：{vaultError}
-          <span className="text-ds-text-3">（原有 vault 文件未被修改，请检查 data 目录下的 vault.key / vault.enc）</span>
-        </div>
-      )}
-      {error && !vaultError && (
-        <div className="mb-4 text-ds-down bg-ds-panel border border-ds-line rounded px-4 py-3">
-          {error}
-        </div>
-      )}
-      {connectError && !vaultError && (
-        <div className="mb-4 text-ds-down bg-ds-panel border border-ds-line rounded px-4 py-3">
-          {connectError}
-        </div>
-      )}
-
       {/* Account columns, strictly locked by percentage (sum 100%):
           账户名 14% / 账户信息 22% / 交易所 14% / 权益 16% / 盈亏 12% /
           操作 22%. table-fixed + w-full keeps the ratios at any window
@@ -145,13 +125,7 @@ export default function AccountPage() {
                   <Button
                     variant="secondary"
                     size="sm"
-                    onClick={() => {
-                      setConnectError(null);
-                      api
-                        .connectAccount(a.id)
-                        .then(setLive)
-                        .catch((e) => setConnectError(`连接失败：${e}`));
-                    }}
+                    onClick={() => api.connectAccount(a.id).then(setLive).catch(() => {})}
                   >
                     连接
                   </Button>

@@ -67,7 +67,7 @@ impl DataEngine {
                 row.credential_configured as i64
             ],
         )
-        .map_err(|e| format!("failed to insert account: {e}"))?;
+        .map_err(|e| format!("写入账户失败：{e}"))?;
         Ok(())
     }
 
@@ -78,12 +78,12 @@ impl DataEngine {
                 "SELECT id, label, exchange_id, masked_identifier, created_at, updated_at, status, credential_configured
                  FROM accounts WHERE id = ?1",
             )
-            .map_err(|e| format!("failed to prepare account query: {e}"))?;
+            .map_err(|e| format!("准备账户查询失败：{e}"))?;
         let rows = stmt
             .query_map(params![id], map_account_row)
-            .map_err(|e| format!("failed to query account: {e}"))?;
+            .map_err(|e| format!("查询账户失败：{e}"))?;
         for row in rows {
-            return Ok(Some(row.map_err(|e| format!("failed to read account: {e}"))?));
+            return Ok(Some(row.map_err(|e| format!("读取账户失败：{e}"))?));
         }
         Ok(None)
     }
@@ -95,13 +95,13 @@ impl DataEngine {
                 "SELECT id, label, exchange_id, masked_identifier, created_at, updated_at, status, credential_configured
                  FROM accounts ORDER BY created_at ASC, label ASC",
             )
-            .map_err(|e| format!("failed to prepare account list: {e}"))?;
+            .map_err(|e| format!("准备账户列表查询失败：{e}"))?;
         let rows = stmt
             .query_map([], map_account_row)
-            .map_err(|e| format!("failed to list accounts: {e}"))?;
+            .map_err(|e| format!("列出账户失败：{e}"))?;
         let mut out = Vec::new();
         for row in rows {
-            out.push(row.map_err(|e| format!("failed to read account: {e}"))?);
+            out.push(row.map_err(|e| format!("读取账户失败：{e}"))?);
         }
         Ok(out)
     }
@@ -122,9 +122,9 @@ impl DataEngine {
                 "UPDATE accounts SET label = ?2, masked_identifier = ?3, credential_configured = ?4, updated_at = ?5 WHERE id = ?1",
                 params![id, label, masked_identifier, credential_configured as i64, updated_at],
             )
-            .map_err(|e| format!("failed to update account: {e}"))?;
+            .map_err(|e| format!("更新账户失败：{e}"))?;
         if changed == 0 {
-            return Err("account not found".to_string());
+            return Err("找不到该账户".to_string());
         }
         Ok(())
     }
@@ -133,9 +133,9 @@ impl DataEngine {
         let conn = self.lock();
         let changed = conn
             .execute("DELETE FROM accounts WHERE id = ?1", params![id])
-            .map_err(|e| format!("failed to delete account: {e}"))?;
+            .map_err(|e| format!("删除账户失败：{e}"))?;
         if changed == 0 {
-            return Err("account not found".to_string());
+            return Err("找不到该账户".to_string());
         }
         Ok(())
     }

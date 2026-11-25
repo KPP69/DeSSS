@@ -59,7 +59,7 @@ pub fn write_proxy_file(url: Option<&str>) -> Result<(), String> {
                 &path,
                 serde_json::to_string_pretty(&body).unwrap_or_default(),
             )
-            .map_err(|e| format!("failed to write proxy.json: {e}"))?;
+            .map_err(|e| format!("写入 proxy.json 失败：{e}"))?;
         }
         None => {
             let _ = std::fs::remove_file(&path);
@@ -73,18 +73,18 @@ pub fn write_proxy_file(url: Option<&str>) -> Result<(), String> {
 pub(crate) fn parse_proxy_url(raw: &str) -> Result<(String, u16), String> {
     let rest = raw
         .strip_prefix("http://")
-        .ok_or_else(|| "proxy url must start with http://".to_string())?;
+        .ok_or_else(|| "代理地址须以 http:// 开头".to_string())?;
     let hostport = rest.split(['/', '?']).next().unwrap_or("");
     let (host, port) = match hostport.split_once(':') {
         Some((h, p)) => (
             h.to_string(),
             p.parse::<u16>()
-                .map_err(|_| "proxy url needs a numeric port".to_string())?,
+                .map_err(|_| "代理地址端口须为数字".to_string())?,
         ),
         None => (hostport.to_string(), 8080),
     };
     if host.is_empty() {
-        return Err("proxy url needs a host".to_string());
+        return Err("代理地址缺少主机名".to_string());
     }
     Ok((host, port))
 }

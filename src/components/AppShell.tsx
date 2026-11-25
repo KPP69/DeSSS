@@ -1,8 +1,8 @@
-import React, { useState } from "react";
+import React from "react";
 import Sidebar from "./Sidebar";
 import ConsoleDrawer from "./ConsoleDrawer";
 import ThemeSwitcher from "./ThemeSwitcher";
-import { useConsoleStore, errorCount } from "../store/useConsoleStore";
+import { useConsoleStore } from "../store/useConsoleStore";
 
 /**
  * The one fixed three-zone shell, shared by all 6 pages:
@@ -22,9 +22,9 @@ export default function AppShell({
   toolbar?: React.ReactNode;
   children: React.ReactNode;
 }) {
-  const logs = useConsoleStore((s) => s.logs);
-  const errors = errorCount(logs);
-  const [consoleOpen, setConsoleOpen] = useState(false);
+  const unreadErrors = useConsoleStore((s) => s.unreadErrorCount);
+  const consoleOpen = useConsoleStore((s) => s.consoleOpen);
+  const setConsoleOpen = useConsoleStore((s) => s.setConsoleOpen);
 
   return (
     <div className="flex h-screen bg-ds-bg overflow-hidden">
@@ -35,13 +35,13 @@ export default function AppShell({
           <div className="flex items-center gap-2">
             <ThemeSwitcher />
             <button
-              onClick={() => setConsoleOpen((o) => !o)}
+              onClick={() => setConsoleOpen(!consoleOpen)}
               className="relative h-8 px-3 rounded-lg text-[13px] text-ds-text-1 bg-ds-panel-2 hover:bg-ds-bg-2 transition-colors"
             >
               控制台
-              {errors > 0 && (
+              {unreadErrors > 0 && (
                 <span className="absolute -top-1.5 -right-1.5 min-w-5 h-5 px-1 rounded-full bg-ds-down text-ds-down-contrast text-[11px] num flex items-center justify-center">
-                  {errors}
+                  {unreadErrors}
                 </span>
               )}
             </button>

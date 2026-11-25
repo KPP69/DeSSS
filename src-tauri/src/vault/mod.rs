@@ -38,19 +38,19 @@ const MIN_ENC_LEN: usize = NONCE_LEN + 16;
 
 #[derive(Debug, thiserror::Error)]
 pub enum VaultError {
-    #[error("vault.key is missing but vault.enc exists; refusing to generate a new key because that would orphan the existing encrypted credentials")]
+    #[error("vault.key 缺失，但 vault.enc 存在；拒绝生成新密钥，否则已有加密凭证将无法恢复")]
     MissingKeyWithData,
-    #[error("vault.key has an invalid length ({0} bytes, expected 32); the file may be corrupted")]
+    #[error("vault.key 长度不正确（{0} 字节，应为 32 字节），文件可能已损坏")]
     InvalidKeyLength(usize),
-    #[error("failed to decrypt vault.enc; the file may be corrupted or does not match vault.key. The original file was left untouched")]
+    #[error("vault.enc 解密失败，文件可能已损坏或与 vault.key 不匹配，原文件未做任何修改")]
     DecryptFailed,
-    #[error("vault.enc is malformed (too short to contain a nonce and authentication tag)")]
+    #[error("vault.enc 格式错误（太短，不含随机数与认证标签）")]
     MalformedVault,
-    #[error("failed to encrypt vault contents")]
+    #[error("加密凭证失败")]
     EncryptFailed,
-    #[error("vault file I/O error: {0}")]
+    #[error("vault 文件读写失败：{0}")]
     Io(#[from] std::io::Error),
-    #[error("vault data serialization error: {0}")]
+    #[error("vault 数据序列化失败：{0}")]
     Serde(#[from] serde_json::Error),
 }
 

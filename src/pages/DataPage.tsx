@@ -19,7 +19,7 @@ export default function DataPage() {
         真实行情 · 交易所 WebSocket 实时订阅
       </div>
       {bookList.length === 0 ? (
-        <EmptyState>暂无真实行情 — 请先在「账户」页面连接 Hyperliquid / Entropy / Lighter 账户。</EmptyState>
+        <EmptyState>暂无真实行情 — 请先在「账户」页面连接任意交易所账户。</EmptyState>
       ) : (
         <div className="mb-6">
           <DataTable

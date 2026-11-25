@@ -29,30 +29,17 @@ use tokio_tungstenite::tungstenite::Message;
 
 use super::book::BookState;
 use super::types::{AccountLive, Balance, LivePosition, Order, OrderRequest, Position, Tick};
-use super::{AdapterResult, ExchangeAdapter};
+use super::{f64_from, now_ms, AdapterResult, ExchangeAdapter};
 use crate::bus::{AppEvent, EventBus};
 
 pub const ARCUS_REST_URL: &str = "https://api.arcus.xyz";
 pub const ARCUS_WS_URL: &str = "wss://api.arcus.xyz/v1/ws";
 
-const REST_TIMEOUT: Duration = Duration::from_secs(10);
 const WS_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const PING_INTERVAL: Duration = Duration::from_secs(20);
 const POLL_INTERVAL: Duration = Duration::from_secs(10);
 const BOOK_DEPTH: usize = 20;
 const MARKET_COUNT: usize = 2;
-
-fn now_ms() -> i64 {
-    chrono::Utc::now().timestamp_millis()
-}
-
-fn f64_from(v: &Value) -> f64 {
-    match v {
-        Value::String(s) => s.parse().unwrap_or(0.0),
-        Value::Number(n) => n.as_f64().unwrap_or(0.0),
-        _ => 0.0,
-    }
-}
 
 /// Rank the market list by 24h notional volume and take the top N active
 /// perpetual display names (`"BTC-USD"` …). Market IDs are never hardcoded.
@@ -120,7 +107,7 @@ fn parse_position(p: &Value) -> Option<LivePosition> {
 /// total-PnL field on the endpoint.
 fn parse_account(v: &Value) -> Result<(f64, f64, f64, Vec<LivePosition>), String> {
     if v.get("equity").is_none() {
-        return Err("unexpected /v1/account shape (no equity)".to_string());
+        return Err("账户数据格式异常（缺少 equity）".to_string());
     }
     let equity = f64_from(&v["equity"]);
     let available = f64_from(&v["freeCollateral"]);
@@ -292,16 +279,16 @@ impl ArcusAdapter {
             .get(&url)
             .send()
             .await
-            .map_err(|e| format!("arcus markets request failed: {e:?}"))?;
+            .map_err(|e| format!("Arcus 市场列表请求失败：{e:?}"))?;
         if !resp.status().is_success() {
-            return Err(format!("arcus markets returned HTTP {}", resp.status()));
+            return Err(format!("Arcus 市场列表接口返回 HTTP {}", resp.status()));
         }
         let v: Value = resp
             .json()
             .await
-            .map_err(|e| format!("bad markets response: {e}"))?;
+            .map_err(|e| format!("市场列表响应解析失败：{e}"))?;
         let markets = parse_markets(&v, MARKET_COUNT)?;
-        self.log("info", format!("resolved markets: {}", markets.join(", ")));
+        self.log("info", format!("已选出行情市场：{}", markets.join(", ")));
         *self.resolved_markets.lock().unwrap() = markets;
         Ok(())
     }
@@ -317,19 +304,17 @@ impl ArcusAdapter {
             .get(&url)
             .send()
             .await
-            .map_err(|e| format!("arcus account request failed: {e:?}"))?;
+            .map_err(|e| format!("Arcus 账户请求失败：{e:?}"))?;
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
             let snippet: String = body.chars().take(200).collect();
-            return Err(format!(
-                "arcus account returned HTTP {status}: {snippet}"
-            ));
+            return Err(format!("Arcus 账户接口返回 HTTP {status}：{snippet}"));
         }
         let v: Value = resp
             .json()
             .await
-            .map_err(|e| format!("bad account response: {e}"))?;
+            .map_err(|e| format!("账户响应解析失败：{e}"))?;
         let (equity, available, pnl, positions) = parse_account(&v)?;
         let snap = Snapshot {
             equity_usd: equity,
@@ -359,7 +344,7 @@ impl ArcusAdapter {
                 self.set_rest(true, Some(started.elapsed()));
             }
             Err(e) => {
-                self.log("error", format!("account poll failed: {e}"));
+                self.log("error", format!("账户轮询失败：{e}"));
                 self.set_rest(false, None);
             }
         }
@@ -440,13 +425,13 @@ impl ArcusAdapter {
                 }
                 ws.send(Message::Text(sub.to_string().into()))
                     .await
-                    .map_err(|e| format!("subscribe failed: {e}"))?;
+                    .map_err(|e| format!("订阅失败：{e}"))?;
             }
         }
         self.set_ws(true, None);
         self.log(
             "info",
-            format!("ws connected, subscribed to {}", self.markets().join(", ")),
+            format!("行情已连接，已订阅 {}", self.markets().join(", ")),
         );
 
         let mut ping_i = tokio::time::interval(PING_INTERVAL);
@@ -459,7 +444,7 @@ impl ArcusAdapter {
             tokio::select! {
                 _ = ping_i.tick() => {
                     if ws.send(Message::Ping(vec![].into())).await.is_err() {
-                        return Err("ws send ping failed".to_string());
+                        return Err("行情心跳发送失败".to_string());
                     }
                     ping_sent = Some(Instant::now());
                 }
@@ -486,7 +471,7 @@ impl ArcusAdapter {
                                 Err(e) => self.log(
                                     "error",
                                     format!(
-                                        "ws frame json parse failed: {e} (first 200 chars: {})",
+                                        "行情数据解析失败：{e}（前 200 字符：{}）",
                                         text.chars().take(200).collect::<String>().as_str()
                                     ),
                                 ),
@@ -498,9 +483,9 @@ impl ArcusAdapter {
                                 self.publish_live();
                             }
                         }
-                        Some(Ok(Message::Close(_))) => return Err("arcus ws closed".to_string()),
-                        Some(Err(e)) => return Err(format!("arcus ws error: {e}")),
-                        None => return Err("arcus ws stream ended".to_string()),
+                        Some(Ok(Message::Close(_))) => return Err("Arcus 行情连接已关闭".to_string()),
+                        Some(Err(e)) => return Err(format!("Arcus 行情出错：{e}")),
+                        None => return Err("Arcus 行情流已结束".to_string()),
                         _ => {}
                     }
                 }
@@ -526,8 +511,8 @@ impl ArcusAdapter {
                         attempt = 0;
                     }
                     self.set_ws(false, Some(e.clone()));
-                    self.log("error", format!("ws down: {e}"));
                     let delay = [5, 15, 30][attempt.min(2)];
+                    self.log("error", format!("行情连接断开：{e}，{delay} 秒后重连"));
                     attempt += 1;
                     tokio::time::sleep(Duration::from_secs(delay)).await;
                 }
@@ -597,15 +582,11 @@ impl ExchangeAdapter for ArcusAdapter {
     }
 
     async fn place_order(&self, _req: OrderRequest) -> AdapterResult<Order> {
-        Err(super::AdapterError::Other(
-            "order placement is not supported in the read-only phase".to_string(),
-        ))
+        Err(super::AdapterError::Other("只读阶段不支持下单".to_string()))
     }
 
     async fn cancel_order(&self, _account_id: &str, _order_id: &str) -> AdapterResult<()> {
-        Err(super::AdapterError::Other(
-            "order cancellation is not supported in the read-only phase".to_string(),
-        ))
+        Err(super::AdapterError::Other("只读阶段不支持撤单".to_string()))
     }
 
     async fn run(&self) {

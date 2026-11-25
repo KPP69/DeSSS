@@ -10,7 +10,7 @@ use async_trait::async_trait;
 pub type AdapterResult<T> = Result<T, AdapterError>;
 #[derive(Debug, thiserror::Error)]
 pub enum AdapterError {
-    #[error("not connected")]
+    #[error("未连接")]
     NotConnected,
     #[error("{0}")]
     Other(String),
@@ -30,6 +30,20 @@ pub fn live_status(ws_up: bool, rest_ok: bool, has_error: bool) -> &'static str 
         "error"
     } else {
         "connecting"
+    }
+}
+
+/// Current time in milliseconds since the Unix epoch.
+pub(crate) fn now_ms() -> i64 {
+    chrono::Utc::now().timestamp_millis()
+}
+
+/// A JSON number-or-numeric-string as f64; anything else reads as 0.
+pub(crate) fn f64_from(v: &serde_json::Value) -> f64 {
+    match v {
+        serde_json::Value::String(s) => s.parse().unwrap_or(0.0),
+        serde_json::Value::Number(n) => n.as_f64().unwrap_or(0.0),
+        _ => 0.0,
     }
 }
 

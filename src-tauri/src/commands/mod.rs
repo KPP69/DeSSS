@@ -30,8 +30,8 @@ pub fn spawn_bus_forwarder(handle: AppHandle, state: Arc<AppState>) {
             "info",
             "DeSSS",
             format!(
-                "runtime log connected · proxy: {}",
-                crate::net::proxy::resolve_proxy().unwrap_or_else(|| "direct".to_string())
+                "控制台已连接 · 代理：{}",
+                crate::net::proxy::resolve_proxy().unwrap_or_else(|| "直连".to_string())
             ),
         );
         loop {
@@ -154,16 +154,16 @@ async fn connect_account_inner(
     id: String,
 ) -> Result<crate::adapters::types::AccountLive, String> {
     if state.sync.is_running(&id) {
-        return Err("account is already connected".to_string());
+        return Err("该账户已连接".to_string());
     }
     let row = state
         .db
         .get_account(&id)?
-        .ok_or_else(|| "account not found".to_string())?;
+        .ok_or_else(|| "找不到该账户".to_string())?;
     let vault = state.vault.store()?;
     let creds = vault
         .get(&id)
-        .ok_or_else(|| "no credentials stored for this account".to_string())?;
+        .ok_or_else(|| "该账户未保存凭证".to_string())?;
     let adapter = crate::adapters::sync::build_adapter(
         &row,
         &creds,
@@ -173,7 +173,7 @@ async fn connect_account_inner(
     state.bus.log(
         "info",
         "DeSSS",
-        format!("connecting account {} ({})", row.label, row.exchange_id),
+        format!("正在连接账户 {}（{}）", row.label, row.exchange_id),
     );
     adapter.connect().await.map_err(|e| e.to_string())?;
     state.sync.insert(id.clone(), adapter.clone());
@@ -209,9 +209,7 @@ pub async fn disconnect_account(state: State<'_, Arc<AppState>>, id: String) -> 
         adapter.disconnect().await.map_err(|e| e.to_string())?;
     }
     state.sync.remove_live(&id);
-    state
-        .bus
-        .log("info", "DeSSS", format!("disconnected account {id}"));
+    state.bus.log("info", "DeSSS", format!("已断开账户 {id}"));
     Ok(())
 }
 

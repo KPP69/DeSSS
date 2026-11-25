@@ -21,29 +21,16 @@ use tokio_tungstenite::tungstenite::Message;
 
 use super::book::BookState;
 use super::types::{AccountLive, Balance, LivePosition, Order, OrderRequest, Position, Tick};
-use super::{AdapterResult, ExchangeAdapter};
+use super::{f64_from, now_ms, AdapterResult, ExchangeAdapter};
 use crate::bus::{AppEvent, EventBus};
 
 pub const HL_WS_URL: &str = "wss://api.hyperliquid.xyz/ws";
 pub const HL_INFO_URL: &str = "https://api.hyperliquid.xyz/info";
 
-const REST_TIMEOUT: Duration = Duration::from_secs(10);
 const WS_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const PING_INTERVAL: Duration = Duration::from_secs(20);
 const POLL_INTERVAL: Duration = Duration::from_secs(10);
 const BOOK_DEPTH: usize = 20;
-
-fn now_ms() -> i64 {
-    chrono::Utc::now().timestamp_millis()
-}
-
-fn f64_from(v: &Value) -> f64 {
-    match v {
-        Value::String(s) => s.parse().unwrap_or(0.0),
-        Value::Number(n) => n.as_f64().unwrap_or(0.0),
-        _ => 0.0,
-    }
-}
 
 /// Parse a `meta` response into the active perp contract names. The names
 /// already carry the dex prefix for HIP-3 markets (e.g. `io:NVDA`); delisted
@@ -299,14 +286,14 @@ impl HyperliquidAdapter {
             .json(&body)
             .send()
             .await
-            .map_err(|e| format!("hyperliquid info request failed: {e:?}"))?;
+            .map_err(|e| format!("Hyperliquid 账户请求失败：{e:?}"))?;
         if !resp.status().is_success() {
-            return Err(format!("hyperliquid info returned HTTP {}", resp.status()));
+            return Err(format!("Hyperliquid 账户接口返回 HTTP {}", resp.status()));
         }
         let v: Value = resp
             .json()
             .await
-            .map_err(|e| format!("bad info response: {e}"))?;
+            .map_err(|e| format!("账户响应解析失败：{e}"))?;
         let margin = &v["marginSummary"];
         let equity = f64_from(&margin["accountValue"]);
         let withdrawable = f64_from(&v["withdrawable"]);
@@ -375,7 +362,7 @@ impl HyperliquidAdapter {
             .json(&body)
             .send()
             .await
-            .map_err(|e| format!("hyperliquid spot info request failed: {e:?}"))?;
+            .map_err(|e| format!("Hyperliquid 现货账户请求失败：{e:?}"))?;
         if !resp.status().is_success() {
             return Err(format!(
                 "hyperliquid spot info returned HTTP {}",
@@ -385,7 +372,7 @@ impl HyperliquidAdapter {
         let v: Value = resp
             .json()
             .await
-            .map_err(|e| format!("bad spot info response: {e}"))?;
+            .map_err(|e| format!("现货账户响应解析失败：{e}"))?;
         Ok(parse_spot_balances(&v))
     }
 
@@ -401,10 +388,7 @@ impl HyperliquidAdapter {
                     snap = merge_spot(snap, &spot, &mark);
                 }
                 Err(e) => {
-                    self.log(
-                        "warn",
-                        format!("spot state read failed, using perp only: {e}"),
-                    );
+                    self.log("warn", format!("现货账户读取失败，只用永续仓位：{e}"));
                 }
             }
         }
@@ -433,14 +417,17 @@ impl HyperliquidAdapter {
             .json(&body)
             .send()
             .await
-            .map_err(|e| format!("hyperliquid meta request failed: {e:?}"))?;
+            .map_err(|e| format!("Hyperliquid 市场信息请求失败：{e:?}"))?;
         if !resp.status().is_success() {
-            return Err(format!("hyperliquid meta returned HTTP {}", resp.status()));
+            return Err(format!(
+                "Hyperliquid 市场信息接口返回 HTTP {}",
+                resp.status()
+            ));
         }
         let v: Value = resp
             .json()
             .await
-            .map_err(|e| format!("bad meta response: {e}"))?;
+            .map_err(|e| format!("市场信息响应解析失败：{e}"))?;
         let universe = parse_meta_universe(&v);
         if universe.is_empty() {
             return Err(format!(
@@ -483,7 +470,7 @@ impl HyperliquidAdapter {
                 self.set_rest(true, Some(started.elapsed()));
             }
             Err(e) => {
-                self.log("error", format!("account poll failed: {e}"));
+                self.log("error", format!("账户轮询失败：{e}"));
                 self.set_rest(false, None);
             }
         }
@@ -562,12 +549,12 @@ impl HyperliquidAdapter {
             });
             ws.send(Message::Text(sub.to_string().into()))
                 .await
-                .map_err(|e| format!("subscribe failed: {e}"))?;
+                .map_err(|e| format!("订阅失败：{e}"))?;
         }
         self.set_ws(true, None);
         self.log(
             "info",
-            format!("ws connected, subscribed to {}", self.symbols().join(", ")),
+            format!("行情已连接，已订阅 {}", self.symbols().join(", ")),
         );
 
         let mut ping_i = tokio::time::interval(PING_INTERVAL);
@@ -581,7 +568,7 @@ impl HyperliquidAdapter {
                 _ = ping_i.tick() => {
                     let ping = serde_json::json!({"method": "ping"});
                     if ws.send(Message::Text(ping.to_string().into())).await.is_err() {
-                        return Err("ws send ping failed".to_string());
+                        return Err("行情心跳发送失败".to_string());
                     }
                     ping_sent = Some(Instant::now());
                 }
@@ -609,15 +596,15 @@ impl HyperliquidAdapter {
                                 Err(e) => self.log(
                                     "error",
                                     format!(
-                                        "ws frame json parse failed: {e} (first 200 chars: {})",
+                                        "行情数据解析失败：{e}（前 200 字符：{}）",
                                         text.chars().take(200).collect::<String>().as_str()
                                     ),
                                 ),
                             }
                         }
-                        Some(Ok(Message::Close(_))) => return Err("hyperliquid ws closed".to_string()),
-                        Some(Err(e)) => return Err(format!("hyperliquid ws error: {e}")),
-                        None => return Err("hyperliquid ws stream ended".to_string()),
+                        Some(Ok(Message::Close(_))) => return Err("Hyperliquid 行情连接已关闭".to_string()),
+                        Some(Err(e)) => return Err(format!("Hyperliquid 行情出错：{e}")),
+                        None => return Err("Hyperliquid 行情流已结束".to_string()),
                         _ => {}
                     }
                 }
@@ -646,8 +633,8 @@ impl HyperliquidAdapter {
                         attempt = 0;
                     }
                     self.set_ws(false, Some(e.clone()));
-                    self.log("error", format!("ws down: {e}"));
                     let delay = [5, 15, 30][attempt.min(2)];
+                    self.log("error", format!("行情连接断开：{e}，{delay} 秒后重连"));
                     attempt += 1;
                     tokio::time::sleep(Duration::from_secs(delay)).await;
                 }
@@ -721,15 +708,11 @@ impl ExchangeAdapter for HyperliquidAdapter {
     }
 
     async fn place_order(&self, _req: OrderRequest) -> AdapterResult<Order> {
-        Err(super::AdapterError::Other(
-            "order placement is not supported in the read-only phase".to_string(),
-        ))
+        Err(super::AdapterError::Other("只读阶段不支持下单".to_string()))
     }
 
     async fn cancel_order(&self, _account_id: &str, _order_id: &str) -> AdapterResult<()> {
-        Err(super::AdapterError::Other(
-            "order cancellation is not supported in the read-only phase".to_string(),
-        ))
+        Err(super::AdapterError::Other("只读阶段不支持撤单".to_string()))
     }
 
     async fn run(&self) {

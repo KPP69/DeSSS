@@ -7,7 +7,8 @@
 //! account index for Lighter, wallet address for Arcus). Private keys are
 //! never read here and never leave the vault. AsterDEX is the exception
 //! that needs a secret: its API Key/Secret pair is passed to the adapter
-//! for HMAC signing only, and never logged.
+//! for HMAC signing only, and an Agent wallet's private key for V3 EIP-712
+//! signing only; neither is ever logged.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
@@ -74,6 +75,19 @@ impl SyncManager {
     }
 }
 
+/// Read a 0x-prefixed 42-char wallet address from stored credentials.
+fn valid_address(credentials: &Value, key: &str, label: &str) -> Result<String, String> {
+    let address = credentials
+        .get(key)
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| format!("保存的凭证缺少{label}"))?
+        .to_string();
+    if !address.starts_with("0x") || address.len() != 42 {
+        return Err(format!("{label}格式不正确（应为 0x 开头的 42 位地址）"));
+    }
+    Ok(address)
+}
+
 /// Build a read-only adapter for one stored account. Returns an error
 /// when the needed public identifier is missing from the vault record.
 /// AsterDEX never errors on missing credentials: the adapter starts the
@@ -92,14 +106,7 @@ pub fn build_adapter(
             } else {
                 None
             };
-            let address = credentials
-                .get("wallet_address")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| "wallet_address is missing from the stored credentials".to_string())?
-                .to_string();
-            if !address.starts_with("0x") || address.len() != 42 {
-                return Err("stored wallet_address is not a valid 0x address".to_string());
-            }
+            let address = valid_address(credentials, "wallet_address", "主钱包地址")?;
             Ok(Arc::new(HyperliquidAdapter::new(
                 &row.exchange_id,
                 dex,
@@ -118,9 +125,7 @@ pub fn build_adapter(
             let index = credentials
                 .get("account_index")
                 .and_then(|v| v.as_u64())
-                .ok_or_else(|| {
-                    "account_index is missing from the stored credentials".to_string()
-                })?;
+                .ok_or_else(|| "保存的凭证缺少 Account Index".to_string())?;
             Ok(Arc::new(LighterAdapter::new(
                 &row.exchange_id,
                 network,
@@ -131,27 +136,50 @@ pub fn build_adapter(
             )))
         }
         "asterdex" => {
-            // The Agent-wallet mode needs V3 EIP-712 auth (unsupported in
-            // this phase); the adapter logs that and runs the public WS
-            // book only. Same for a missing key pair.
+            // API Key mode: V1 HMAC signing. Agent mode: V3 EIP-712
+            // signing with the agent private key; the master wallet
+            // address is the V3 `user`, the agent address the `signer`.
+            // The secret is decoded and checked against the agent address
+            // here, so a mismatched key fails fast with a clear error
+            // instead of failing every signed request later.
             let mode = credentials
                 .get("mode")
                 .and_then(|v| v.as_str())
                 .unwrap_or("api");
-            let (api_key, api_secret) = if mode == "agent" {
-                (None, None)
-            } else {
-                (
-                    credentials
-                        .get("api_key")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string()),
-                    credentials
-                        .get("api_secret")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string()),
-                )
-            };
+            if mode == "agent" {
+                let user = valid_address(credentials, "master_wallet_address", "主钱包地址")?;
+                let signer = valid_address(credentials, "agent_wallet_address", "Agent 钱包地址")?;
+                let secret_hex = credentials
+                    .get("agent_private_key")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| "保存的凭证缺少 Agent 钱包私钥".to_string())?;
+                let secret = crate::adapters::asterdex::decode_agent_secret(secret_hex)?;
+                let derived = crate::adapters::asterdex::address_from_secret(&secret);
+                if !derived.eq_ignore_ascii_case(&signer) {
+                    return Err(
+                        "Agent 钱包私钥与 Agent 钱包地址不匹配，请检查保存的凭证".to_string()
+                    );
+                }
+                return Ok(Arc::new(AsterdexAdapter::new_agent(
+                    &row.exchange_id,
+                    account_id,
+                    user,
+                    signer,
+                    secret,
+                    bus,
+                    live,
+                )));
+            }
+            let (api_key, api_secret) = (
+                credentials
+                    .get("api_key")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                credentials
+                    .get("api_secret")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+            );
             Ok(Arc::new(AsterdexAdapter::new(
                 &row.exchange_id,
                 account_id,
@@ -162,14 +190,7 @@ pub fn build_adapter(
             )))
         }
         "arcus" => {
-            let address = credentials
-                .get("wallet_address")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| "wallet_address is missing from the stored credentials".to_string())?
-                .to_string();
-            if !address.starts_with("0x") || address.len() != 42 {
-                return Err("stored wallet_address is not a valid 0x address".to_string());
-            }
+            let address = valid_address(credentials, "wallet_address", "钱包地址")?;
             Ok(Arc::new(ArcusAdapter::new(
                 &row.exchange_id,
                 address,
@@ -178,8 +199,6 @@ pub fn build_adapter(
                 live,
             )))
         }
-        other => Err(format!(
-            "read-only sync is not implemented for {other} in this phase"
-        )),
+        other => Err(format!("本阶段暂不支持 {other} 的只读同步")),
     }
 }

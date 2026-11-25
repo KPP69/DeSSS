@@ -48,23 +48,17 @@ pub async fn connect_ws(
                 bus.log(
                     "error",
                     "net",
-                    format!("ws via proxy {p} failed: {e}; trying direct"),
+                    format!("代理 {p} 连接行情失败：{e}，改用直连"),
                 );
                 match connect_ws_with_proxy(url, None, timeout).await {
                     Ok(v) => {
-                        bus.log(
-                            "warn",
-                            "net",
-                            format!("ws connected direct after proxy failed: {e}"),
-                        );
+                        bus.log("warn", "net", format!("代理失败后已直连行情：{e}"));
                         Ok(v)
                     }
-                    Err(e2) => Err(format!(
-                        "ws connect failed via proxy ({e}) and direct ({e2})"
-                    )),
+                    Err(e2) => Err(format!("行情连接失败：代理（{e}）与直连（{e2}）均失败")),
                 }
             } else {
-                bus.log("error", "net", format!("ws connect failed: {e}"));
+                bus.log("error", "net", format!("行情连接失败：{e}"));
                 Err(e)
             }
         }
@@ -83,11 +77,11 @@ pub async fn connect_ws_with_proxy(
         Some(p) => {
             let reader = tokio::time::timeout(timeout, connect_via_proxy(p, &host, port))
                 .await
-                .map_err(|_| format!("proxy CONNECT to {host}:{port} timed out"))??;
+                .map_err(|_| format!("代理 CONNECT 超时：{host}:{port}"))??;
             if tls {
                 let tls_stream = tokio::time::timeout(timeout, tls_wrap(reader, &host))
                     .await
-                    .map_err(|_| "tls handshake timed out".to_string())??;
+                    .map_err(|_| "TLS 握手超时".to_string())??;
                 Box::new(MaybeTlsStream::Rustls(tls_stream))
             } else {
                 Box::new(MaybeTlsStream::Plain(reader))
@@ -96,13 +90,13 @@ pub async fn connect_ws_with_proxy(
         None => {
             let tcp = tokio::time::timeout(timeout, TcpStream::connect((host.as_str(), port)))
                 .await
-                .map_err(|_| format!("tcp connect to {host}:{port} timed out"))?
-                .map_err(|e| format!("tcp connect failed: {e:?}"))?;
+                .map_err(|_| format!("TCP 连接超时：{host}:{port}"))?
+                .map_err(|e| format!("TCP 连接失败：{e:?}"))?;
             if tls {
                 let tls_stream =
                     tokio::time::timeout(timeout, tls_wrap(BufReader::new(tcp), &host))
                         .await
-                        .map_err(|_| "tls handshake timed out".to_string())??;
+                        .map_err(|_| "TLS 握手超时".to_string())??;
                 Box::new(MaybeTlsStream::Rustls(tls_stream))
             } else {
                 Box::new(MaybeTlsStream::Plain(tcp))
@@ -111,8 +105,8 @@ pub async fn connect_ws_with_proxy(
     };
     let (ws, resp) = tokio::time::timeout(timeout, client_async(url, stream))
         .await
-        .map_err(|_| "ws handshake timed out".to_string())?
-        .map_err(|e| format!("ws handshake failed: {e}"))?;
+        .map_err(|_| "行情握手超时".to_string())?
+        .map_err(|e| format!("行情握手失败：{e}"))?;
     Ok((ws, resp))
 }
 
@@ -122,19 +116,19 @@ fn parse_ws_url(url: &str) -> Result<(String, u16, bool), String> {
     } else if let Some(r) = url.strip_prefix("ws://") {
         (false, r)
     } else {
-        return Err(format!("unsupported ws url: {url}"));
+        return Err(format!("不支持的行情地址：{url}"));
     };
     let hostport = rest.split(['/', '?']).next().unwrap_or("");
     let (host, port) = match hostport.split_once(':') {
         Some((h, p)) => (
             h.to_string(),
             p.parse::<u16>()
-                .map_err(|_| format!("bad ws port in {url}"))?,
+                .map_err(|_| format!("行情地址端口无效：{url}"))?,
         ),
         None => (hostport.to_string(), if tls { 443 } else { 80 }),
     };
     if host.is_empty() {
-        return Err(format!("bad ws url: {url}"));
+        return Err(format!("行情地址无效：{url}"));
     }
     Ok((host, port, tls))
 }
@@ -151,35 +145,35 @@ async fn connect_via_proxy(
     let (phost, pport) = super::proxy::parse_proxy_url(proxy_url)?;
     let stream = TcpStream::connect((phost.as_str(), pport))
         .await
-        .map_err(|e| format!("proxy tcp connect failed ({proxy_url}): {e:?}"))?;
+        .map_err(|e| format!("代理 TCP 连接失败（{proxy_url}）：{e:?}"))?;
     let mut reader = BufReader::new(stream);
     let req = format!("CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\n\r\n");
     reader
         .write_all(req.as_bytes())
         .await
-        .map_err(|e| format!("proxy CONNECT write failed: {e}"))?;
+        .map_err(|e| format!("代理 CONNECT 写入失败：{e}"))?;
     reader
         .flush()
         .await
-        .map_err(|e| format!("proxy CONNECT flush failed: {e}"))?;
+        .map_err(|e| format!("代理 CONNECT 发送失败：{e}"))?;
     // Status line first, then the remaining headers until the blank line.
     let mut status = String::new();
     reader
         .read_line(&mut status)
         .await
-        .map_err(|e| format!("proxy CONNECT read failed: {e}"))?;
+        .map_err(|e| format!("代理 CONNECT 读取失败：{e}"))?;
     if status.is_empty() {
-        return Err("proxy closed the CONNECT".to_string());
+        return Err("代理关闭了 CONNECT 连接".to_string());
     }
     if !status.contains(" 200 ") {
-        return Err(format!("proxy CONNECT rejected: {}", status.trim()));
+        return Err(format!("代理拒绝 CONNECT：{}", status.trim()));
     }
     loop {
         let mut line = String::new();
         reader
             .read_line(&mut line)
             .await
-            .map_err(|e| format!("proxy CONNECT read failed: {e}"))?;
+            .map_err(|e| format!("代理 CONNECT 读取失败：{e}"))?;
         if line == "\r\n" || line == "\n" || line.is_empty() {
             break;
         }
@@ -187,11 +181,23 @@ async fn connect_via_proxy(
     Ok(reader)
 }
 
+/// One global ring CryptoProvider, initialized exactly once (OnceLock is
+/// the std::sync::Once-based one-time init): building it per dial is
+/// wasteful, and a process-default install would fail on the second call.
+static CRYPTO_PROVIDER: std::sync::OnceLock<std::sync::Arc<rustls::crypto::CryptoProvider>> =
+    std::sync::OnceLock::new();
+
+fn crypto_provider() -> std::sync::Arc<rustls::crypto::CryptoProvider> {
+    CRYPTO_PROVIDER
+        .get_or_init(|| std::sync::Arc::new(rustls::crypto::ring::default_provider()))
+        .clone()
+}
+
 fn tls_client_config() -> rustls::ClientConfig {
     // Pick the crypto provider explicitly: with both `ring` and
     // `aws-lc-rs` enabled (reqwest pulls the latter in), the plain
     // `ClientConfig::builder()` cannot auto-detect one and panics.
-    let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
+    let provider = crypto_provider();
     let mut config = rustls::ClientConfig::builder_with_provider(provider)
         .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
         .expect("tls versions")
@@ -217,10 +223,13 @@ static TEST_TLS_ROOTS: std::sync::Mutex<Vec<rustls::pki_types::CertificateDer<'s
     std::sync::Mutex::new(Vec::new());
 
 /// Test-only: trust extra roots (e.g. a self-signed cert from rcgen) in
-/// addition to the webpki roots.
+/// addition to the webpki roots. Roots accumulate across tests: two
+/// parallel tests each spin up their own TLS server with its own cert,
+/// and overwriting the list here used to un-trust the other test's cert
+/// mid-handshake (the parallel `cargo test` flake).
 #[cfg(test)]
 pub fn set_test_tls_roots(roots: Vec<rustls::pki_types::CertificateDer<'static>>) {
-    *TEST_TLS_ROOTS.lock().unwrap() = roots;
+    TEST_TLS_ROOTS.lock().unwrap().extend(roots);
 }
 
 async fn tls_wrap<S: AsyncRead + AsyncWrite + Unpin>(
@@ -229,11 +238,11 @@ async fn tls_wrap<S: AsyncRead + AsyncWrite + Unpin>(
 ) -> Result<tokio_rustls::client::TlsStream<S>, String> {
     let connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(tls_client_config()));
     let server_name = rustls::pki_types::ServerName::try_from(host.to_string())
-        .map_err(|e| format!("bad ws host {host}: {e}"))?;
+        .map_err(|e| format!("行情地址无效 {host}：{e}"))?;
     connector
         .connect(server_name, stream)
         .await
-        .map_err(|e| format!("tls handshake failed: {e:?}"))
+        .map_err(|e| format!("TLS 握手失败：{e:?}"))
 }
 
 #[cfg(test)]
@@ -343,17 +352,15 @@ mod tests {
         let key_der = certified.key_pair.serialize_der();
         set_test_tls_roots(vec![cert_der.clone()]);
 
-        let server_config = rustls::ServerConfig::builder_with_provider(std::sync::Arc::new(
-            rustls::crypto::ring::default_provider(),
-        ))
-        .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
-        .expect("tls versions")
-        .with_no_client_auth()
-        .with_single_cert(
-            vec![cert_der],
-            rustls::pki_types::PrivateKeyDer::Pkcs8(key_der.into()),
-        )
-        .expect("server cert");
+        let server_config = rustls::ServerConfig::builder_with_provider(crypto_provider())
+            .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
+            .expect("tls versions")
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![cert_der],
+                rustls::pki_types::PrivateKeyDer::Pkcs8(key_der.into()),
+            )
+            .expect("server cert");
         let tls_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let tls_addr = tls_listener.local_addr().unwrap();
         tokio::spawn(async move {
