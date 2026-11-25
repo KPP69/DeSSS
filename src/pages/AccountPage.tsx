@@ -187,7 +187,12 @@ export default function AccountPage() {
           await api.disconnectAccount(pendingDelete.id).catch(() => {});
           removeLive(pendingDelete.id);
           const ok = await remove(pendingDelete.id);
-          if (ok) setPendingDelete(null);
+          if (ok) {
+            // Clear the frontend pending-connect queue for this account so
+            // the auto-connect effect never retries a deleted account.
+            connectTried.current.delete(pendingDelete.id);
+            setPendingDelete(null);
+          }
         }}
       />
     </div>

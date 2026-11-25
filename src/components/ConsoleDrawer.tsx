@@ -1,5 +1,5 @@
 import React, { useMemo} from "react";
-import { useConsoleStore, errorCount} from "../store/useConsoleStore";
+import { useConsoleStore, warnCount} from "../store/useConsoleStore";
 import type { LogEntry} from "../lib/types";
 
 function fmtTime(ts: number): string {
@@ -31,8 +31,8 @@ return (
 
 /**
 * Bottom console drawer: slides up from the window bottom, shows the
-* backend's runtime logs (newest first, last 300 kept). The tab
-* filters to error lines only — e.g. why a connection failed or timed out.
+* backend's runtime logs (newest first, last 300 kept). The 警告 tab
+* filters to warn + error lines — e.g. why a connection failed or timed out.
 */
 export default function ConsoleDrawer({
 open,
@@ -46,10 +46,10 @@ const filter = useConsoleStore((s) => s.filter);
 const setFilter = useConsoleStore((s) => s.setFilter);
 const clear = useConsoleStore((s) => s.clear);
 const shown = useMemo(
-() => (filter === "error"? logs.filter((l) => l.level === "error"): logs),
+() => (filter === "warn"? logs.filter((l) => l.level === "warn" || l.level === "error"): logs),
 [logs, filter]
 );
-const errors = errorCount(logs);
+const warnings = warnCount(logs);
 
 return (
 <div
@@ -71,12 +71,12 @@ filter === "all"? "bg-ds-accent text-ds-accent-contrast": "text-ds-text-2 hover:
 全部
 </button>
 <button
-onClick={() => setFilter("error")}
+onClick={() => setFilter("warn")}
 className={`px-2.5 py-1 rounded text-xs ${
-filter === "error"? "bg-ds-accent text-ds-accent-contrast": "text-ds-text-2 hover:bg-ds-panel-2"
+filter === "warn"? "bg-ds-accent text-ds-accent-contrast": "text-ds-text-2 hover:bg-ds-panel-2"
 }`}
 >
-错误{errors > 0? ` (${errors})`: ""}
+警告{warnings > 0? ` (${warnings})`: ""}
 </button>
 </div>
 <div className="flex-1" />
@@ -90,7 +90,7 @@ filter === "error"? "bg-ds-accent text-ds-accent-contrast": "text-ds-text-2 hove
 <div className="flex-1 overflow-y-auto">
 {shown.length === 0? (
 <div className="px-3 py-4 text-xs text-ds-text-3">
-{filter === "error"? "暂无错误日志": "暂无日志 — 连接账户后这里会显示后台运行日志"}
+{filter === "warn"? "暂无警告日志": "暂无日志 — 连接账户后这里会显示后台运行日志"}
 </div>
 ): (
 shown.map((l, i) => <Row key={`${l.ts}-${i}`} log={l} />)

@@ -4,7 +4,7 @@ import type { LogEntry } from "../lib/types";
 /** Runtime log console: newest first, capped at 300 entries. */
 const MAX_LOGS = 300;
 
-type Filter = "all" | "error";
+type Filter = "all" | "warn";
 
 type S = {
   logs: LogEntry[];
@@ -46,7 +46,7 @@ export const useConsoleStore = create<S>((set, get) => ({
   clear: () => set({ logs: [], unreadErrorCount: 0 }),
 }));
 
-/** Count of error-level log lines (the drawer's error tab total). */
-export function errorCount(logs: LogEntry[]): number {
-  return logs.reduce((n, l) => (l.level === "error" ? n + 1 : n), 0);
+/** Count of warn- and error-level log lines (the drawer's 警告 tab total). */
+export function warnCount(logs: LogEntry[]): number {
+  return logs.reduce((n, l) => (l.level === "warn" || l.level === "error" ? n + 1 : n), 0);
 }

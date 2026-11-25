@@ -140,10 +140,20 @@ pub async fn connect_account(
     // error and the backend logged nothing, so a failed click left the
     // account on "未连接" with no feedback at all. Log the reason to the
     // console drawer so the user can see why.
+    //
+    // Exception: the account was deleted while the connect was in flight.
+    // That is not an error — the connect is simply cancelled — so it is
+    // logged as a warning and never lights the console red dot.
     match connect_account_inner(state.inner().clone(), id).await {
         Ok(live) => Ok(live),
         Err(e) => {
-            state.bus.log("error", "DeSSS", format!("连接失败：{e}"));
+            if e == "找不到该账户" || e == "该账户已被移除" {
+                state
+                    .bus
+                    .log("warn", "DeSSS", "已移除账户，连接已取消".to_string());
+            } else {
+                state.bus.log("error", "DeSSS", format!("连接失败：{e}"));
+            }
             Err(e)
         }
     }
@@ -177,6 +187,16 @@ async fn connect_account_inner(
     );
     adapter.connect().await.map_err(|e| e.to_string())?;
     state.sync.insert(id.clone(), adapter.clone());
+    // The account may have been deleted while the connect was in flight:
+    // re-check the row before spawning the run loop, or a deleted account
+    // would keep syncing with no DB row behind it.
+    if state.db.get_account(&id)?.is_none() {
+        if let Some(adapter) = state.sync.remove(&id) {
+            let _ = adapter.disconnect().await;
+        }
+        state.sync.remove_live(&id);
+        return Err("该账户已被移除".to_string());
+    }
     let a = adapter.clone();
     tauri::async_runtime::spawn(async move {
         use crate::adapters::ExchangeAdapter;
@@ -203,12 +223,27 @@ async fn connect_account_inner(
         }))
 }
 
+/// Stop whatever is running for an account and drop its cached live
+/// state: the adapter's run loop (REST poll + WS reconnect ladder) is
+/// aborted and the live snapshot is removed. Used by both disconnect and
+/// delete — delete must stop the sync before the DB row and vault
+/// credential disappear, or the adapter would keep syncing a deleted
+/// account. A disconnect failure is a warning, never a reason to block
+/// the delete.
+async fn stop_account_sync(state: &Arc<AppState>, id: &str) {
+    if let Some(adapter) = state.sync.remove(id) {
+        if let Err(e) = adapter.disconnect().await {
+            state
+                .bus
+                .log("warn", "DeSSS", format!("断开账户 {id} 时出错：{e}"));
+        }
+    }
+    state.sync.remove_live(id);
+}
+
 #[tauri::command]
 pub async fn disconnect_account(state: State<'_, Arc<AppState>>, id: String) -> Result<(), String> {
-    if let Some(adapter) = state.sync.remove(&id) {
-        adapter.disconnect().await.map_err(|e| e.to_string())?;
-    }
-    state.sync.remove_live(&id);
+    stop_account_sync(state.inner(), &id).await;
     state.bus.log("info", "DeSSS", format!("已断开账户 {id}"));
     Ok(())
 }
@@ -255,9 +290,15 @@ pub fn update_account(
 }
 
 #[tauri::command]
-pub fn delete_account(state: State<'_, Arc<AppState>>, id: String) -> Result<(), String> {
+pub async fn delete_account(state: State<'_, Arc<AppState>>, id: String) -> Result<(), String> {
+    // Stop the sync first: abort any running connection / reconnect task
+    // and drop the cached live state before the DB row and vault
+    // credential disappear.
+    stop_account_sync(state.inner(), &id).await;
     let vault = state.vault.store()?;
-    crate::accounts::delete_account(&state.db, vault, &id)
+    crate::accounts::delete_account(&state.db, vault, &id)?;
+    state.bus.log("info", "DeSSS", format!("已移除账户 {id}"));
+    Ok(())
 }
 
 #[tauri::command]
