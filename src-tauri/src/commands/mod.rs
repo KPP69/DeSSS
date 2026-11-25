@@ -179,6 +179,7 @@ async fn connect_account_inner(
         &creds,
         state.bus.clone(),
         state.sync.live_map(),
+        state.sync.reconcile_state(),
     )?;
     state.bus.log(
         "info",
@@ -365,4 +366,171 @@ pub async fn refresh_market_catalog(
         count: state.catalog.len(),
         updated_at: state.catalog.last_success_at().unwrap_or(0),
     })
+}
+
+/// Reconcile the on-demand realtime streams with the symbols on screen.
+/// The Data page calls this whenever its search hits change (and with
+/// an empty list when the query is cleared or the page is left): new
+/// keys start streaming, removed keys are unsubscribed at once. Sync
+/// command — the engine diffs the set itself, so repeat calls with the
+/// same keys are no-ops.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamKeyInput {
+    pub exchange_id: String,
+    pub symbol: String,
+}
+
+#[tauri::command]
+pub fn set_stream_symbols(state: State<'_, Arc<AppState>>, keys: Vec<StreamKeyInput>) {
+    let keys: Vec<(String, String)> = keys
+        .into_iter()
+        .map(|k| (k.exchange_id, k.symbol))
+        .collect();
+    state.streams.set_wanted(keys);
+}
+
+// ---- Risk gateway (phase 5A §3) ----
+
+/// Current risk config (limits + kill switch). Sync command: the
+/// gateway holds the config in memory, no DB read needed.
+#[tauri::command]
+pub fn get_risk_config(state: State<'_, Arc<AppState>>) -> crate::risk::RiskConfig {
+    state.risk.config()
+}
+
+/// Save the risk limits. Validated first (a bad config is rejected,
+/// never silently clamped), then persisted to SQLite and applied to
+/// the gateway. Async commands with a `State` input must return a
+/// `Result` (Tauri requirement).
+#[tauri::command]
+pub async fn set_risk_config(
+    state: State<'_, Arc<AppState>>,
+    config: crate::risk::RiskConfig,
+) -> Result<crate::risk::RiskConfig, String> {
+    config.save(&state.db)?;
+    state.risk.set_config(config.clone());
+    Ok(config)
+}
+
+/// Flip the kill switch alone (the big toggle on the Risk page).
+/// Cancels are never blocked by the kill switch — it only stops new
+/// orders, so the user can always exit a position.
+#[tauri::command]
+pub async fn set_kill_switch(
+    state: State<'_, Arc<AppState>>,
+    enabled: bool,
+) -> Result<crate::risk::RiskConfig, String> {
+    let mut config = state.risk.config();
+    config.kill_switch = enabled;
+    config.save(&state.db)?;
+    state.risk.set_config(config.clone());
+    state.bus.log(
+        "warn",
+        "risk",
+        if enabled {
+            "风控总开关已开启：禁止一切新下单（撤单不受影响）".to_string()
+        } else {
+            "风控总开关已关闭：恢复下单".to_string()
+        },
+    );
+    Ok(config)
+}
+
+/// Drawdown snapshot for the Risk page: session initial equity,
+/// high-water mark, latest sampled equity and current drawdown.
+/// Sync command: the gateway holds the numbers in memory.
+#[tauri::command]
+pub fn get_drawdown_status(state: State<'_, Arc<AppState>>) -> crate::risk::DrawdownStatus {
+    state.risk.drawdown_status()
+}
+
+// ---------------------------------------------------------------------------
+// Orders (phase 5A §4) — every write goes through the execution
+// engine (intent → risk → execution → adapter). The commands below
+// are thin wrappers: they build the deps and hand over.
+// ---------------------------------------------------------------------------
+
+fn exec_deps(state: &State<'_, Arc<AppState>>) -> crate::execution::ExecDeps {
+    crate::execution::ExecDeps {
+        risk: state.risk.clone(),
+        orders: state.orders.clone(),
+        sync: state.sync.clone(),
+        streams: state.streams.clone(),
+        catalog: state.catalog.clone(),
+        bus: state.bus.clone(),
+    }
+}
+
+/// Manual order intent from the Trading page. `order_type` is
+/// "limit" (GTC) | "post_only" (ALO) | "ioc".
+#[derive(Debug, serde::Deserialize)]
+pub struct PlaceOrderInput {
+    pub account_id: String,
+    pub symbol: String,
+    pub side: String,
+    pub order_type: String,
+    pub quantity: f64,
+    pub price: f64,
+}
+
+/// Place one order. Returns the order record — Open / Filled /
+/// Unresolved are all Ok (Unresolved is a result the user must see,
+/// with the reason in `error`); definite failures are Err.
+#[tauri::command]
+pub async fn place_order(
+    state: State<'_, Arc<AppState>>,
+    input: PlaceOrderInput,
+) -> Result<crate::adapters::types::OrderInfo, String> {
+    let deps = exec_deps(&state);
+    crate::execution::place_order(
+        &deps,
+        crate::execution::PlaceIntent {
+            account_id: input.account_id,
+            symbol: input.symbol.trim().to_uppercase(),
+            side: input.side,
+            order_type: input.order_type,
+            quantity: input.quantity,
+            price: input.price,
+        },
+    )
+    .await
+}
+
+/// Cancel one order and wait for the result. `order_id` is the
+/// exchange oid (from the open-orders list) or a cloid.
+#[tauri::command]
+pub async fn cancel_order(
+    state: State<'_, Arc<AppState>>,
+    account_id: String,
+    order_id: String,
+    symbol: String,
+) -> Result<crate::adapters::types::OrderInfo, String> {
+    let deps = exec_deps(&state);
+    crate::execution::cancel_order(&deps, &account_id, &order_id, &symbol).await
+}
+
+/// Live open orders from the exchange, merged with our records.
+#[tauri::command]
+pub async fn list_open_orders(
+    state: State<'_, Arc<AppState>>,
+    account_id: String,
+) -> Result<Vec<crate::adapters::types::OrderInfo>, String> {
+    let deps = exec_deps(&state);
+    crate::execution::list_open_orders(&deps, &account_id).await
+}
+
+/// Order records kept by the execution engine (newest first).
+/// Sync command: the store is in-memory.
+#[tauri::command]
+pub fn list_order_records(
+    state: State<'_, Arc<AppState>>,
+) -> Vec<crate::adapters::types::OrderInfo> {
+    state.orders.list()
+}
+
+/// Recorded fills (newest first). Sync command.
+#[tauri::command]
+pub fn list_order_fills(state: State<'_, Arc<AppState>>) -> Vec<crate::adapters::types::TradeInfo> {
+    state.orders.list_fills()
 }

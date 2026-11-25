@@ -1,9 +1,16 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Button, DataTable, EmptyState, MultiSelectDropdown, tdClsCompact, trCls } from "../components/ui";
 import { EXCHANGES, getExchange } from "../lib/exchanges";
-import { api } from "../lib/tauri";
-import type { MarketInfo } from "../lib/types";
+import { api, onBook } from "../lib/tauri";
+import type { MarketInfo, OrderBook } from "../lib/types";
 import { useDataUiStore } from "../store/useDataUiStore";
+
+/** One streamed book, top of book only, keyed `exchangeId:symbol`. */
+type LiveBook = { bid: number | null; ask: number | null; ts: number };
+
+/** A streamed book counts as live for 5s; older than that the row falls
+ * back to the 2s REST values (same threshold as the backend). */
+const LIVE_MS = 5000;
 
 /**
  * Data page: on-demand symbol search over the bulk market catalog (phase 4).
@@ -73,10 +80,12 @@ const COL_WIDTHS = ["14%", "16%", "14%", "16%", "14%", "13%", "13%"];
 
 function MarketRows({
   rows,
+  books,
   expandedKey,
   onToggle,
 }: {
   rows: MarketInfo[];
+  books: Record<string, LiveBook>;
   expandedKey: string | null;
   onToggle: (key: string) => void;
 }) {
@@ -84,6 +93,13 @@ function MarketRows({
     <>
       {rows.map((m) => {
         const key = `${m.exchangeId}:${m.symbol}`;
+        // A fresh streamed book overrides the 2s REST bid/ask; a stale
+        // one falls back to the catalog values so a dead stream never
+        // freezes the row on an old price.
+        const live = books[key];
+        const liveFresh = live != null && Date.now() - live.ts <= LIVE_MS;
+        const bidPx = liveFresh ? live.bid : m.bidPx;
+        const askPx = liveFresh ? live.ask : m.askPx;
         const rateCls =
           m.funding1h == null
             ? ""
@@ -115,9 +131,9 @@ function MarketRows({
               <td className={`${tdClsCompact} num whitespace-nowrap`}>{m.symbol}</td>
               <td className={`${tdClsCompact} num whitespace-nowrap`}>{fmtPrice(m.markPx, m.tickSize)}</td>
               <td className={`${tdClsCompact} num whitespace-nowrap`}>
-                <span className="text-ds-up">{fmtPrice(m.bidPx, m.tickSize)}</span>
+                <span className="text-ds-up">{fmtPrice(bidPx, m.tickSize)}</span>
                 {" / "}
-                <span className="text-ds-down">{fmtPrice(m.askPx, m.tickSize)}</span>
+                <span className="text-ds-down">{fmtPrice(askPx, m.tickSize)}</span>
               </td>
               <td className={`${tdClsCompact} num whitespace-nowrap ${rateCls}`}>{fundingText}</td>
               <td className={`${tdClsCompact} num whitespace-nowrap ${aprCls}`}>{aprText}</td>
@@ -141,6 +157,9 @@ function MarketRows({
                     <span>持仓量：<span className="text-ds-text-1">{fmtUsdCompact(m.openInterestUsd)}</span></span>
                     <span>下次结算：<span className="text-ds-text-1">{fmtTime(m.nextFundingTime)}</span></span>
                     <span>更新：<span className="text-ds-text-1">{fmtClock(m.updatedAt)}</span></span>
+                    {liveFresh && (
+                      <span>盘口：<span className="text-ds-text-1">实时 {fmtClock(live.ts)}</span></span>
+                    )}
                   </div>
                 </td>
               </tr>
@@ -163,6 +182,57 @@ export default function DataPage() {
   const [cacheUpdatedAt, setCacheUpdatedAt] = useState<number | null>(null);
   const [expandedKey, setExpandedKey] = useState<string | null>(null);
   const reqId = useRef(0);
+  // Streamed books (phase 5A §2): incoming `market://book` frames land
+  // in a buffer and flush into state at most every 150ms, so a
+  // millisecond book flood re-renders ~7 times a second, never per frame.
+  const [books, setBooks] = useState<Record<string, LiveBook>>({});
+  const booksBuf = useRef<Record<string, LiveBook>>({});
+  const booksDirty = useRef(false);
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    void onBook((b: OrderBook) => {
+      booksBuf.current[`${b.adapterId}:${b.symbol}`] = {
+        bid: b.bids[0]?.[0] ?? null,
+        ask: b.asks[0]?.[0] ?? null,
+        ts: b.ts,
+      };
+      booksDirty.current = true;
+    }).then((u) => {
+      if (cancelled) u();
+      else unlisten = u;
+    });
+    const t = setInterval(() => {
+      if (!booksDirty.current) return;
+      booksDirty.current = false;
+      setBooks({ ...booksBuf.current });
+    }, 150);
+    return () => {
+      cancelled = true;
+      unlisten?.();
+      clearInterval(t);
+    };
+  }, []);
+
+  // Reconcile the realtime streams with the rows on screen: whenever the
+  // hits change, the backend subscribes exactly those pairs. Clearing
+  // the query or leaving the view unsubscribes everything at once; the
+  // backend diffs the set, so repeat calls with the same keys are no-ops.
+  useEffect(() => {
+    if (view !== "search" || !query.trim()) {
+      void api.setStreamSymbols([]);
+      return;
+    }
+    void api.setStreamSymbols(
+      results.map((r) => ({ exchangeId: r.exchangeId, symbol: r.symbol })),
+    );
+  }, [view, query, results]);
+
+  // Leaving the page stops every stream.
+  useEffect(() => () => {
+    void api.setStreamSymbols([]);
+  }, []);
 
   // One search, two modes. "fresh" is a new query / selection / manual
   // refresh: it resets the expanded row and, on error, shows the empty
@@ -288,6 +358,7 @@ export default function DataPage() {
               <DataTable headers={HEADERS} minWidth={720} colWidths={COL_WIDTHS} compact>
                 <MarketRows
                   rows={results}
+                  books={books}
                   expandedKey={expandedKey}
                   onToggle={(key) => setExpandedKey((cur) => (cur === key ? null : key))}
                 />

@@ -1,9 +1,11 @@
 pub mod arcus;
 pub mod asterdex;
 pub mod book;
+pub mod hl_signing;
 pub mod hyperliquid;
 pub mod lighter;
 pub mod market_catalog;
+pub mod reconcile;
 pub mod sync;
 pub mod types;
 use self::types::*;
@@ -13,6 +15,13 @@ pub type AdapterResult<T> = Result<T, AdapterError>;
 pub enum AdapterError {
     #[error("未连接")]
     NotConnected,
+    /// The request was sent (or may have been sent) but no usable
+    /// answer came back — timeout, transport failure, unreadable
+    /// response. The outcome on the exchange is UNKNOWN: the caller
+    /// must reconcile by querying the order, never guess filled or
+    /// failed. Only write paths produce this; reads use `Other`.
+    #[error("结果未知，需对账：{0}")]
+    UnknownOutcome(String),
     #[error("{0}")]
     Other(String),
 }
@@ -73,8 +82,46 @@ pub trait ExchangeAdapter: Send + Sync {
     async fn get_positions(&self, account_id: &str) -> AdapterResult<Vec<Position>>;
     async fn get_open_orders(&self, account_id: &str) -> AdapterResult<Vec<Order>>;
     async fn place_order(&self, req: OrderRequest) -> AdapterResult<Order>;
-    async fn cancel_order(&self, account_id: &str, order_id: &str) -> AdapterResult<()>;
+    /// Cancel one order. `order_id` is the exchange oid, or a cloid
+    /// (`0x…`); `symbol` is needed to resolve the asset index.
+    /// `Ok(())` means the exchange confirmed the cancel. A definite
+    /// rejection (already filled / already canceled / never placed)
+    /// is `Err(Other(..))` — the caller queries the order to find
+    /// out which. A send whose outcome is unknown is
+    /// `Err(UnknownOutcome(..))` — the caller must query as well.
+    async fn cancel_order(
+        &self,
+        account_id: &str,
+        order_id: &str,
+        symbol: &str,
+    ) -> AdapterResult<()>;
+    /// Authoritative order state by cloid (orderStatus + fills).
+    /// `Err(Other("unknownOid"))` means the exchange has no such
+    /// order — the caller keeps the order Unresolved, it does NOT
+    /// mean the order was never placed. Default: the exchange does
+    /// not support ordering yet.
+    async fn query_order_by_cloid(
+        &self,
+        _account_id: &str,
+        _cloid: &str,
+    ) -> AdapterResult<OrderInfo> {
+        Err(AdapterError::Other(
+            "该交易所下单将在下一阶段接入".to_string(),
+        ))
+    }
+    /// Fills of one order, by cloid (userFillsByTime matched by oid).
+    /// Default: the exchange does not support ordering yet.
+    async fn query_fills(&self, _account_id: &str, _cloid: &str) -> AdapterResult<Vec<TradeInfo>> {
+        Err(AdapterError::Other(
+            "该交易所下单将在下一阶段接入".to_string(),
+        ))
+    }
     /// Long-running read loop (WS + REST polling). Default is a no-op; real
     /// adapters override it. The caller spawns it once after connect().
     async fn run(&self) {}
+
+    /// Wake the poll loop for an immediate account sync (position
+    /// reconciliation). Default is a no-op; adapters with a REST loop
+    /// override it to notify their loop.
+    fn wake_sync(&self) {}
 }

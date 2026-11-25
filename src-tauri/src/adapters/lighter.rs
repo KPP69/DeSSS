@@ -21,6 +21,7 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use serde_json::Value;
 
+use super::reconcile::ReconcileState;
 use super::types::{AccountLive, Balance, LivePosition, Order, OrderRequest, Position};
 use super::{f64_from, now_ms, AdapterResult, ExchangeAdapter};
 use crate::bus::{AppEvent, EventBus};
@@ -146,6 +147,11 @@ pub struct LighterAdapter {
     rest_ok: AtomicBool,
     last_error: Mutex<Option<String>>,
     last_rest_rtt: Mutex<Option<Duration>>,
+    /// Post-fill reconciliation grace (spec §3): polls skip their write
+    /// while the account is inside the window.
+    reconcile: Arc<ReconcileState>,
+    /// Woken by `wake_sync` for an immediate out-of-cycle poll.
+    wake: Arc<tokio::sync::Notify>,
 }
 
 impl LighterAdapter {
@@ -156,6 +162,7 @@ impl LighterAdapter {
         account_id: String,
         bus: EventBus,
         live: Arc<RwLock<HashMap<String, AccountLive>>>,
+        reconcile: Arc<ReconcileState>,
     ) -> Self {
         Self {
             id: id.to_string(),
@@ -172,6 +179,8 @@ impl LighterAdapter {
             rest_ok: AtomicBool::new(false),
             last_error: Mutex::new(None),
             last_rest_rtt: Mutex::new(None),
+            reconcile,
+            wake: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
@@ -239,12 +248,9 @@ impl LighterAdapter {
     /// differ between deployments and over time, so they are never hardcoded.
     async fn fetch_markets(&self) -> Result<(), String> {
         let url = format!("{}/api/v1/orderBooks", self.network.rest_base());
-        let resp = self
-            .http
-            .get(&url)
-            .send()
+        let resp = crate::net::send_read(|| self.http.get(&url))
             .await
-            .map_err(|e| format!("Lighter 盘口请求失败：{e:?}"))?;
+            .map_err(|e| format!("Lighter 盘口请求失败：{e}"))?;
         if !resp.status().is_success() {
             return Err(format!(
                 "lighter orderBooks returned HTTP {}",
@@ -254,7 +260,7 @@ impl LighterAdapter {
         let text = resp
             .text()
             .await
-            .map_err(|e| format!("Lighter 盘口读取失败：{e:?}"))?;
+            .map_err(|e| format!("Lighter 盘口读取失败：{}", crate::net::http_error(&e)))?;
         let v: Value = serde_json::from_str(&text).map_err(|e| {
             format!(
                 "Lighter 盘口响应不是有效 JSON（{e}）；内容：{}",
@@ -293,12 +299,9 @@ impl LighterAdapter {
             self.network.rest_base(),
             self.account_index
         );
-        let resp = self
-            .http
-            .get(&url)
-            .send()
+        let resp = crate::net::send_read(|| self.http.get(&url))
             .await
-            .map_err(|e| format!("Lighter 账户请求失败：{e:?}"))?;
+            .map_err(|e| format!("Lighter 账户请求失败：{e}"))?;
         if !resp.status().is_success() {
             return Err(format!("lighter account returned HTTP {}", resp.status()));
         }
@@ -370,6 +373,12 @@ impl LighterAdapter {
     }
 
     async fn poll_account(&self) {
+        // Post-fill grace (spec §3): a poll landing inside the window
+        // would return a pre-fill snapshot and overwrite the fresh
+        // local estimate — skip the round entirely.
+        if self.reconcile.in_grace(&self.account_id) {
+            return;
+        }
         let started = Instant::now();
         match self.fetch_account().await {
             Ok((snap, balance)) => {
@@ -398,7 +407,12 @@ impl LighterAdapter {
         let mut tick = tokio::time::interval(POLL_INTERVAL);
         tick.tick().await;
         while self.running.load(Ordering::SeqCst) {
-            tick.tick().await;
+            // Either the 10s tick or an out-of-cycle wake (position
+            // reconciliation) triggers the next poll.
+            tokio::select! {
+                _ = tick.tick() => {}
+                _ = self.wake.notified() => {}
+            }
             if !self.running.load(Ordering::SeqCst) {
                 break;
             }
@@ -467,15 +481,26 @@ impl ExchangeAdapter for LighterAdapter {
     }
 
     async fn get_open_orders(&self, _account_id: &str) -> AdapterResult<Vec<Order>> {
-        Ok(vec![])
+        Err(super::AdapterError::Other(
+            "该交易所下单将在下一阶段接入".to_string(),
+        ))
     }
 
     async fn place_order(&self, _req: OrderRequest) -> AdapterResult<Order> {
-        Err(super::AdapterError::Other("只读阶段不支持下单".to_string()))
+        Err(super::AdapterError::Other(
+            "该交易所下单将在下一阶段接入".to_string(),
+        ))
     }
 
-    async fn cancel_order(&self, _account_id: &str, _order_id: &str) -> AdapterResult<()> {
-        Err(super::AdapterError::Other("只读阶段不支持撤单".to_string()))
+    async fn cancel_order(
+        &self,
+        _account_id: &str,
+        _order_id: &str,
+        _symbol: &str,
+    ) -> AdapterResult<()> {
+        Err(super::AdapterError::Other(
+            "该交易所下单将在下一阶段接入".to_string(),
+        ))
     }
 
     async fn run(&self) {
@@ -483,6 +508,10 @@ impl ExchangeAdapter for LighterAdapter {
         // an account (public market data comes from the on-demand
         // catalog, never from a per-account connection).
         self.rest_loop().await;
+    }
+
+    fn wake_sync(&self) {
+        self.wake.notify_one();
     }
 }
 

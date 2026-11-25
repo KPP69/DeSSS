@@ -60,7 +60,11 @@ impl EventBus {
     /// One runtime log line for the in-app console drawer (level:
     /// "info" | "warn" | "error"). Retained (newest 300) so a refresh
     /// restores the console, and published so the drawer sees it live.
+    /// URL query parameters are cut before the line is stored: a signed
+    /// request's `signature` must never land in the console (see
+    /// `crate::net::redact_url_query`).
     pub fn log(&self, level: &str, source: &str, message: String) {
+        let message = crate::net::redact_url_query(&message);
         let line = LogLine {
             level: level.to_string(),
             source: source.to_string(),

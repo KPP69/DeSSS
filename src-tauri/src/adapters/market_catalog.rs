@@ -624,21 +624,9 @@ fn parse_arcus(v: &serde_json::Value, now_ms: i64) -> Result<Vec<MarketInfo>, St
 }
 
 async fn get_json(http: &reqwest::Client, url: &str) -> Result<serde_json::Value, String> {
-    let resp = http
-        .get(url)
-        .send()
-        .await
-        .map_err(|e| format!("请求失败：{e:?}"))?;
-    let status = resp.status();
-    let text = resp
-        .text()
-        .await
-        .map_err(|e| format!("读取响应失败：{e:?}"))?;
-    if !status.is_success() {
-        let snippet: String = text.chars().take(200).collect();
-        return Err(format!("HTTP {status}：{snippet}"));
-    }
-    serde_json::from_str(&text).map_err(|e| format!("解析响应失败：{e:?}"))
+    // One retry on a stale pooled connection (SendRequest /
+    // UnexpectedEof); error text is redacted (no URL query params).
+    crate::net::read_json(|| http.get(url)).await
 }
 
 async fn fetch_hyperliquid(
@@ -653,23 +641,7 @@ async fn fetch_hyperliquid(
         }
         _ => "hyperliquid",
     };
-    let resp = http
-        .post(HL_INFO_URL)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("请求失败：{e:?}"))?;
-    let status = resp.status();
-    let text = resp
-        .text()
-        .await
-        .map_err(|e| format!("读取响应失败：{e:?}"))?;
-    if !status.is_success() {
-        let snippet: String = text.chars().take(200).collect();
-        return Err(format!("HTTP {status}：{snippet}"));
-    }
-    let v: serde_json::Value =
-        serde_json::from_str(&text).map_err(|e| format!("解析响应失败：{e:?}"))?;
+    let v = crate::net::read_json(|| http.post(HL_INFO_URL).json(&body)).await?;
     parse_hyperliquid(&v, exchange_id, crate::adapters::now_ms())
 }
 
@@ -771,23 +743,11 @@ async fn fetch_l2book(
     http: &reqwest::Client,
     coin: &str,
 ) -> Result<(Option<f64>, Option<f64>), String> {
-    let resp = http
-        .post(HL_INFO_URL)
-        .json(&serde_json::json!({ "type": "l2Book", "coin": coin }))
-        .send()
-        .await
-        .map_err(|e| format!("请求失败：{e:?}"))?;
-    let status = resp.status();
-    let text = resp
-        .text()
-        .await
-        .map_err(|e| format!("读取响应失败：{e:?}"))?;
-    if !status.is_success() {
-        let snippet: String = text.chars().take(200).collect();
-        return Err(format!("HTTP {status}：{snippet}"));
-    }
-    let v: serde_json::Value =
-        serde_json::from_str(&text).map_err(|e| format!("解析响应失败：{e:?}"))?;
+    let v = crate::net::read_json(|| {
+        http.post(HL_INFO_URL)
+            .json(&serde_json::json!({ "type": "l2Book", "coin": coin }))
+    })
+    .await?;
     Ok(parse_l2book(&v))
 }
 
@@ -1455,6 +1415,16 @@ impl MarketCatalog {
             })
             .collect();
         join_all(futs).await
+    }
+
+    /// Lighter market id for a cached row, for the realtime stream: the
+    /// WebSocket `order_book` channel is addressed by numeric market id,
+    /// not by symbol. None when the row is not cached (yet) or the
+    /// exchange has no numeric ids.
+    pub fn market_id(&self, exchange_id: &str, symbol: &str) -> Option<u64> {
+        let data = self.data.read().unwrap_or_else(|e| e.into_inner());
+        data.get(&(exchange_id.to_string(), symbol.to_string()))
+            .and_then(|row| row.market_id)
     }
 
     pub fn len(&self) -> usize {

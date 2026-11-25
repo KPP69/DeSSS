@@ -1,6 +1,8 @@
 use rusqlite::{params, Connection};
 use std::sync::Mutex;
 
+pub mod realtime;
+
 use crate::portable::PortablePaths;
 
 /// One row of the `accounts` table. Metadata only — credentials live in the
@@ -104,6 +106,38 @@ impl DataEngine {
             out.push(row.map_err(|e| format!("读取账户失败：{e}"))?);
         }
         Ok(out)
+    }
+
+    /// One key/value from the `settings` table (risk config, UI prefs…).
+    /// Missing keys return None — callers apply their own default.
+    pub fn get_setting(&self, key: &str) -> Result<Option<String>, String> {
+        let conn = self.lock();
+        let mut stmt = conn
+            .prepare("SELECT value FROM settings WHERE key = ?1")
+            .map_err(|e| format!("准备设置查询失败：{e}"))?;
+        let mut rows = stmt
+            .query(params![key])
+            .map_err(|e| format!("查询设置失败：{e}"))?;
+        match rows.next() {
+            Ok(Some(row)) => Ok(Some(
+                row.get::<_, String>(0)
+                    .map_err(|e| format!("读取设置失败：{e}"))?,
+            )),
+            Ok(None) => Ok(None),
+            Err(e) => Err(format!("查询设置失败：{e}")),
+        }
+    }
+
+    /// Upsert one key/value into the `settings` table.
+    pub fn set_setting(&self, key: &str, value: &str) -> Result<(), String> {
+        let conn = self.lock();
+        conn.execute(
+            "INSERT INTO settings(key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )
+        .map_err(|e| format!("保存设置失败：{e}"))?;
+        Ok(())
     }
 
     /// Update mutable metadata. `exchange_id` is deliberately NOT updatable:

@@ -86,3 +86,71 @@ export type MarketInfo = {
 
 /** Result of a manual catalog refresh: cached rows + refresh timestamp. */
 export type CatalogRefresh = { count: number; updatedAt: number };
+
+/** Risk gateway config: kill switch + hard limits (phase 5A §3). */
+export type RiskConfig = {
+  killSwitch: boolean;
+  maxOrderNotionalUsd: number;
+  maxPositionUsd: number;
+  maxDrawdownPct: number;
+  allowedSides: "both" | "long_only" | "short_only";
+  autoPauseAfterFailures: number;
+};
+
+/** Drawdown snapshot: session initial equity, high-water mark, latest
+ * sampled equity and current drawdown against the high. */
+export type DrawdownStatus = {
+  initialEquity: number | null;
+  sessionHigh: number;
+  lastEquity: number | null;
+  drawdownPct: number;
+};
+
+/** Canonical order status (snake_case wire names). */
+export type OrderStatus =
+  | "pending"
+  | "submitted"
+  | "open"
+  | "partially_filled"
+  | "filled"
+  | "rejected"
+  | "canceled"
+  | "expired"
+  | "failed"
+  | "unresolved";
+
+/** Canonical order record (phase 5A §3/§4). */
+export type OrderInfo = {
+  orderId: string;
+  clientOrderId: string;
+  exchangeId: string;
+  accountId: string;
+  symbol: string;
+  side: string;
+  orderType: string;
+  status: OrderStatus;
+  price: number | null;
+  quantity: number;
+  filledQuantity: number;
+  remainingQuantity: number;
+  averageFillPrice: number | null;
+  error: string | null;
+  createdAt: number;
+  updatedAt: number;
+};
+
+/** One fill of an order. */
+export type TradeInfo = {
+  tradeId: string;
+  exchangeId: string;
+  orderId: string;
+  clientOrderId: string;
+  accountId: string;
+  symbol: string;
+  side: string;
+  price: number;
+  quantity: number;
+  fee: number | null;
+  feeCurrency: string | null;
+  timestamp: number;
+};

@@ -33,6 +33,7 @@ use serde_json::Value;
 use sha2::Sha256;
 use sha3::{Digest, Keccak256};
 
+use super::reconcile::ReconcileState;
 use super::types::{AccountLive, Balance, LivePosition, Order, OrderRequest, Position};
 use super::{f64_from, now_ms, AdapterResult, ExchangeAdapter};
 use crate::bus::{AppEvent, EventBus};
@@ -45,8 +46,8 @@ const POLL_INTERVAL: Duration = Duration::from_secs(10);
 /// (`hmac` + `sha2`); the secret never leaves this function and never
 /// enters a log line or an error message.
 fn sign_hmac_sha256(secret: &str, query: &str) -> String {
-    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes())
-        .expect("HMAC accepts any key length");
+    let mut mac =
+        Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key length");
     mac.update(query.as_bytes());
     let out = mac.finalize().into_bytes();
     out.iter().map(|b| format!("{b:02x}")).collect()
@@ -280,6 +281,11 @@ pub struct AsterdexAdapter {
     last_rest_rtt: Mutex<Option<Duration>>,
     /// Last V3 nonce issued (microseconds, strictly increasing).
     last_nonce: Mutex<u128>,
+    /// Post-fill reconciliation grace (spec §3): polls skip their write
+    /// while the account is inside the window.
+    reconcile: Arc<ReconcileState>,
+    /// Woken by `wake_sync` for an immediate out-of-cycle poll.
+    wake: Arc<tokio::sync::Notify>,
 }
 
 impl AsterdexAdapter {
@@ -290,6 +296,7 @@ impl AsterdexAdapter {
         api_secret: Option<String>,
         bus: EventBus,
         live: Arc<RwLock<HashMap<String, AccountLive>>>,
+        reconcile: Arc<ReconcileState>,
     ) -> Self {
         Self {
             id: id.to_string(),
@@ -309,6 +316,8 @@ impl AsterdexAdapter {
             last_error: Mutex::new(None),
             last_rest_rtt: Mutex::new(None),
             last_nonce: Mutex::new(0),
+            reconcile,
+            wake: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
@@ -322,6 +331,7 @@ impl AsterdexAdapter {
         secret: [u8; 32],
         bus: EventBus,
         live: Arc<RwLock<HashMap<String, AccountLive>>>,
+        reconcile: Arc<ReconcileState>,
     ) -> Self {
         Self {
             agent: Some(AgentCreds {
@@ -329,7 +339,7 @@ impl AsterdexAdapter {
                 signer,
                 secret,
             }),
-            ..Self::new(id, account_id, None, None, bus, live)
+            ..Self::new(id, account_id, None, None, bus, live, reconcile)
         }
     }
 
@@ -409,13 +419,10 @@ impl AsterdexAdapter {
         };
         let signature = sign_hmac_sha256(&secret, &query);
         let url = format!("{ASTER_REST_URL}{path}?{query}&signature={signature}");
-        let resp = self
-            .http
-            .get(&url)
-            .header("X-MBX-APIKEY", key)
-            .send()
-            .await
-            .map_err(|e| format!("AsterDEX {path} 请求失败：{e:?}"))?;
+        let resp =
+            crate::net::send_read(|| self.http.get(&url).header("X-MBX-APIKEY", key.clone()))
+                .await
+                .map_err(|e| format!("AsterDEX {path} 请求失败：{e}"))?;
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
@@ -445,12 +452,9 @@ impl AsterdexAdapter {
         };
         let signature = sign_v3(&agent.secret, &msg)?;
         let url = format!("{ASTER_REST_URL}{path}?{msg}&signature={signature}");
-        let resp = self
-            .http
-            .get(&url)
-            .send()
+        let resp = crate::net::send_read(|| self.http.get(&url))
             .await
-            .map_err(|e| format!("AsterDEX {path} 请求失败：{e:?}"))?;
+            .map_err(|e| format!("AsterDEX {path} 请求失败：{e}"))?;
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
@@ -531,6 +535,12 @@ impl AsterdexAdapter {
     }
 
     async fn poll_account(&self) {
+        // Post-fill grace (spec §3): a poll landing inside the window
+        // would return a pre-fill snapshot and overwrite the fresh
+        // local estimate — skip the round entirely.
+        if self.reconcile.in_grace(&self.account_id) {
+            return;
+        }
         let started = Instant::now();
         match self.fetch_account_state().await {
             Ok((snap, balance)) => {
@@ -562,7 +572,12 @@ impl AsterdexAdapter {
         let mut tick = tokio::time::interval(POLL_INTERVAL);
         tick.tick().await;
         while self.running.load(Ordering::SeqCst) {
-            tick.tick().await;
+            // Either the 10s tick or an out-of-cycle wake (position
+            // reconciliation) triggers the next poll.
+            tokio::select! {
+                _ = tick.tick() => {}
+                _ = self.wake.notified() => {}
+            }
             if !self.running.load(Ordering::SeqCst) {
                 break;
             }
@@ -627,15 +642,26 @@ impl ExchangeAdapter for AsterdexAdapter {
     }
 
     async fn get_open_orders(&self, _account_id: &str) -> AdapterResult<Vec<Order>> {
-        Ok(vec![])
+        Err(super::AdapterError::Other(
+            "该交易所下单将在下一阶段接入".to_string(),
+        ))
     }
 
     async fn place_order(&self, _req: OrderRequest) -> AdapterResult<Order> {
-        Err(super::AdapterError::Other("只读阶段不支持下单".to_string()))
+        Err(super::AdapterError::Other(
+            "该交易所下单将在下一阶段接入".to_string(),
+        ))
     }
 
-    async fn cancel_order(&self, _account_id: &str, _order_id: &str) -> AdapterResult<()> {
-        Err(super::AdapterError::Other("只读阶段不支持撤单".to_string()))
+    async fn cancel_order(
+        &self,
+        _account_id: &str,
+        _order_id: &str,
+        _symbol: &str,
+    ) -> AdapterResult<()> {
+        Err(super::AdapterError::Other(
+            "该交易所下单将在下一阶段接入".to_string(),
+        ))
     }
 
     async fn run(&self) {
@@ -643,6 +669,10 @@ impl ExchangeAdapter for AsterdexAdapter {
         // an account (public market data comes from the on-demand
         // catalog, never from a per-account connection).
         self.rest_loop().await;
+    }
+
+    fn wake_sync(&self) {
+        self.wake.notify_one();
     }
 }
 

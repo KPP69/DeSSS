@@ -3,6 +3,7 @@ pub mod adapters;
 pub mod bus;
 pub mod commands;
 pub mod data_engine;
+pub mod execution;
 pub mod net;
 pub mod portable;
 pub mod risk;
@@ -10,11 +11,14 @@ pub mod strategy_engine;
 pub mod vault;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use adapters::market_catalog::MarketCatalog;
 use adapters::sync::SyncManager;
 use bus::EventBus;
+use execution::OrderStore;
 use portable::PortablePaths;
+use risk::{RiskConfig, RiskGateway};
 
 pub struct AppState {
     pub paths: PortablePaths,
@@ -23,6 +27,11 @@ pub struct AppState {
     pub vault: Arc<vault::VaultHandle>,
     pub sync: Arc<SyncManager>,
     pub catalog: Arc<MarketCatalog>,
+    pub streams: Arc<data_engine::realtime::RealtimeEngine>,
+    pub risk: Arc<RiskGateway>,
+    /// In-memory order records + fills (the execution engine owns
+    /// it; the exchange is the source of truth).
+    pub orders: Arc<OrderStore>,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -46,6 +55,16 @@ pub fn run() {
     let bus = EventBus::new(4096);
     let sync = Arc::new(SyncManager::new());
     let catalog = Arc::new(MarketCatalog::new(bus.clone()));
+    let streams = Arc::new(data_engine::realtime::RealtimeEngine::new(
+        bus.clone(),
+        catalog.clone(),
+        Some(sync.clone()),
+    ));
+    // Risk config loads from SQLite `settings` (a kill switch left on
+    // stays on across restarts); the gateway is the single source of
+    // truth while the app runs.
+    let risk = Arc::new(RiskGateway::new(RiskConfig::load(&db)));
+    let orders = Arc::new(OrderStore::new());
     let state = Arc::new(AppState {
         paths,
         bus,
@@ -53,7 +72,27 @@ pub fn run() {
         vault,
         sync,
         catalog,
+        streams,
+        risk,
+        orders,
     });
+    // Drawdown sampler (spec §3 §4): every 10s, record total equity
+    // across connected accounts so the session high-water mark tracks
+    // the live state, not just order attempts. The order path also
+    // records a fresh sample right before each risk check.
+    {
+        let state = state.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(10));
+            loop {
+                tick.tick().await;
+                let total: f64 = state.sync.live_states().iter().map(|s| s.equity_usd).sum();
+                if total > 0.0 {
+                    state.risk.record_equity(total);
+                }
+            }
+        });
+    }
     let s2 = state.clone();
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -94,7 +133,17 @@ pub fn run() {
             commands::get_proxy,
             commands::set_proxy,
             commands::search_market_info,
-            commands::refresh_market_catalog
+            commands::refresh_market_catalog,
+            commands::set_stream_symbols,
+            commands::get_risk_config,
+            commands::set_risk_config,
+            commands::set_kill_switch,
+            commands::get_drawdown_status,
+            commands::place_order,
+            commands::cancel_order,
+            commands::list_open_orders,
+            commands::list_order_records,
+            commands::list_order_fills
         ])
         .run(tauri::generate_context!())
         .expect("error while running DeSSS");
