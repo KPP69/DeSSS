@@ -3,6 +3,7 @@ pub mod asterdex;
 pub mod book;
 pub mod hyperliquid;
 pub mod lighter;
+pub mod market_catalog;
 pub mod sync;
 pub mod types;
 use self::types::*;

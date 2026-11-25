@@ -305,3 +305,33 @@ pub async fn delete_account(state: State<'_, Arc<AppState>>, id: String) -> Resu
 pub fn get_vault_status(state: State<'_, Arc<AppState>>) -> Result<Option<String>, String> {
     Ok(state.vault.init_error().map(|e| e.to_string()))
 }
+
+/// Search the cached market catalog by base symbol (exact or prefix) or
+/// native symbol (substring, case insensitive). An empty query returns
+/// nothing — the Data page never dumps the whole market over IPC.
+#[tauri::command]
+pub fn search_market_info(
+    state: State<'_, Arc<AppState>>,
+    query: String,
+) -> Vec<crate::adapters::market_catalog::MarketInfo> {
+    state.catalog.search(&query)
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogRefresh {
+    pub count: usize,
+    pub updated_at: i64,
+}
+
+/// Manually trigger a full catalog refresh (all six exchanges) and return
+/// the cached row count plus the refresh timestamp (unix ms) for the
+/// Data page's "缓存更新于" display.
+#[tauri::command]
+pub async fn refresh_market_catalog(state: State<'_, Arc<AppState>>) -> CatalogRefresh {
+    state.catalog.refresh_all().await;
+    CatalogRefresh {
+        count: state.catalog.len(),
+        updated_at: state.catalog.last_refresh_at().unwrap_or(0),
+    }
+}

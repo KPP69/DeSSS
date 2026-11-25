@@ -53,3 +53,33 @@ export type AccountLive = {
   error: string | null;
   ts: number;
 };
+
+/** One standardized market row from the bulk catalog (phase 4). `null`
+ * means the exchange has no public source for that field (e.g. AsterDEX
+ * max leverage, Arcus/Lighter bulk bid/ask). */
+export type MarketInfo = {
+  exchangeId: string;
+  symbol: string;
+  baseSymbol: string;
+  settlementCurrency: string;
+  maxLeverage: number | null;
+  tickSize: number | null;
+  stepSize: number | null;
+  minNotional: number | null;
+  bidPx: number | null;
+  askPx: number | null;
+  midPx: number | null;
+  markPx: number | null;
+  indexPx: number | null;
+  fundingRateRaw: number | null;
+  fundingIntervalHours: number;
+  funding1h: number | null;
+  fundingApr: number | null;
+  nextFundingTime: number | null;
+  volume24hUsd: number | null;
+  openInterestUsd: number | null;
+  updatedAt: number;
+};
+
+/** Result of a manual catalog refresh: cached rows + refresh timestamp. */
+export type CatalogRefresh = { count: number; updatedAt: number };

@@ -11,6 +11,7 @@ pub mod vault;
 
 use std::sync::Arc;
 
+use adapters::market_catalog::MarketCatalog;
 use adapters::sync::SyncManager;
 use bus::EventBus;
 use portable::PortablePaths;
@@ -21,6 +22,7 @@ pub struct AppState {
     pub db: data_engine::DataEngine,
     pub vault: Arc<vault::VaultHandle>,
     pub sync: Arc<SyncManager>,
+    pub catalog: Arc<MarketCatalog>,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -43,14 +45,17 @@ pub fn run() {
     // the forwarder, never kill it (see spawn_bus_forwarder).
     let bus = EventBus::new(4096);
     let sync = Arc::new(SyncManager::new());
+    let catalog = Arc::new(MarketCatalog::new(bus.clone()));
     let state = Arc::new(AppState {
         paths,
         bus,
         db,
         vault,
         sync,
+        catalog,
     });
     let s2 = state.clone();
+    let s3 = state.clone();
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(state)
@@ -71,6 +76,18 @@ pub fn run() {
             .build()?;
             let handle = app.handle().clone();
             commands::spawn_bus_forwarder(handle, s2.clone());
+            // Market catalog: first refresh immediately, then every 15 s.
+            // A single exchange failing keeps its last good rows and logs a
+            // warning; it never blocks the other five.
+            {
+                let catalog = s3.catalog.clone();
+                tauri::async_runtime::spawn(async move {
+                    loop {
+                        catalog.refresh_all().await;
+                        tokio::time::sleep(MarketCatalog::refresh_interval()).await;
+                    }
+                });
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -85,7 +102,9 @@ pub fn run() {
             commands::list_account_live,
             commands::get_runtime_snapshot,
             commands::get_proxy,
-            commands::set_proxy
+            commands::set_proxy,
+            commands::search_market_info,
+            commands::refresh_market_catalog
         ])
         .run(tauri::generate_context!())
         .expect("error while running DeSSS");

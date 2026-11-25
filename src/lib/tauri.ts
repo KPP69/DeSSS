@@ -1,12 +1,16 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { AppInfo, AccountView, CredentialMap, OrderBook, AccountLive, LogEntry, RuntimeSnapshot, ProxyState } from "./types";
+import type { AppInfo, AccountView, CredentialMap, OrderBook, AccountLive, LogEntry, RuntimeSnapshot, ProxyState, MarketInfo, CatalogRefresh } from "./types";
 
 export const api = {
   getAppInfo: () => invoke<AppInfo>("get_app_info"),
   getRuntimeSnapshot: () => invoke<RuntimeSnapshot>("get_runtime_snapshot"),
   getProxy: () => invoke<ProxyState>("get_proxy"),
   setProxy: (url: string) => invoke<ProxyState>("set_proxy", { url }),
+  // Market catalog (phase 4): bulk specs + prices + funding for all six
+  // exchanges, searched on demand (empty query returns nothing).
+  searchMarketInfo: (query: string) => invoke<MarketInfo[]>("search_market_info", { query }),
+  refreshMarketCatalog: () => invoke<CatalogRefresh>("refresh_market_catalog"),
   // Account center (phase 2). Credentials go to the Rust vault exactly once;
   // nothing secret is ever returned.
   listAccounts: () => invoke<AccountView[]>("list_accounts"),
