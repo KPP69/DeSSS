@@ -27,6 +27,11 @@ use crate::data_engine::AccountRow;
 pub struct SyncManager {
     live: Arc<RwLock<HashMap<String, AccountLive>>>,
     running: Mutex<HashMap<String, Arc<dyn ExchangeAdapter>>>,
+    /// Join handles of the spawned run loops, one per connected account.
+    /// Aborting the handle is what makes delete/disconnect cleanup
+    /// synchronous: without it the run task would keep its adapter clone
+    /// (and the credentials inside it) alive until the next poll tick.
+    tasks: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
 }
 
 impl SyncManager {
@@ -34,6 +39,7 @@ impl SyncManager {
         Self {
             live: Arc::new(RwLock::new(HashMap::new())),
             running: Mutex::new(HashMap::new()),
+            tasks: Mutex::new(HashMap::new()),
         }
     }
 
@@ -66,6 +72,27 @@ impl SyncManager {
             .lock()
             .ok()
             .and_then(|mut m| m.remove(account_id))
+    }
+
+    /// Register the spawned run loop for an account (called right after
+    /// the spawn, so a delete landing at any later point can abort it).
+    pub fn register_task(&self, account_id: String, handle: tokio::task::JoinHandle<()>) {
+        if let Ok(mut m) = self.tasks.lock() {
+            m.insert(account_id, handle);
+        }
+    }
+
+    /// Abort the run loop for an account, if one is registered, and drop
+    /// its handle: after this returns no task holds the adapter anymore.
+    pub fn abort_task(&self, account_id: &str) {
+        let handle = self
+            .tasks
+            .lock()
+            .ok()
+            .and_then(|mut m| m.remove(account_id));
+        if let Some(h) = handle {
+            h.abort();
+        }
     }
 
     pub fn remove_live(&self, account_id: &str) {

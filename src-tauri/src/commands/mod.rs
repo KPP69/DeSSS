@@ -198,9 +198,23 @@ async fn connect_account_inner(
         return Err("该账户已被移除".to_string());
     }
     let a = adapter.clone();
-    tauri::async_runtime::spawn(async move {
+    let handle = tokio::spawn(async move {
         a.run().await;
     });
+    state.sync.register_task(id.clone(), handle);
+    // The account may have been deleted between the DB re-check and the
+    // spawn: if it is gone now, abort the just-spawned task at once
+    // instead of leaving an orphaned poll loop (and its credentials)
+    // behind. A delete landing after this check aborts the task via the
+    // registered handle in stop_account_sync instead.
+    if state.db.get_account(&id)?.is_none() {
+        state.sync.abort_task(&id);
+        if let Some(adapter) = state.sync.remove(&id) {
+            let _ = adapter.disconnect().await;
+        }
+        state.sync.remove_live(&id);
+        return Err("该账户已被移除".to_string());
+    }
     // Return the latest live snapshot (connecting), if any was published.
     Ok(state
         .sync
@@ -223,12 +237,15 @@ async fn connect_account_inner(
 }
 
 /// Stop whatever is running for an account and drop its cached live
-/// state: the adapter's run loop (REST poll) is aborted and the live snapshot is removed. Used by both disconnect and
+/// state: abort the run task first (so no task keeps the adapter — and
+/// the credentials it holds — alive past this call), then disconnect the
+/// adapter and remove the live snapshot. Used by both disconnect and
 /// delete — delete must stop the sync before the DB row and vault
 /// credential disappear, or the adapter would keep syncing a deleted
 /// account. A disconnect failure is a warning, never a reason to block
 /// the delete.
 async fn stop_account_sync(state: &Arc<AppState>, id: &str) {
+    state.sync.abort_task(id);
     if let Some(adapter) = state.sync.remove(id) {
         if let Err(e) = adapter.disconnect().await {
             state
@@ -304,59 +321,25 @@ pub fn get_vault_status(state: State<'_, Arc<AppState>>) -> Result<Option<String
     Ok(state.vault.init_error().map(|e| e.to_string()))
 }
 
-/// Load AsterDEX API Key/Secret credentials (if the user stored an
-/// AsterDEX account in API Key mode) so the catalog can sign the
-/// `leverageBracket` read — the only source of AsterDEX max leverage
-/// (there is no public endpoint for it). Agent-mode-only or no AsterDEX
-/// account means no credentials and AsterDEX max leverage stays unknown.
-/// This never logs or returns credential material.
-fn sync_asterdex_api_credentials(state: &Arc<AppState>) {
-    let Ok(rows) = state.db.list_accounts() else {
-        return;
-    };
-    for row in rows {
-        if row.exchange_id != "asterdex" {
-            continue;
-        }
-        let Ok(vault) = state.vault.store() else {
-            return;
-        };
-        let Some(creds) = vault.get(&row.id) else {
-            continue;
-        };
-        if creds.get("mode").and_then(|v| v.as_str()) == Some("agent") {
-            continue;
-        }
-        let (Some(key), Some(secret)) = (
-            creds.get("api_key").and_then(|v| v.as_str()),
-            creds.get("api_secret").and_then(|v| v.as_str()),
-        ) else {
-            continue;
-        };
-        state
-            .catalog
-            .set_asterdex_api_credentials(key.to_string(), secret.to_string());
-        return;
-    }
-}
-
 /// Search the market catalog by base symbol (exact or prefix) or native
 /// symbol (substring, case insensitive), restricted to the checked
 /// exchanges. A search fetches a checked exchange's bulk endpoint only
 /// when its cache is older than 30s; otherwise the cache is served. An
 /// empty query returns nothing — the Data page never dumps the whole
-/// market over IPC. Public data needs no account. Matched rows are then
-/// enriched with the true per-symbol BBO (and AsterDEX open interest),
-/// which the bulk endpoints cannot provide.
+/// market over IPC. Public data needs no account and never touches
+/// account credentials. Matched rows then get a short-cycle (2s) live
+/// refresh of mark price + funding, and are enriched with the true
+/// per-symbol BBO (and AsterDEX open interest), which the bulk endpoints
+/// cannot provide.
 #[tauri::command]
 pub async fn search_market_info(
     state: State<'_, Arc<AppState>>,
     query: String,
     exchange_ids: Vec<String>,
 ) -> Result<Vec<crate::adapters::market_catalog::MarketInfo>, String> {
-    sync_asterdex_api_credentials(state.inner());
     state.catalog.refresh_exchanges(&exchange_ids, false).await;
-    let rows = state.catalog.search(&query, &exchange_ids);
+    let mut rows = state.catalog.search(&query, &exchange_ids);
+    state.catalog.refresh_live_rows(&mut rows).await;
     Ok(state.catalog.enrich_rows(rows).await)
 }
 
@@ -368,18 +351,18 @@ pub struct CatalogRefresh {
 }
 
 /// Manually refresh the checked exchanges (ignoring the 30s cache) and
-/// return the cached row count plus the refresh timestamp (unix ms) for
-/// the Data page's "缓存更新于" display. Async commands with a `State`
-/// input must return a `Result` (Tauri requirement).
+/// return the cached row count plus the last *successful* refresh
+/// timestamp (unix ms) for the Data page's "缓存更新于" display — a cycle
+/// where every exchange failed leaves the timestamp untouched. Async
+/// commands with a `State` input must return a `Result` (Tauri requirement).
 #[tauri::command]
 pub async fn refresh_market_catalog(
     state: State<'_, Arc<AppState>>,
     exchange_ids: Vec<String>,
 ) -> Result<CatalogRefresh, String> {
-    sync_asterdex_api_credentials(state.inner());
     state.catalog.refresh_exchanges(&exchange_ids, true).await;
     Ok(CatalogRefresh {
         count: state.catalog.len(),
-        updated_at: state.catalog.last_refresh_at().unwrap_or(0),
+        updated_at: state.catalog.last_success_at().unwrap_or(0),
     })
 }

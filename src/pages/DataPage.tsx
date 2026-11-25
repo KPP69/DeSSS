@@ -13,6 +13,14 @@ import { useDataUiStore } from "../store/useDataUiStore";
  * The view toggle lives in the AppShell secondary toolbar (App.tsx); the
  * tool row below is absolutely static — the cache time lives in the
  * results footer, never in the row, so nothing ever shifts the controls.
+ *
+ * Live watching: while the user stays on 标的查询 with a non-empty query,
+ * the page re-runs the same lightweight search every 2s so the rows tick
+ * (backend live-refreshes mark/funding on a 2s cycle and fills the true
+ * BBO per hit). Clearing the query or leaving the view stops the timer
+ * at once — background goes back to zero requests. Every search carries
+ * an incrementing request id: a stale response can never overwrite newer
+ * state or a cleared state.
  */
 
 /** Decimals to show for a price, derived from the market's tick size. */
@@ -124,7 +132,7 @@ function MarketRows({
                     <span>指数价：<span className="text-ds-text-1">{fmtPrice(m.indexPx, m.tickSize)}</span></span>
                     <span>中间价：<span className="text-ds-text-1">{fmtPrice(m.midPx, m.tickSize)}</span></span>
                     <span>原始费率：<span className="text-ds-text-1">{m.fundingRateRaw == null ? "—" : `${m.fundingRateRaw >= 0 ? "+" : ""}${(m.fundingRateRaw * 100).toFixed(4)}%`}</span></span>
-                    <span>结算周期：<span className="text-ds-text-1">{m.fundingIntervalHours}h</span></span>
+                    <span>结算周期：<span className="text-ds-text-1">{m.fundingIntervalHours == null ? "—" : `${m.fundingIntervalHours}h`}</span></span>
                     <span>价格步长：<span className="text-ds-text-1">{fmtStep(m.tickSize)}</span></span>
                     <span>数量步长：<span className="text-ds-text-1">{fmtStep(m.stepSize)}</span></span>
                     <span>最小名义：<span className="text-ds-text-1">{m.minNotional == null ? "—" : `$${fmtStep(m.minNotional)}`}</span></span>
@@ -156,46 +164,71 @@ export default function DataPage() {
   const [expandedKey, setExpandedKey] = useState<string | null>(null);
   const reqId = useRef(0);
 
-  const runSearch = useCallback(async (q: string, exchangeIds: string[]) => {
-    const trimmed = q.trim();
-    if (!trimmed) {
-      setResults([]);
-      setSearched(false);
-      return;
-    }
-    const id = ++reqId.current;
-    setSearching(true);
-    try {
-      const rows = await api.searchMarketInfo(trimmed, exchangeIds);
-      if (reqId.current === id) {
-        setResults(rows);
-        setSearched(true);
-        setExpandedKey(null);
-        if (rows.length > 0) {
-          setCacheUpdatedAt(Math.max(...rows.map((r) => r.updatedAt)));
-        }
-      }
-    } catch {
-      if (reqId.current === id) {
+  // One search, two modes. "fresh" is a new query / selection / manual
+  // refresh: it resets the expanded row and, on error, shows the empty
+  // state. "tick" is the 2s live refresh: it only swaps in newer rows —
+  // it never collapses the expanded row and never blanks the screen on
+  // a transient failure. Both modes share the request id: a response
+  // whose id is no longer current is discarded, so an older request can
+  // never overwrite newer state or a cleared state.
+  const runSearch = useCallback(
+    async (q: string, exchangeIds: string[], mode: "fresh" | "tick" = "fresh") => {
+      const trimmed = q.trim();
+      if (!trimmed) {
+        // Invalidate any in-flight search FIRST, then clear: its late
+        // response must not resurrect the cleared state.
+        reqId.current += 1;
         setResults([]);
-        setSearched(true);
+        setSearched(false);
+        setSearching(false);
+        return;
       }
-    } finally {
-      if (reqId.current === id) setSearching(false);
-    }
-  }, []);
+      const id = ++reqId.current;
+      setSearching(true);
+      try {
+        const rows = await api.searchMarketInfo(trimmed, exchangeIds);
+        if (reqId.current === id) {
+          setResults(rows);
+          setSearched(true);
+          if (mode === "fresh") setExpandedKey(null);
+          if (rows.length > 0) {
+            setCacheUpdatedAt(Math.max(...rows.map((r) => r.updatedAt)));
+          }
+        }
+      } catch {
+        if (reqId.current === id && mode === "fresh") {
+          setResults([]);
+          setSearched(true);
+        }
+      } finally {
+        if (reqId.current === id) setSearching(false);
+      }
+    },
+    [],
+  );
 
   // Debounced live search while typing; Enter searches immediately.
   // Re-runs when the checked exchanges change (same query, new selection).
+  // An emptied query clears immediately (no debounce) and invalidates
+  // any search still in flight.
   useEffect(() => {
     if (!query.trim()) {
-      setResults([]);
-      setSearched(false);
+      void runSearch(query, checked);
       return;
     }
     const t = setTimeout(() => void runSearch(query, checked), 300);
     return () => clearTimeout(t);
   }, [query, checked, runSearch]);
+
+  // Live watching, only while the user is on 标的查询 with a non-empty
+  // query: re-run the same lightweight search every 2s so the rows tick.
+  // Clearing the query or leaving the view clears the timer at once —
+  // the background goes back to zero requests.
+  useEffect(() => {
+    if (view !== "search" || !query.trim()) return;
+    const t = setInterval(() => void runSearch(query, checked, "tick"), 2000);
+    return () => clearInterval(t);
+  }, [view, query, checked, runSearch]);
 
   const onRefresh = async () => {
     setRefreshing(true);

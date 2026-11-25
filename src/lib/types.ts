@@ -56,9 +56,10 @@ export type AccountLive = {
 
 /** One standardized market row from the bulk catalog (phase 4). `null`
  * means the exchange has no public source for that field (e.g. AsterDEX
- * max leverage without a stored API key). Bid/ask are always filled for
- * search hits (true BBO per exchange); a `null` here only means the
- * per-symbol fill failed for that row. */
+ * max leverage — there is no public endpoint for it — or an AsterDEX
+ * funding interval that could not be confirmed, which also leaves the
+ * 1h rate and the APR null). Bid/ask come only from a real order book;
+ * a `null` here only means the per-symbol fill failed for that row. */
 export type MarketInfo = {
   exchangeId: string;
   symbol: string;
@@ -74,7 +75,7 @@ export type MarketInfo = {
   markPx: number | null;
   indexPx: number | null;
   fundingRateRaw: number | null;
-  fundingIntervalHours: number;
+  fundingIntervalHours: number | null;
   funding1h: number | null;
   fundingApr: number | null;
   nextFundingTime: number | null;

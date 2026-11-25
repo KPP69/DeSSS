@@ -44,7 +44,7 @@ const POLL_INTERVAL: Duration = Duration::from_secs(10);
 /// HMAC-SHA256 of `query` with `secret`, lowercase hex. Pure Rust
 /// (`hmac` + `sha2`); the secret never leaves this function and never
 /// enters a log line or an error message.
-pub(crate) fn sign_hmac_sha256(secret: &str, query: &str) -> String {
+fn sign_hmac_sha256(secret: &str, query: &str) -> String {
     let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes())
         .expect("HMAC accepts any key length");
     mac.update(query.as_bytes());
