@@ -13,7 +13,7 @@ function fmt(n: number): string {
 }
 
 /** Exchanges with a read-only adapter in phase 3. */
-const SYNCABLE = new Set(["hyperliquid", "entropy", "lighter", "lighter_robinhood"]);
+const SYNCABLE = new Set(["hyperliquid", "entropy", "lighter", "lighter_robinhood", "asterdex", "arcus"]);
 
 const STATUS_LABEL: Record<string, string> = {
   connecting: "连接中",
