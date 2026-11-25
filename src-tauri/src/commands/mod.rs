@@ -136,6 +136,23 @@ pub async fn connect_account(
     state: State<'_, Arc<AppState>>,
     id: String,
 ) -> Result<crate::adapters::types::AccountLive, String> {
+    // Connect failures used to be invisible: the frontend swallowed the
+    // error and the backend logged nothing, so a failed click left the
+    // account on "未连接" with no feedback at all. Log the reason to the
+    // console drawer so the user can see why.
+    match connect_account_inner(state.inner().clone(), id).await {
+        Ok(live) => Ok(live),
+        Err(e) => {
+            state.bus.log("error", "DeSSS", format!("连接失败：{e}"));
+            Err(e)
+        }
+    }
+}
+
+async fn connect_account_inner(
+    state: Arc<AppState>,
+    id: String,
+) -> Result<crate::adapters::types::AccountLive, String> {
     if state.sync.is_running(&id) {
         return Err("account is already connected".to_string());
     }

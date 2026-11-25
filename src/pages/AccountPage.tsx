@@ -42,6 +42,7 @@ export default function AccountPage() {
   const openEdit = useAccountUiStore((s) => s.openEdit);
   const closeModal = useAccountUiStore((s) => s.close);
   const [pendingDelete, setPendingDelete] = useState<AccountView | null>(null);
+  const [connectError, setConnectError] = useState<string | null>(null);
   const connectTried = useRef<Set<string>>(new Set());
 
   useEffect(() => {
@@ -66,7 +67,9 @@ export default function AccountPage() {
       api
         .connectAccount(a.id)
         .then(setLive)
-        .catch(() => {});
+        // Do not swallow connect errors: a failed auto-connect used to
+        // leave the account on "未连接" with no feedback at all.
+        .catch((e) => setConnectError(`连接失败：${e}`));
     }
   }, [accounts, live, setLive]);
 
@@ -81,6 +84,11 @@ export default function AccountPage() {
       {error && !vaultError && (
         <div className="mb-4 text-ds-down bg-ds-panel border border-ds-line rounded px-4 py-3">
           {error}
+        </div>
+      )}
+      {connectError && !vaultError && (
+        <div className="mb-4 text-ds-down bg-ds-panel border border-ds-line rounded px-4 py-3">
+          {connectError}
         </div>
       )}
 
@@ -137,7 +145,13 @@ export default function AccountPage() {
                   <Button
                     variant="secondary"
                     size="sm"
-                    onClick={() => api.connectAccount(a.id).then(setLive).catch(() => {})}
+                    onClick={() => {
+                      setConnectError(null);
+                      api
+                        .connectAccount(a.id)
+                        .then(setLive)
+                        .catch((e) => setConnectError(`连接失败：${e}`));
+                    }}
                   >
                     连接
                   </Button>
