@@ -17,16 +17,14 @@ pub enum AdapterError {
     Other(String),
 }
 
-/// Account live status from the two independent health signals, so a dead
-/// market WS never hides a healthy REST account read:
-/// - WS up → "connected" (latency from the WS ping/pong RTT)
-/// - WS down but REST ok → "rest-only" (equity/positions still real)
-/// - both down → "error" when the last failure is known, else "connecting"
-pub fn live_status(ws_up: bool, rest_ok: bool, has_error: bool) -> &'static str {
-    if ws_up {
+/// Account live status from REST health only (there is no market WS on
+/// an account anymore — account sync is REST polling, and public market
+/// data comes from the on-demand catalog):
+/// - REST ok → "connected" (latency from the last REST round-trip)
+/// - REST down → "error" when the last failure is known, else "connecting"
+pub fn live_status(rest_ok: bool, has_error: bool) -> &'static str {
+    if rest_ok {
         "connected"
-    } else if rest_ok {
-        "rest-only"
     } else if has_error {
         "error"
     } else {
@@ -37,15 +35,6 @@ pub fn live_status(ws_up: bool, rest_ok: bool, has_error: bool) -> &'static str 
 /// Current time in milliseconds since the Unix epoch.
 pub(crate) fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
-}
-
-/// True when a WS error is the routine TLS close without close_notify
-/// (`unexpected-eof`): the peer dropped the connection mid-TLS (a proxy
-/// or router cutting an idle socket is the usual cause). It is a normal
-/// reconnect event, not an error — log it as a warning and never let it
-/// raise the console red dot.
-pub(crate) fn is_tls_unexpected_eof(msg: &str) -> bool {
-    msg.contains("unexpected-eof") || msg.contains("close_notify")
 }
 
 /// A JSON number-or-numeric-string as f64; anything else reads as 0.
@@ -62,22 +51,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn live_status_prefers_ws_then_rest() {
-        assert_eq!(live_status(true, true, false), "connected");
-        assert_eq!(live_status(true, false, true), "connected");
-        assert_eq!(live_status(false, true, true), "rest-only");
-        assert_eq!(live_status(false, false, true), "error");
-        assert_eq!(live_status(false, false, false), "connecting");
-    }
-
-    #[test]
-    fn tls_unexpected_eof_matches_rustls_message() {
-        assert!(is_tls_unexpected_eof(
-            "peer closed connection without sending TLS close_notify (unexpected-eof)"
-        ));
-        assert!(is_tls_unexpected_eof("TLS 握手失败：unexpected-eof"));
-        assert!(!is_tls_unexpected_eof("行情连接已关闭"));
-        assert!(!is_tls_unexpected_eof("HTTP 429"));
+    fn live_status_from_rest_only() {
+        assert_eq!(live_status(true, false), "connected");
+        assert_eq!(live_status(true, true), "connected");
+        assert_eq!(live_status(false, true), "error");
+        assert_eq!(live_status(false, false), "connecting");
     }
 }
 /// Unified exchange contract, implemented by the real read-only adapters

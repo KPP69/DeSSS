@@ -3,9 +3,8 @@
 //! Official endpoints (docs.arcus.xyz/api-reference, updated 2026-11-12):
 //! - Market list: `GET https://api.arcus.xyz/v1/markets` — used by the
 //!   on-demand catalog (bulk specs + prices + funding).
-//! - Market data: `wss://api.arcus.xyz/v1/ws`. The WS is kept open only
-//!   as a keepalive (ping every 20s); no book is subscribed — public
-//!   market data comes from the on-demand catalog.
+//! - Market data: none. The adapter opens no WS connection at all —
+//!   public market data comes from the on-demand catalog.
 //! - Account (read-only, no auth): `GET /v1/account?address=0x…`
 //!   `&accountIndex=0` — real equity, free collateral and positions.
 //!   There is no total-PnL field: PnL is derived as
@@ -20,19 +19,14 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
-use tokio_tungstenite::tungstenite::Message;
 
 use super::types::{AccountLive, Balance, LivePosition, Order, OrderRequest, Position};
 use super::{f64_from, now_ms, AdapterResult, ExchangeAdapter};
 use crate::bus::{AppEvent, EventBus};
 
 pub const ARCUS_REST_URL: &str = "https://api.arcus.xyz";
-pub const ARCUS_WS_URL: &str = "wss://api.arcus.xyz/v1/ws";
 
-const WS_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
-const PING_INTERVAL: Duration = Duration::from_secs(20);
 const POLL_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Side of one position: the `side` literal when it parses
@@ -89,7 +83,7 @@ fn parse_account(v: &Value) -> Result<(f64, f64, f64, Vec<LivePosition>), String
     Ok((equity, available, pnl, positions))
 }
 
-/// Last REST snapshot, merged with WS status/latency for `AccountLive`.
+/// Last REST snapshot, published as `AccountLive`.
 #[derive(Clone, Default)]
 struct Snapshot {
     equity_usd: f64,
@@ -107,10 +101,8 @@ pub struct ArcusAdapter {
     live: Arc<RwLock<HashMap<String, AccountLive>>>,
     running: Arc<AtomicBool>,
     snapshot: Mutex<Snapshot>,
-    ws_up: AtomicBool,
     rest_ok: AtomicBool,
     last_error: Mutex<Option<String>>,
-    last_rtt: Mutex<Option<Duration>>,
     last_rest_rtt: Mutex<Option<Duration>>,
 }
 
@@ -131,20 +123,16 @@ impl ArcusAdapter {
             live,
             running: Arc::new(AtomicBool::new(false)),
             snapshot: Mutex::new(Snapshot::default()),
-            ws_up: AtomicBool::new(false),
             rest_ok: AtomicBool::new(false),
             last_error: Mutex::new(None),
-            last_rtt: Mutex::new(None),
             last_rest_rtt: Mutex::new(None),
         }
     }
 
-    /// Latency is always one measured round-trip: the WS ping -> pong RTT
-    /// while the WS is up, else the last REST request time.
+    /// Latency is always one measured round-trip: the last REST request
+    /// time. Frame staleness and wall-clock subtraction are never used —
+    /// a stale frame timestamp is what made latency run away to 1.5M ms.
     fn latency_ms(&self) -> Option<u64> {
-        if self.ws_up.load(Ordering::SeqCst) {
-            return self.last_rtt.lock().unwrap().map(|r| r.as_millis() as u64);
-        }
         self.last_rest_rtt
             .lock()
             .unwrap()
@@ -158,7 +146,6 @@ impl ArcusAdapter {
     fn publish_live(&self) {
         let snap = self.snapshot.lock().unwrap().clone();
         let status = super::live_status(
-            self.ws_up.load(Ordering::SeqCst),
             self.rest_ok.load(Ordering::SeqCst),
             self.last_error.lock().unwrap().is_some(),
         )
@@ -181,16 +168,6 @@ impl ArcusAdapter {
             map.insert(self.account_id.clone(), live.clone());
         }
         self.bus.publish(AppEvent::AccountLive(live));
-    }
-
-    fn set_ws(&self, up: bool, error: Option<String>) {
-        self.ws_up.store(up, Ordering::SeqCst);
-        if up {
-            *self.last_error.lock().unwrap() = None;
-        } else if let Some(e) = error {
-            *self.last_error.lock().unwrap() = Some(e);
-        }
-        self.publish_live();
     }
 
     fn set_rest(&self, ok: bool, rtt: Option<Duration>) {
@@ -258,7 +235,7 @@ impl ArcusAdapter {
         }
     }
 
-    /// REST poll loop, independent of the market WS.
+    /// REST poll loop.
     async fn rest_loop(&self) {
         self.poll_account().await;
         let mut tick = tokio::time::interval(POLL_INTERVAL);
@@ -270,90 +247,6 @@ impl ArcusAdapter {
             }
             self.poll_account().await;
         }
-    }
-
-    /// One WS session, keepalive only: connect, then ping every 20s so a
-    /// proxy or router never cuts the idle socket. No book is subscribed —
-    /// public market data comes from the on-demand catalog.
-    async fn ws_once(&self) -> Result<(), String> {
-        let (mut ws, _) =
-            crate::net::ws::connect_ws(ARCUS_WS_URL, WS_CONNECT_TIMEOUT, &self.bus).await?;
-        self.set_ws(true, None);
-        self.log("info", "行情已连接（仅保活，不订阅盘口）".to_string());
-
-        let mut ping_i = tokio::time::interval(PING_INTERVAL);
-        let mut stop_i = tokio::time::interval(Duration::from_secs(1));
-        ping_i.tick().await;
-        stop_i.tick().await;
-        let mut ping_sent: Option<Instant> = None;
-
-        loop {
-            tokio::select! {
-                _ = ping_i.tick() => {
-                    if ws.send(Message::Ping(vec![].into())).await.is_err() {
-                        return Err("行情心跳发送失败".to_string());
-                    }
-                    ping_sent = Some(Instant::now());
-                }
-                _ = stop_i.tick() => {}
-                msg = ws.next() => {
-                    match msg {
-                        Some(Ok(Message::Pong(_))) => {
-                            if let Some(sent) = ping_sent.take() {
-                                *self.last_rtt.lock().unwrap() = Some(sent.elapsed());
-                                self.publish_live();
-                            }
-                        }
-                        Some(Ok(Message::Close(_))) => return Err("Arcus 行情连接已关闭".to_string()),
-                        Some(Err(e)) => return Err(format!("Arcus 行情出错：{e}")),
-                        None => return Err("Arcus 行情流已结束".to_string()),
-                        _ => {}
-                    }
-                }
-            }
-            if !self.running.load(Ordering::SeqCst) {
-                return Ok(());
-            }
-        }
-    }
-
-    /// WS reconnect loop with a ladder backoff (5s -> 15s -> 30s cap).
-    /// A dead WS only flips ws_up off — the account keeps its REST-driven
-    /// live state (see live_status). A session that lived longer than 30s
-    /// resets the ladder, so a healthy link that drops once retries fast.
-    /// A TLS close without close_notify (unexpected-eof) is a routine
-    /// drop: warn and reconnect, never an error red dot.
-    async fn ws_loop(&self) {
-        let mut attempt: usize = 0;
-        while self.running.load(Ordering::SeqCst) {
-            let started = Instant::now();
-            match self.ws_once().await {
-                Ok(()) => break,
-                Err(e) => {
-                    if !self.running.load(Ordering::SeqCst) {
-                        break;
-                    }
-                    if started.elapsed() > Duration::from_secs(30) {
-                        attempt = 0;
-                    }
-                    let delay = [5, 15, 30][attempt.min(2)];
-                    if super::is_tls_unexpected_eof(&e) {
-                        *self.last_error.lock().unwrap() = None;
-                        self.set_ws(false, None);
-                        self.log(
-                            "warn",
-                            format!("行情连接断开（TLS 对端关闭），{delay} 秒后重连"),
-                        );
-                    } else {
-                        self.set_ws(false, Some(e.clone()));
-                        self.log("error", format!("行情连接断开：{e}，{delay} 秒后重连"));
-                    }
-                    attempt += 1;
-                    tokio::time::sleep(Duration::from_secs(delay)).await;
-                }
-            }
-        }
-        self.set_ws(false, None);
     }
 }
 
@@ -425,9 +318,10 @@ impl ExchangeAdapter for ArcusAdapter {
     }
 
     async fn run(&self) {
-        // REST account sync and the market WS run side by side: either one
-        // may be down without taking the other with it.
-        tokio::join!(self.rest_loop(), self.ws_loop());
+        // Account sync is REST polling only: no market WS is opened for
+        // an account (public market data comes from the on-demand
+        // catalog, never from a per-account connection).
+        self.rest_loop().await;
     }
 }
 

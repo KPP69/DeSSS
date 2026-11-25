@@ -73,7 +73,7 @@ pub fn spawn_bus_forwarder(handle: AppHandle, state: Arc<AppState>) {
 
 /// Latest in-memory books + account states + recent logs, for the
 /// frontend to show numbers immediately after a refresh instead of
-/// waiting for the next WS frame / REST poll.
+/// waiting for the next REST poll.
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeSnapshot {
@@ -223,8 +223,7 @@ async fn connect_account_inner(
 }
 
 /// Stop whatever is running for an account and drop its cached live
-/// state: the adapter's run loop (REST poll + WS reconnect ladder) is
-/// aborted and the live snapshot is removed. Used by both disconnect and
+/// state: the adapter's run loop (REST poll) is aborted and the live snapshot is removed. Used by both disconnect and
 /// delete — delete must stop the sync before the DB row and vault
 /// credential disappear, or the adapter would keep syncing a deleted
 /// account. A disconnect failure is a warning, never a reason to block
@@ -305,20 +304,60 @@ pub fn get_vault_status(state: State<'_, Arc<AppState>>) -> Result<Option<String
     Ok(state.vault.init_error().map(|e| e.to_string()))
 }
 
+/// Load AsterDEX API Key/Secret credentials (if the user stored an
+/// AsterDEX account in API Key mode) so the catalog can sign the
+/// `leverageBracket` read — the only source of AsterDEX max leverage
+/// (there is no public endpoint for it). Agent-mode-only or no AsterDEX
+/// account means no credentials and AsterDEX max leverage stays unknown.
+/// This never logs or returns credential material.
+fn sync_asterdex_api_credentials(state: &Arc<AppState>) {
+    let Ok(rows) = state.db.list_accounts() else {
+        return;
+    };
+    for row in rows {
+        if row.exchange_id != "asterdex" {
+            continue;
+        }
+        let Ok(vault) = state.vault.store() else {
+            return;
+        };
+        let Some(creds) = vault.get(&row.id) else {
+            continue;
+        };
+        if creds.get("mode").and_then(|v| v.as_str()) == Some("agent") {
+            continue;
+        }
+        let (Some(key), Some(secret)) = (
+            creds.get("api_key").and_then(|v| v.as_str()),
+            creds.get("api_secret").and_then(|v| v.as_str()),
+        ) else {
+            continue;
+        };
+        state
+            .catalog
+            .set_asterdex_api_credentials(key.to_string(), secret.to_string());
+        return;
+    }
+}
+
 /// Search the market catalog by base symbol (exact or prefix) or native
 /// symbol (substring, case insensitive), restricted to the checked
 /// exchanges. A search fetches a checked exchange's bulk endpoint only
 /// when its cache is older than 30s; otherwise the cache is served. An
 /// empty query returns nothing — the Data page never dumps the whole
-/// market over IPC. Public data needs no account.
+/// market over IPC. Public data needs no account. Matched rows are then
+/// enriched with the true per-symbol BBO (and AsterDEX open interest),
+/// which the bulk endpoints cannot provide.
 #[tauri::command]
 pub async fn search_market_info(
     state: State<'_, Arc<AppState>>,
     query: String,
     exchange_ids: Vec<String>,
 ) -> Result<Vec<crate::adapters::market_catalog::MarketInfo>, String> {
+    sync_asterdex_api_credentials(state.inner());
     state.catalog.refresh_exchanges(&exchange_ids, false).await;
-    Ok(state.catalog.search(&query, &exchange_ids))
+    let rows = state.catalog.search(&query, &exchange_ids);
+    Ok(state.catalog.enrich_rows(rows).await)
 }
 
 #[derive(serde::Serialize)]
@@ -337,6 +376,7 @@ pub async fn refresh_market_catalog(
     state: State<'_, Arc<AppState>>,
     exchange_ids: Vec<String>,
 ) -> Result<CatalogRefresh, String> {
+    sync_asterdex_api_credentials(state.inner());
     state.catalog.refresh_exchanges(&exchange_ids, true).await;
     Ok(CatalogRefresh {
         count: state.catalog.len(),

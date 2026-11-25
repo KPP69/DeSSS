@@ -1,9 +1,8 @@
 //! Hyperliquid read-only adapter, shared by Hyperliquid mainnet and
 //! Entropy (HIP-3, `dex = "io"`).
 //!
-//! - Market data: none by default. The WS is kept open only as a
-//!   keepalive (ping every 20s) so the account status stays live; no book
-//!   is subscribed — public market data comes from the on-demand catalog.
+//! - Market data: none. The adapter opens no WS connection at all —
+//!   public market data comes from the on-demand catalog.
 //! - Account (read-only): `POST https://api.hyperliquid.xyz/info`
 //!   `clearinghouseState` — real equity, withdrawable margin, open
 //!   positions and unrealised PnL. No order placement in this phase.
@@ -18,19 +17,14 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
-use tokio_tungstenite::tungstenite::Message;
 
 use super::types::{AccountLive, Balance, LivePosition, Order, OrderRequest, Position};
 use super::{f64_from, now_ms, AdapterResult, ExchangeAdapter};
 use crate::bus::{AppEvent, EventBus};
 
-pub const HL_WS_URL: &str = "wss://api.hyperliquid.xyz/ws";
 pub const HL_INFO_URL: &str = "https://api.hyperliquid.xyz/info";
 
-const WS_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
-const PING_INTERVAL: Duration = Duration::from_secs(20);
 const POLL_INTERVAL: Duration = Duration::from_secs(10);
 
 /// One spot balance row from `spotClearinghouseState`.
@@ -117,7 +111,7 @@ fn merge_perp(mut dst: Snapshot, src: Snapshot) -> Snapshot {
     dst
 }
 
-/// Last REST snapshot, merged with WS status/latency for `AccountLive`.
+/// Last REST snapshot, published as `AccountLive`.
 #[derive(Clone, Default)]
 struct Snapshot {
     equity_usd: f64,
@@ -136,12 +130,8 @@ pub struct HyperliquidAdapter {
     live: Arc<RwLock<HashMap<String, AccountLive>>>,
     running: Arc<AtomicBool>,
     snapshot: Mutex<Snapshot>,
-    /// WS health and REST health are tracked separately so a dead market
-    /// WS never hides a healthy REST account read (see live_status).
-    ws_up: AtomicBool,
     rest_ok: AtomicBool,
     last_error: Mutex<Option<String>>,
-    last_rtt: Mutex<Option<Duration>>,
     last_rest_rtt: Mutex<Option<Duration>>,
 }
 
@@ -164,22 +154,16 @@ impl HyperliquidAdapter {
             live,
             running: Arc::new(AtomicBool::new(false)),
             snapshot: Mutex::new(Snapshot::default()),
-            ws_up: AtomicBool::new(false),
             rest_ok: AtomicBool::new(false),
             last_error: Mutex::new(None),
-            last_rtt: Mutex::new(None),
             last_rest_rtt: Mutex::new(None),
         }
     }
 
-    /// Latency is always one measured round-trip: the WS ping -> pong RTT
-    /// while the WS is up, else the last REST request time. Frame
-    /// staleness and wall-clock subtraction are never used — a stale frame
-    /// timestamp is what made latency run away to 1.5M ms.
+    /// Latency is always one measured round-trip: the last REST request
+    /// time. Frame staleness and wall-clock subtraction are never used —
+    /// a stale frame timestamp is what made latency run away to 1.5M ms.
     fn latency_ms(&self) -> Option<u64> {
-        if self.ws_up.load(Ordering::SeqCst) {
-            return self.last_rtt.lock().unwrap().map(|r| r.as_millis() as u64);
-        }
         self.last_rest_rtt
             .lock()
             .unwrap()
@@ -194,7 +178,6 @@ impl HyperliquidAdapter {
     fn publish_live(&self) {
         let snap = self.snapshot.lock().unwrap().clone();
         let status = super::live_status(
-            self.ws_up.load(Ordering::SeqCst),
             self.rest_ok.load(Ordering::SeqCst),
             self.last_error.lock().unwrap().is_some(),
         )
@@ -217,17 +200,6 @@ impl HyperliquidAdapter {
             map.insert(self.account_id.clone(), live.clone());
         }
         self.bus.publish(AppEvent::AccountLive(live));
-    }
-
-    /// WS state changed: record it (and the error, if any) and republish.
-    fn set_ws(&self, up: bool, error: Option<String>) {
-        self.ws_up.store(up, Ordering::SeqCst);
-        if up {
-            *self.last_error.lock().unwrap() = None;
-        } else if let Some(e) = error {
-            *self.last_error.lock().unwrap() = Some(e);
-        }
-        self.publish_live();
     }
 
     /// REST state changed: record it and republish.
@@ -393,10 +365,9 @@ impl HyperliquidAdapter {
         }
     }
 
-    /// REST poll loop, independent of the market WS: as long as REST works,
-    /// equity and positions keep showing even while the WS is down. The
-    /// first poll also fills the snapshot that dex symbol resolution
-    /// needs (current holdings' coins).
+    /// REST poll loop: as long as REST works, equity and positions keep
+    /// showing. The first poll also fills the snapshot that dex symbol
+    /// resolution needs (current holdings' coins).
     async fn rest_loop(&self) {
         self.poll_account().await;
         let mut tick = tokio::time::interval(POLL_INTERVAL);
@@ -408,97 +379,6 @@ impl HyperliquidAdapter {
             }
             self.poll_account().await;
         }
-    }
-
-    /// One WS session, keepalive only: connect, then ping every 20s so a
-    /// proxy or router never cuts the idle socket. No book is subscribed —
-    /// public market data comes from the on-demand catalog. REST polling
-    /// lives in rest_loop() and is unaffected by WS failures.
-    async fn ws_once(&self) -> Result<(), String> {
-        let (mut ws, _) =
-            crate::net::ws::connect_ws(HL_WS_URL, WS_CONNECT_TIMEOUT, &self.bus).await?;
-        self.set_ws(true, None);
-        self.log("info", "行情已连接（仅保活，不订阅盘口）".to_string());
-
-        let mut ping_i = tokio::time::interval(PING_INTERVAL);
-        let mut stop_i = tokio::time::interval(Duration::from_secs(1));
-        ping_i.tick().await;
-        stop_i.tick().await;
-        let mut ping_sent: Option<Instant> = None;
-
-        loop {
-            tokio::select! {
-                _ = ping_i.tick() => {
-                    let ping = serde_json::json!({"method": "ping"});
-                    if ws.send(Message::Text(ping.to_string().into())).await.is_err() {
-                        return Err("行情心跳发送失败".to_string());
-                    }
-                    ping_sent = Some(Instant::now());
-                }
-                _ = stop_i.tick() => {}
-                msg = ws.next() => {
-                    match msg {
-                        Some(Ok(Message::Text(t))) => {
-                            let text: &str = t.as_ref();
-                            if let Ok(v) = serde_json::from_str::<Value>(text) {
-                                if v["channel"].as_str() == Some("pong") {
-                                    if let Some(sent) = ping_sent.take() {
-                                        *self.last_rtt.lock().unwrap() = Some(sent.elapsed());
-                                        self.publish_live();
-                                    }
-                                }
-                            }
-                        }
-                        Some(Ok(Message::Close(_))) => return Err("Hyperliquid 行情连接已关闭".to_string()),
-                        Some(Err(e)) => return Err(format!("Hyperliquid 行情出错：{e}")),
-                        None => return Err("Hyperliquid 行情流已结束".to_string()),
-                        _ => {}
-                    }
-                }
-            }
-            if !self.running.load(Ordering::SeqCst) {
-                return Ok(());
-            }
-        }
-    }
-
-    /// WS reconnect loop with a ladder backoff (5s -> 15s -> 30s cap).
-    /// A dead WS only flips ws_up off — the account keeps its REST-driven
-    /// live state (see live_status). A session that lived longer than 30s
-    /// resets the ladder, so a healthy link that drops once retries fast.
-    /// A TLS close without close_notify (unexpected-eof) is a routine
-    /// drop: warn and reconnect, never an error red dot.
-    async fn ws_loop(&self) {
-        let mut attempt: usize = 0;
-        while self.running.load(Ordering::SeqCst) {
-            let started = Instant::now();
-            match self.ws_once().await {
-                Ok(()) => break,
-                Err(e) => {
-                    if !self.running.load(Ordering::SeqCst) {
-                        break;
-                    }
-                    if started.elapsed() > Duration::from_secs(30) {
-                        attempt = 0;
-                    }
-                    let delay = [5, 15, 30][attempt.min(2)];
-                    if super::is_tls_unexpected_eof(&e) {
-                        *self.last_error.lock().unwrap() = None;
-                        self.set_ws(false, None);
-                        self.log(
-                            "warn",
-                            format!("行情连接断开（TLS 对端关闭），{delay} 秒后重连"),
-                        );
-                    } else {
-                        self.set_ws(false, Some(e.clone()));
-                        self.log("error", format!("行情连接断开：{e}，{delay} 秒后重连"));
-                    }
-                    attempt += 1;
-                    tokio::time::sleep(Duration::from_secs(delay)).await;
-                }
-            }
-        }
-        self.set_ws(false, None);
     }
 }
 
@@ -574,9 +454,10 @@ impl ExchangeAdapter for HyperliquidAdapter {
     }
 
     async fn run(&self) {
-        // REST account sync and the market WS run side by side: either one
-        // may be down without taking the other with it.
-        tokio::join!(self.rest_loop(), self.ws_loop());
+        // Account sync is REST polling only: no market WS is opened for
+        // an account (public market data comes from the on-demand
+        // catalog, never from a per-account connection).
+        self.rest_loop().await;
     }
 }
 

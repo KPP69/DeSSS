@@ -7,29 +7,40 @@
 //! older than [`CACHE_TTL`]; otherwise the cached rows are served. With no
 //! search and no refresh, the catalog makes zero requests.
 //!
-//! Design notes (all endpoints probed live 2026-11-25, no keys needed):
+//! Design notes (all endpoints probed live 2026-11-25/26, no keys needed):
 //! - Hyperliquid / Entropy: one `POST metaAndAssetCtxs` each (weight 20).
 //!   Funding is the **hourly** rate; tick size is derived from price level
-//!   and `szDecimals`; bid/ask are `impactPxs` (execution-price proxy, not
-//!   top-of-book).
+//!   and `szDecimals`; bulk bid/ask are `impactPxs` (execution-price
+//!   proxy, not top-of-book) — the true BBO is filled per search hit via
+//!   `POST l2Book` (coin = native symbol, `io:NVDA` works for Entropy).
 //! - Lighter / Lighter RH: `GET orderBookDetails` (all markets) +
 //!   `GET funding-rates` (filter `exchange == "lighter"`). The funding rate
-//!   is an **8h-equivalent**; divide by 8 for the hourly rate. No bid/ask in
-//!   bulk REST, so both stay null.
+//!   is an **8h-equivalent quote** (settlement itself is hourly); divide by
+//!   8 for the hourly rate. No bid/ask in bulk REST — the BBO is filled
+//!   per search hit via `GET orderBookOrders?market_id=..&limit=2`.
 //! - AsterDEX: `exchangeInfo` (specs, refreshed at most once an hour —
-//!   890 KB) + `premiumIndex` + `bookTicker` + `fundingInfo` every cycle.
-//!   Funding intervals are **per-symbol** (`fundingInfo` live data:
-//!   360 symbols at 4h, 333 at 8h, 105 at 1h, 3 at 2h — never assume 8h).
-//!   `max_leverage` has no public source (leverageBracket needs a signed
-//!   call with a stored API key), so it stays null. No 24h volume / OI in
-//!   these endpoints, so both stay null for AsterDEX.
+//!   890 KB) + `premiumIndex` + `bookTicker` + `fundingInfo` +
+//!   `ticker/24hr` (all symbols, one call) every cycle. Funding intervals
+//!   are **per-symbol** (`fundingInfo` live data: 360 symbols at 4h, 333
+//!   at 8h, 105 at 1h, 3 at 2h — never assume 8h). 24h volume comes from
+//!   `ticker/24hr` (`quoteVolume`); open interest is filled per search hit
+//!   via `openInterest?symbol=..` (base units x mark price). `max_leverage`
+//!   has **no public source** (exchangeInfo carries no leverage field;
+//!   `maintMarginPercent` 2.5% / `requiredMarginPercent` 5% are margin
+//!   ratios, not max leverage — Binance lists identical values for
+//!   BTCUSDT whose max is 125x); it comes from the **signed**
+//!   `leverageBracket` call, which needs a stored API Key/Secret, so it
+//!   is filled only when such an account exists — otherwise it stays null.
 //! - Arcus: `GET /v1/markets` alone covers specs, prices and funding.
-//!   Funding is already the **hourly** rate. No bid/ask in REST.
+//!   Funding is already the **hourly** rate. No bid/ask in bulk REST —
+//!   the BBO is filled per search hit via `GET /v1/bbo/{market}`
+//!   (e.g. `BTC-USD`).
 //!   (docs.arcus.xyz/api-reference/openapi.yml is 404, as is /v1/mid-prices;
 //!   the per-market funding-rates endpoint is not bulk-usable.)
 //! - Liquidity: Hyperliquid `dayNtlVlm` + `openInterest * markPx`,
 //!   Lighter `daily_quote_token_volume` + `open_interest_usd` (direct),
-//!   Arcus `volume24hNotional` + `openInterest * markPrice`.
+//!   Arcus `volume24hNotional` + `openInterest * markPrice`,
+//!   AsterDEX `ticker/24hr quoteVolume` + per-symbol `openInterest * markPx`.
 //! - Search matches `base_symbol` exactly or by prefix, or the native
 //!   `symbol` by substring (case insensitive) — e.g. "BT" finds BTC but a
 //!   mid-string fragment of a base name alone does not.
@@ -71,13 +82,16 @@ pub const KNOWN_EXCHANGES: [&str; 6] = [
 
 /// One standardized market row, shared by all six exchanges. `None` means
 /// the exchange has no public source for that field (e.g. AsterDEX max
-/// leverage, Arcus/Lighter bulk bid/ask); the frontend renders it as "—".
+/// leverage without a stored API key); the frontend renders it as "—".
+/// `market_id` is internal only (Lighter BBO fill) and never serialized.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct MarketInfo {
     pub exchange_id: String,
     pub symbol: String,
     pub base_symbol: String,
+    #[serde(default, skip_serializing)]
+    pub market_id: Option<u64>,
     pub settlement_currency: String,
     pub max_leverage: Option<f64>,
     pub tick_size: Option<f64>,
@@ -89,7 +103,12 @@ pub struct MarketInfo {
     pub mark_px: Option<f64>,
     pub index_px: Option<f64>,
     pub funding_rate_raw: Option<f64>,
-    /// Funding settlement period in hours (1 on HL/Entropy/Lighter/Arcus, 8 on AsterDEX).
+    /// Funding settlement period in hours: 1 on HL/Entropy/Lighter/Arcus,
+    /// per-symbol 1/2/4/8 on AsterDEX (from fundingInfo). Note the two
+    /// Lighter numbers differ by design: the published `rate` is an
+    /// 8h-equivalent quote, so funding_1h = raw / 8, while the venue
+    /// settles hourly (interval 1h). Never derive funding_1h from this
+    /// field alone — each parser applies its venue's quote period.
     pub funding_interval_hours: f64,
     /// Funding rate normalized to one hour (raw / interval).
     pub funding_1h: Option<f64>,
@@ -295,6 +314,7 @@ fn parse_hyperliquid(
             exchange_id: exchange_id.to_string(),
             symbol: symbol.to_string(),
             base_symbol: normalize_base_symbol(symbol),
+            market_id: None,
             settlement_currency: "USDC".to_string(),
             max_leverage: num_field(u, "maxLeverage"),
             tick_size: tick,
@@ -377,13 +397,15 @@ fn parse_lighter(
             .map(|f| 10000.0 / f);
         let mark_px = num_field(r, "mark_price");
         let funding_raw = funding_by_id.get(&mid).copied();
-        // The funding-rates `rate` is an 8h-equivalent; the venue settles
-        // hourly, so the hourly rate is rate / 8.
+        // The funding-rates `rate` is an 8h-equivalent quote; the venue
+        // settles hourly, so the hourly rate is rate / 8. The settlement
+        // period stays 1h — the 8 belongs to the quote, not the interval.
         let funding_1h = funding_raw.map(|x| funding_1h_from(x, 8.0));
         out.push(MarketInfo {
             exchange_id: exchange_id.to_string(),
             symbol: symbol.to_string(),
             base_symbol: normalize_base_symbol(symbol),
+            market_id: Some(mid),
             settlement_currency: settlement_currency.to_string(),
             max_leverage,
             tick_size: Some(10f64.powi(-price_decimals as i32)),
@@ -412,12 +434,17 @@ fn parse_lighter(
 /// (TRADING PERPETUAL symbols only; premiumIndex carries ~156 stale entries
 /// that are not in exchangeInfo and are ignored). `intervals` maps symbol
 /// to its funding settlement period in hours (from `fundingInfo`); symbols
-/// missing from it fall back to 8h.
+/// missing from it fall back to 8h. `volumes` maps symbol to 24h volume in
+/// USD (from `ticker/24hr` quoteVolume); `leverage` maps symbol to max
+/// leverage (from signed `leverageBracket`, empty when no API key is
+/// stored — there is no public source for it).
 fn parse_asterdex(
     specs: &HashMap<String, AsterSpec>,
     premium: &serde_json::Value,
     book: &serde_json::Value,
     intervals: &HashMap<String, f64>,
+    volumes: &HashMap<String, f64>,
+    leverage: &HashMap<String, f64>,
     now_ms: i64,
 ) -> Result<Vec<MarketInfo>, String> {
     let Some(premium_list) = premium.as_array() else {
@@ -461,10 +488,12 @@ fn parse_asterdex(
             exchange_id: "asterdex".to_string(),
             symbol: symbol.to_string(),
             base_symbol: spec.base_symbol.clone(),
+            market_id: None,
             settlement_currency: spec.settlement_currency.clone(),
-            // No public source: leverageBracket needs a signed call with a
-            // stored API key, so max leverage stays null for now.
-            max_leverage: None,
+            // Signed leverageBracket only: no public source exists
+            // (exchangeInfo has no leverage field; maint/required margin
+            // percents are not max leverage). Empty map -> null.
+            max_leverage: leverage.get(symbol).copied(),
             tick_size: spec.tick_size,
             step_size: spec.step_size,
             min_notional: spec.min_notional,
@@ -481,8 +510,9 @@ fn parse_asterdex(
             funding_1h,
             funding_apr: funding_1h.map(funding_apr_pct),
             next_funding_time: next_funding,
-            // No 24h volume / OI in exchangeInfo, premiumIndex or bookTicker.
-            volume_24h_usd: None,
+            // 24h volume from ticker/24hr (quoteVolume, USDT); open
+            // interest is filled per search hit (openInterest is per-symbol).
+            volume_24h_usd: volumes.get(symbol).copied(),
             open_interest_usd: None,
             updated_at: now_ms,
         });
@@ -539,6 +569,7 @@ fn parse_arcus(v: &serde_json::Value, now_ms: i64) -> Result<Vec<MarketInfo>, St
             base_symbol: str_field(m, "baseAsset")
                 .map(normalize_base_symbol)
                 .unwrap_or_else(|| normalize_base_symbol(symbol)),
+            market_id: None,
             settlement_currency: "USDG".to_string(),
             max_leverage,
             tick_size: num_field(m, "tickSize"),
@@ -636,6 +667,201 @@ async fn fetch_lighter(
     )
 }
 
+/// True top-of-book from a Hyperliquid `l2Book` response: levels[0] are
+/// bids (best first), levels[1] asks (best first). Thin markets may
+/// return empty sides — those stay None, never 0.
+fn parse_l2book(v: &serde_json::Value) -> (Option<f64>, Option<f64>) {
+    let Some(levels) = v.get("levels").and_then(|l| l.as_array()) else {
+        return (None, None);
+    };
+    let first_px = |side: Option<&serde_json::Value>| -> Option<f64> {
+        side.and_then(|s| s.as_array())
+            .and_then(|a| a.first())
+            .and_then(|row| num_field(row, "px"))
+    };
+    (first_px(levels.first()), first_px(levels.get(1)))
+}
+
+/// Best bid/ask from a Lighter `orderBookOrders?limit=2` response. The
+/// venue sorts asks ascending and bids descending; with two orders per
+/// side the min/max is taken anyway so a sort surprise cannot flip the top.
+fn parse_lighter_book_orders(v: &serde_json::Value) -> (Option<f64>, Option<f64>) {
+    let best = |key: &str, want_min: bool| -> Option<f64> {
+        let list = v.get(key)?.as_array()?;
+        list.iter()
+            .filter_map(|o| num_field(o, "price"))
+            .fold(None, |acc: Option<f64>, x| {
+                Some(match acc {
+                    None => x,
+                    Some(a) => {
+                        if want_min {
+                            a.min(x)
+                        } else {
+                            a.max(x)
+                        }
+                    }
+                })
+            })
+    };
+    (best("bids", false), best("asks", true))
+}
+
+/// Best bid/ask from an Arcus `GET /v1/bbo/{market}` response.
+fn parse_arcus_bbo(v: &serde_json::Value) -> (Option<f64>, Option<f64>) {
+    (
+        v.get("bestBid").and_then(|b| num_field(b, "price")),
+        v.get("bestAsk").and_then(|a| num_field(a, "price")),
+    )
+}
+
+/// AsterDEX open interest in USD: `openInterest` is base units, valued
+/// at the mark price (same conversion as the bulk parsers).
+fn parse_asterdex_open_interest(v: &serde_json::Value, mark_px: Option<f64>) -> Option<f64> {
+    match (num_field(v, "openInterest"), mark_px) {
+        (Some(oi), Some(px)) => Some(oi * px),
+        _ => None,
+    }
+}
+
+/// AsterDEX `ticker/24hr` (all symbols, one call) -> symbol -> 24h volume
+/// in USD (`quoteVolume` is already quote-currency notional).
+fn parse_asterdex_volumes(v: &serde_json::Value) -> HashMap<String, f64> {
+    let mut out = HashMap::new();
+    if let Some(list) = v.as_array() {
+        for t in list {
+            if let (Some(s), Some(q)) = (str_field(t, "symbol"), num_field(t, "quoteVolume")) {
+                out.insert(s.to_string(), q);
+            }
+        }
+    }
+    out
+}
+
+/// AsterDEX signed `leverageBracket` -> symbol -> max leverage: bracket 1
+/// (smallest notional) carries the venue's max leverage as
+/// `initialLeverage`; fall back to 1 / initialMarginRatio when the field
+/// is absent. The response covers all symbols in one call.
+fn parse_asterdex_leverage(v: &serde_json::Value) -> HashMap<String, f64> {
+    let mut out = HashMap::new();
+    let Some(list) = v.as_array() else {
+        return out;
+    };
+    for entry in list {
+        let Some(symbol) = str_field(entry, "symbol") else {
+            continue;
+        };
+        let Some(brackets) = entry.get("brackets").and_then(|b| b.as_array()) else {
+            continue;
+        };
+        let first = brackets.iter().min_by_key(|b| {
+            b.get("bracket")
+                .and_then(|n| n.as_u64())
+                .unwrap_or(u64::MAX)
+        });
+        let lev = first.and_then(|b| {
+            num_field(b, "initialLeverage").or_else(|| {
+                num_field(b, "initialMarginRatio")
+                    .filter(|r| *r > 0.0)
+                    .map(|r| 1.0 / r)
+            })
+        });
+        if let Some(l) = lev.filter(|l| *l > 0.0) {
+            out.insert(symbol.to_string(), l);
+        }
+    }
+    out
+}
+
+async fn fetch_l2book(
+    http: &reqwest::Client,
+    coin: &str,
+) -> Result<(Option<f64>, Option<f64>), String> {
+    let resp = http
+        .post(HL_INFO_URL)
+        .json(&serde_json::json!({ "type": "l2Book", "coin": coin }))
+        .send()
+        .await
+        .map_err(|e| format!("请求失败：{e:?}"))?;
+    let status = resp.status();
+    let text = resp
+        .text()
+        .await
+        .map_err(|e| format!("读取响应失败：{e:?}"))?;
+    if !status.is_success() {
+        let snippet: String = text.chars().take(200).collect();
+        return Err(format!("HTTP {status}：{snippet}"));
+    }
+    let v: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| format!("解析响应失败：{e:?}"))?;
+    Ok(parse_l2book(&v))
+}
+
+async fn fetch_lighter_book_orders(
+    http: &reqwest::Client,
+    network: LighterNetwork,
+    market_id: u64,
+) -> Result<(Option<f64>, Option<f64>), String> {
+    let url = format!(
+        "{}/api/v1/orderBookOrders?market_id={market_id}&limit=2",
+        network.rest_base()
+    );
+    let v = get_json(http, &url).await?;
+    Ok(parse_lighter_book_orders(&v))
+}
+
+async fn fetch_arcus_bbo(
+    http: &reqwest::Client,
+    symbol: &str,
+) -> Result<(Option<f64>, Option<f64>), String> {
+    let v = get_json(http, &format!("{ARCUS_REST_URL}/v1/bbo/{symbol}")).await?;
+    Ok(parse_arcus_bbo(&v))
+}
+
+async fn fetch_asterdex_open_interest(
+    http: &reqwest::Client,
+    symbol: &str,
+    mark_px: Option<f64>,
+) -> Result<Option<f64>, String> {
+    let v = get_json(
+        http,
+        &format!("{ASTER_REST_URL}/fapi/v1/openInterest?symbol={symbol}"),
+    )
+    .await?;
+    Ok(parse_asterdex_open_interest(&v, mark_px))
+}
+
+/// Signed AsterDEX `leverageBracket` (V1 HMAC, same auth as the account
+/// reads): one call returns brackets for all symbols. The caller only
+/// invokes this when a stored API Key/Secret exists.
+async fn fetch_asterdex_leverage(
+    http: &reqwest::Client,
+    api_key: &str,
+    api_secret: &str,
+) -> Result<HashMap<String, f64>, String> {
+    let ts = crate::adapters::now_ms();
+    let query = format!("timestamp={ts}&recvWindow=5000");
+    let signature = super::asterdex::sign_hmac_sha256(api_secret, &query);
+    let url = format!("{ASTER_REST_URL}/fapi/v1/leverageBracket?{query}&signature={signature}");
+    let resp = http
+        .get(&url)
+        .header("X-MBX-APIKEY", api_key)
+        .send()
+        .await
+        .map_err(|e| format!("AsterDEX leverageBracket 请求失败：{e:?}"))?;
+    let status = resp.status();
+    let text = resp
+        .text()
+        .await
+        .map_err(|e| format!("读取响应失败：{e:?}"))?;
+    if !status.is_success() {
+        let snippet: String = text.chars().take(200).collect();
+        return Err(format!("HTTP {status}：{snippet}"));
+    }
+    let v: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| format!("解析响应失败：{e:?}"))?;
+    Ok(parse_asterdex_leverage(&v))
+}
+
 async fn fetch_arcus(http: &reqwest::Client) -> Result<Vec<MarketInfo>, String> {
     let v = get_json(http, &format!("{ARCUS_REST_URL}/v1/markets")).await?;
     parse_arcus(&v, crate::adapters::now_ms())
@@ -650,6 +876,12 @@ pub struct MarketCatalog {
     /// When each exchange's rows were last fetched successfully.
     fetched_at: Mutex<HashMap<String, Instant>>,
     last_refresh_at: Mutex<Option<i64>>,
+    /// AsterDEX API Key/Secret from a stored account (API Key mode only),
+    /// used solely for the signed `leverageBracket` read — the only source
+    /// of AsterDEX max leverage. Same trust boundary as the account
+    /// adapter (key held in memory, never logged). None when no such
+    /// account exists; then AsterDEX max leverage stays unknown.
+    asterdex_api: Mutex<Option<(String, String)>>,
 }
 
 impl MarketCatalog {
@@ -663,7 +895,16 @@ impl MarketCatalog {
             aster_specs_at: Mutex::new(None),
             fetched_at: Mutex::new(HashMap::new()),
             last_refresh_at: Mutex::new(None),
+            asterdex_api: Mutex::new(None),
         }
+    }
+
+    /// Store AsterDEX API credentials for the signed leverage read. The
+    /// commands layer calls this (from the vault) before a refresh; the
+    /// catalog never reads the vault itself.
+    pub fn set_asterdex_api_credentials(&self, api_key: String, api_secret: String) {
+        let mut slot = self.asterdex_api.lock().unwrap_or_else(|e| e.into_inner());
+        *slot = Some((api_key, api_secret));
     }
 
     /// True when the exchange's cached rows are still inside the TTL.
@@ -826,9 +1067,12 @@ impl MarketCatalog {
                     .log_refresh_error(exchange_id, format!("{exchange_id} 全量行情刷新失败：{e}")),
             }
         }
-        // AsterDEX needs specs + the three fast endpoints. fundingInfo
+        // AsterDEX needs specs + the fast endpoints. fundingInfo
         // (per-symbol settlement interval) is optional: if it fails, rows
         // are still built with the 8h fallback and a deduped warning.
+        // ticker/24hr (24h volume) is optional the same way.
+        // leverageBracket is signed and only attempted when an API
+        // Key/Secret is stored; without it max leverage stays unknown.
         if need_aster {
             let aster = match aster_specs_res {
                 Err(e) => Err(format!("asterdex 全量行情刷新失败：{e}")),
@@ -840,10 +1084,25 @@ impl MarketCatalog {
                     let premium_url = format!("{ASTER_REST_URL}/fapi/v1/premiumIndex");
                     let book_url = format!("{ASTER_REST_URL}/fapi/v1/ticker/bookTicker");
                     let funding_info_url = format!("{ASTER_REST_URL}/fapi/v1/fundingInfo");
-                    let (premium, book, funding_info) = tokio::join!(
+                    let ticker_url = format!("{ASTER_REST_URL}/fapi/v1/ticker/24hr");
+                    let aster_creds = self
+                        .asterdex_api
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .clone();
+                    let (premium, book, funding_info, ticker24, leverage_res) = tokio::join!(
                         get_json(&self.http, &premium_url),
                         get_json(&self.http, &book_url),
                         get_json(&self.http, &funding_info_url),
+                        get_json(&self.http, &ticker_url),
+                        async {
+                            match aster_creds {
+                                Some((key, secret)) => {
+                                    Some(fetch_asterdex_leverage(&self.http, &key, &secret).await)
+                                }
+                                None => None,
+                            }
+                        },
                     );
                     let mut intervals: HashMap<String, f64> = HashMap::new();
                     match funding_info {
@@ -865,10 +1124,43 @@ impl MarketCatalog {
                             format!("AsterDEX fundingInfo 刷新失败，已按 8h 折算费率：{e}"),
                         ),
                     }
-                    match (premium, book) {
-                        (Ok(p), Ok(b)) => {
-                            parse_asterdex(&specs, &p, &b, &intervals, crate::adapters::now_ms())
+                    let volumes = match ticker24 {
+                        Ok(v) => {
+                            self.log_refresh_ok("asterdex-ticker24hr");
+                            parse_asterdex_volumes(&v)
                         }
+                        Err(e) => {
+                            self.log_refresh_error(
+                                "asterdex-ticker24hr",
+                                format!("AsterDEX ticker/24hr 刷新失败，24h成交额暂无：{e}"),
+                            );
+                            HashMap::new()
+                        }
+                    };
+                    let leverage = match leverage_res {
+                        Some(Ok(map)) => {
+                            self.log_refresh_ok("asterdex-leverage");
+                            map
+                        }
+                        Some(Err(e)) => {
+                            self.log_refresh_error(
+                                "asterdex-leverage",
+                                format!("AsterDEX 杠杆上限读取失败，最大杠杆暂无：{e}"),
+                            );
+                            HashMap::new()
+                        }
+                        None => HashMap::new(),
+                    };
+                    match (premium, book) {
+                        (Ok(p), Ok(b)) => parse_asterdex(
+                            &specs,
+                            &p,
+                            &b,
+                            &intervals,
+                            &volumes,
+                            &leverage,
+                            crate::adapters::now_ms(),
+                        ),
                         (Err(e), _) | (_, Err(e)) => Err(format!("asterdex 全量行情刷新失败：{e}")),
                     }
                 }
@@ -926,6 +1218,101 @@ impl MarketCatalog {
         out
     }
 
+    /// Fill the per-symbol gaps the bulk endpoints cannot provide, for
+    /// exactly the rows a search returned (never for the whole market):
+    /// true BBO for Hyperliquid/Entropy (`l2Book` — bulk `impactPxs` is
+    /// only an execution-price proxy), Lighter/RH (`orderBookOrders`) and
+    /// Arcus (`/v1/bbo/{market}`); AsterDEX open interest
+    /// (`openInterest?symbol=..`, base units x mark price). All fills run
+    /// concurrently; a failed fill leaves the row as it was (the bulk
+    /// values stay) and logs one deduped warning per exchange.
+    pub async fn enrich_rows(&self, rows: Vec<MarketInfo>) -> Vec<MarketInfo> {
+        use futures_util::future::join_all;
+        let futs: Vec<_> = rows
+            .into_iter()
+            .map(|row| async move {
+                let mut row = row;
+                match row.exchange_id.as_str() {
+                    "hyperliquid" | "entropy" => {
+                        match fetch_l2book(&self.http, &row.symbol).await {
+                            Ok((bid, ask)) => {
+                                if bid.is_some() {
+                                    row.bid_px = bid;
+                                }
+                                if ask.is_some() {
+                                    row.ask_px = ask;
+                                }
+                            }
+                            Err(e) => self.log_refresh_error(
+                                "bbo-hyperliquid",
+                                format!("{} 真实盘口补拉失败：{e}", row.exchange_id),
+                            ),
+                        }
+                    }
+                    "lighter" | "lighter_robinhood" => {
+                        let network = if row.exchange_id == "lighter_robinhood" {
+                            LighterNetwork::Robinhood
+                        } else {
+                            LighterNetwork::Mainnet
+                        };
+                        if let Some(mid) = row.market_id {
+                            match fetch_lighter_book_orders(&self.http, network, mid).await {
+                                Ok((bid, ask)) => {
+                                    if bid.is_some() {
+                                        row.bid_px = bid;
+                                    }
+                                    if ask.is_some() {
+                                        row.ask_px = ask;
+                                    }
+                                    // Bulk mid was last-trade price; the
+                                    // true mid from the filled BBO is better.
+                                    if let (Some(b), Some(a)) = (row.bid_px, row.ask_px) {
+                                        row.mid_px = Some((b + a) / 2.0);
+                                    }
+                                }
+                                Err(e) => self.log_refresh_error(
+                                    "bbo-lighter",
+                                    format!("{} 真实盘口补拉失败：{e}", row.exchange_id),
+                                ),
+                            }
+                        }
+                    }
+                    "arcus" => match fetch_arcus_bbo(&self.http, &row.symbol).await {
+                        Ok((bid, ask)) => {
+                            if bid.is_some() {
+                                row.bid_px = bid;
+                            }
+                            if ask.is_some() {
+                                row.ask_px = ask;
+                            }
+                            if let (Some(b), Some(a)) = (row.bid_px, row.ask_px) {
+                                row.mid_px = Some((b + a) / 2.0);
+                            }
+                        }
+                        Err(e) => self
+                            .log_refresh_error("bbo-arcus", format!("Arcus 真实盘口补拉失败：{e}")),
+                    },
+                    "asterdex" => {
+                        if row.open_interest_usd.is_none() {
+                            match fetch_asterdex_open_interest(&self.http, &row.symbol, row.mark_px)
+                                .await
+                            {
+                                Ok(oi) => row.open_interest_usd = oi,
+                                Err(e) => self.log_refresh_error(
+                                    "oi-asterdex",
+                                    format!("AsterDEX 持仓量补拉失败：{e}"),
+                                ),
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                row
+            })
+            .collect();
+        join_all(futs).await
+    }
+
     pub fn len(&self) -> usize {
         self.data.read().unwrap_or_else(|e| e.into_inner()).len()
     }
@@ -965,6 +1352,120 @@ mod tests {
         assert!((funding_apr_pct(0.0000125) - 10.95).abs() < 1e-9);
         // Lighter 8h-equivalent 7.2e-05 -> 1h 9e-06.
         assert!((funding_1h_from(7.2e-05, 8.0) - 9e-06).abs() < 1e-12);
+        // AsterDEX 4h raw 0.0004 -> 1h 0.0001 (same APR as the 8h case).
+        assert!((funding_1h_from(0.0004, 4.0) - 0.0001).abs() < 1e-12);
+        // AsterDEX 1h raw is already hourly.
+        assert!((funding_1h_from(0.00008, 1.0) - 0.00008).abs() < 1e-12);
+    }
+
+    /// Each venue's raw funding rate -> 1h rate, with the venue's real
+    /// quote period (HL/Entropy/Arcus 1h, Lighter 8h-equivalent,
+    /// AsterDEX per-symbol 1/2/4/8h). A venue converted with the wrong
+    /// period is off by 2x-8x, so this pins the mapping, not just the math.
+    #[test]
+    fn funding_1h_per_venue() {
+        // Hyperliquid BTC: hourly raw 0.0000069845 stays as-is.
+        assert!((funding_1h_from(0.0000069845, 1.0) - 0.0000069845).abs() < 1e-12);
+        // Lighter BTC: 8h-equivalent 0.000096 -> 1h 0.000012.
+        assert!((funding_1h_from(0.000096, 8.0) - 0.000012).abs() < 1e-12);
+        // Arcus BTC: hourly raw 0.0000125 stays as-is (APR 10.95%).
+        assert!((funding_apr_pct(funding_1h_from(0.0000125, 1.0)) - 10.95).abs() < 1e-9);
+        // AsterDEX BTC (8h market): raw 0.00009616 -> 1h 0.00001202.
+        assert!((funding_1h_from(0.00009616, 8.0) - 0.00001202).abs() < 1e-12);
+        // AsterDEX ETH (1h market): raw 0.00008 stays as-is.
+        assert!((funding_1h_from(0.00008, 1.0) - 0.00008).abs() < 1e-12);
+        // AsterDEX 2h market: raw 0.0002 -> 1h 0.0001.
+        assert!((funding_1h_from(0.0002, 2.0) - 0.0001).abs() < 1e-12);
+    }
+
+    #[test]
+    fn parse_l2book_cases() {
+        let v = json(
+            r#"{"coin":"BTC","time":1795633991698,"levels":[
+                [{"px":"59957.0","sz":"6.77946","n":26},{"px":"59956.0","sz":"0.08","n":1}],
+                [{"px":"59958.0","sz":"1.5","n":3},{"px":"59959.0","sz":"0.2","n":1}]
+            ]}"#,
+        );
+        assert_eq!(parse_l2book(&v), (Some(59957.0), Some(59958.0)));
+        // Empty sides stay None, never 0.
+        let empty = json(r#"{"coin":"THIN","time":0,"levels":[[],[]]}"#);
+        assert_eq!(parse_l2book(&empty), (None, None));
+        // Malformed response -> both None.
+        assert_eq!(parse_l2book(&json(r#"{"error":"bad"}"#)), (None, None));
+    }
+
+    #[test]
+    fn parse_lighter_book_orders_cases() {
+        let v = json(
+            r#"{"code":200,"total_asks":2,"asks":[
+                {"price":"59876.2","remaining_base_amount":"0.00193"},
+                {"price":"59877.7","remaining_base_amount":"0.05010"}],
+               "total_bids":2,"bids":[
+                {"price":"59875.9","remaining_base_amount":"0.01"},
+                {"price":"59874.0","remaining_base_amount":"0.5"}]}"#,
+        );
+        assert_eq!(
+            parse_lighter_book_orders(&v),
+            (Some(59875.9), Some(59876.2))
+        );
+        assert_eq!(
+            parse_lighter_book_orders(&json(r#"{"code":200,"asks":[],"bids":[]}"#)),
+            (None, None)
+        );
+    }
+
+    #[test]
+    fn parse_arcus_bbo_cases() {
+        let v = json(
+            r#"{"bestBid":{"price":"59809","size":"0.05251135"},
+                "bestAsk":{"price":"59809.1","size":"3.23288548"},
+                "lastSequenceId":972906112}"#,
+        );
+        assert_eq!(parse_arcus_bbo(&v), (Some(59809.0), Some(59809.1)));
+        assert_eq!(
+            parse_arcus_bbo(&json(r#"{"bestBid":null,"bestAsk":null}"#)),
+            (None, None)
+        );
+    }
+
+    #[test]
+    fn parse_asterdex_open_interest_cases() {
+        let v = json(r#"{"symbol":"BTCUSDT","openInterest":"6091.502","time":1795633911549}"#);
+        // 6091.502 base units x $59940.4 mark.
+        let oi = parse_asterdex_open_interest(&v, Some(59940.4)).unwrap();
+        assert!((oi - 6091.502 * 59940.4).abs() < 1.0);
+        assert_eq!(parse_asterdex_open_interest(&v, None), None);
+    }
+
+    #[test]
+    fn parse_asterdex_leverage_cases() {
+        let v = json(
+            r#"[{"symbol":"BTCUSDT","brackets":[
+                    {"bracket":1,"initialLeverage":200,"notionalCap":400,"notionalFloor":0,"maintMarginRatio":0.015,"cum":0.0},
+                    {"bracket":2,"initialLeverage":150,"notionalCap":300000,"notionalFloor":400,"maintMarginRatio":0.025,"cum":4.0}]},
+                {"symbol":"ETHUSDT","brackets":[
+                    {"bracket":1,"notionalCap":100000,"notionalFloor":0,"maintMarginRatio":0.02,"cum":0.0,"initialMarginRatio":0.01}]},
+                {"symbol":"BADUSDT","brackets":[]}]"#,
+        );
+        let map = parse_asterdex_leverage(&v);
+        // Bracket 1 initialLeverage wins.
+        assert_eq!(map.get("BTCUSDT"), Some(&200.0));
+        // No initialLeverage -> 1 / initialMarginRatio.
+        assert_eq!(map.get("ETHUSDT"), Some(&100.0));
+        assert!(!map.contains_key("BADUSDT"));
+    }
+
+    #[test]
+    fn parse_asterdex_volumes_cases() {
+        let v = json(
+            r#"[{"symbol":"BTCUSDT","quoteVolume":"587866473.21"},
+                {"symbol":"ETHUSDT","quoteVolume":"123456.0"},
+                {"symbol":"NOPEUSDT"}]"#,
+        );
+        let map = parse_asterdex_volumes(&v);
+        assert_eq!(map.get("BTCUSDT"), Some(&587866473.21));
+        assert_eq!(map.get("ETHUSDT"), Some(&123456.0));
+        assert!(!map.contains_key("NOPEUSDT"));
     }
 
     #[test]
@@ -1062,6 +1563,7 @@ mod tests {
         let btc = &rows[0];
         assert_eq!(btc.symbol, "BTC");
         assert_eq!(btc.base_symbol, "BTC");
+        assert_eq!(btc.market_id, Some(1));
         assert_eq!(btc.max_leverage, Some(50.0));
         assert_eq!(btc.tick_size, Some(0.1));
         assert_eq!(btc.step_size, Some(0.00001));
@@ -1102,14 +1604,29 @@ mod tests {
         let mut intervals = HashMap::new();
         intervals.insert("BTCUSDT".to_string(), 8.0);
         intervals.insert("ETHUSDT".to_string(), 1.0);
-        let rows = parse_asterdex(&specs, &premium, &book, &intervals, 1_795_622_400_000).unwrap();
+        // ticker/24hr volumes (quoteVolume) and signed leverageBracket.
+        let mut volumes = HashMap::new();
+        volumes.insert("BTCUSDT".to_string(), 587866473.21);
+        let mut leverage = HashMap::new();
+        leverage.insert("BTCUSDT".to_string(), 200.0);
+        let rows = parse_asterdex(
+            &specs,
+            &premium,
+            &book,
+            &intervals,
+            &volumes,
+            &leverage,
+            1_795_622_400_000,
+        )
+        .unwrap();
         // Stale premium entry (not in exchangeInfo) is ignored.
         assert_eq!(rows.len(), 2);
         let btc = &rows[0];
         assert_eq!(btc.exchange_id, "asterdex");
         assert_eq!(btc.base_symbol, "BTC");
         assert_eq!(btc.settlement_currency, "USDT");
-        assert_eq!(btc.max_leverage, None);
+        assert_eq!(btc.max_leverage, Some(200.0));
+        assert_eq!(btc.volume_24h_usd, Some(587866473.21));
         assert_eq!(btc.tick_size, Some(0.1));
         assert_eq!(btc.step_size, Some(0.001));
         assert_eq!(btc.min_notional, Some(5.0));
@@ -1119,13 +1636,15 @@ mod tests {
         assert_eq!(btc.funding_interval_hours, 8.0);
         assert!((btc.funding_1h.unwrap() - 0.00009616 / 8.0).abs() < 1e-12);
         assert_eq!(btc.next_funding_time, Some(1795622400000));
-        // AsterDEX has no 24h volume / OI in these endpoints.
-        assert_eq!(btc.volume_24h_usd, None);
+        // Open interest is filled per search hit, not in the bulk parse.
         assert_eq!(btc.open_interest_usd, None);
         // ETH settles hourly: raw rate is already the 1h rate.
         let eth = &rows[1];
         assert_eq!(eth.funding_interval_hours, 1.0);
         assert_eq!(eth.funding_1h, Some(0.00008));
+        // No leverage/volume rows for ETH in these maps -> null.
+        assert_eq!(eth.max_leverage, None);
+        assert_eq!(eth.volume_24h_usd, None);
     }
 
     #[test]
@@ -1178,6 +1697,7 @@ mod tests {
                 exchange_id: "hyperliquid".into(),
                 symbol: "BTC".into(),
                 base_symbol: "BTC".into(),
+                market_id: None,
                 settlement_currency: "USDC".into(),
                 max_leverage: Some(40.0),
                 tick_size: Some(1.0),
@@ -1204,6 +1724,7 @@ mod tests {
                 exchange_id: "entropy".into(),
                 symbol: "io:NVDA".into(),
                 base_symbol: "NVDA".into(),
+                market_id: None,
                 settlement_currency: "USDC".into(),
                 max_leverage: Some(10.0),
                 tick_size: Some(0.01),

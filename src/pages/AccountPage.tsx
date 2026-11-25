@@ -18,8 +18,6 @@ const SYNCABLE = new Set(["hyperliquid", "entropy", "lighter", "lighter_robinhoo
 const STATUS_LABEL: Record<string, string> = {
   connecting: "连接中",
   connected: "已连接",
-  "rest-only": "仅 REST（WS 断线）",
-  reconnecting: "重连中",
   error: "连接异常",
   disconnected: "已断开",
 };
@@ -144,7 +142,7 @@ export default function AccountPage() {
                 {lv && (
                   <Badge tone={tone}>
                     {STATUS_LABEL[lv.status] ?? lv.status}
-                    {lv.latencyMs !== null && (lv.status === "connected" || lv.status === "rest-only")
+                    {lv.latencyMs !== null && lv.status === "connected"
                       ? ` · ${lv.latencyMs}ms`
                       : ""}
                   </Badge>

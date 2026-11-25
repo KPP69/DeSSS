@@ -90,8 +90,8 @@ fn valid_address(credentials: &Value, key: &str, label: &str) -> Result<String, 
 
 /// Build a read-only adapter for one stored account. Returns an error
 /// when the needed public identifier is missing from the vault record.
-/// AsterDEX never errors on missing credentials: the adapter starts the
-/// public WS book anyway and logs the missing-key reason to the console.
+/// AsterDEX never errors on missing credentials: the adapter logs the
+/// missing-key reason to the console and skips polling.
 pub fn build_adapter(
     row: &AccountRow,
     credentials: &Value,

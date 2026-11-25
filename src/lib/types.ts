@@ -42,7 +42,7 @@ export type ProxyState = { custom: string | null; effective: string | null };
 export type AccountLive = {
   accountId: string;
   adapterId: string;
-  /** "connecting" | "connected" | "reconnecting" | "error" | "disconnected" */
+  /** "connecting" | "connected" | "error" | "disconnected" */
   status: string;
   latencyMs: number | null;
   equityUsd: number;
@@ -56,7 +56,9 @@ export type AccountLive = {
 
 /** One standardized market row from the bulk catalog (phase 4). `null`
  * means the exchange has no public source for that field (e.g. AsterDEX
- * max leverage, Arcus/Lighter bulk bid/ask). */
+ * max leverage without a stored API key). Bid/ask are always filled for
+ * search hits (true BBO per exchange); a `null` here only means the
+ * per-symbol fill failed for that row. */
 export type MarketInfo = {
   exchangeId: string;
   symbol: string;

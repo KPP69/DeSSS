@@ -1,17 +1,19 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { Button, DataTable, EmptyState, tdClsCompact, trCls } from "../components/ui";
+import { Button, DataTable, EmptyState, MultiSelectDropdown, tdClsCompact, trCls } from "../components/ui";
 import { EXCHANGES, getExchange } from "../lib/exchanges";
 import { api } from "../lib/tauri";
 import type { MarketInfo } from "../lib/types";
+import { useDataUiStore } from "../store/useDataUiStore";
 
 /**
  * Data page: on-demand symbol search over the bulk market catalog (phase 4).
  * No background refresh and no WS book subscription: a search or manual
  * refresh fetches only the checked exchanges (30s cache), and the page
  * never dumps the whole market — without a query it shows a search guide.
+ * The view toggle lives in the AppShell secondary toolbar (App.tsx); the
+ * tool row below is absolutely static — the cache time lives in the
+ * results footer, never in the row, so nothing ever shifts the controls.
  */
-
-type DataView = "search" | "signals";
 
 /** Decimals to show for a price, derived from the market's tick size. */
 function priceDecimals(tick: number | null): number {
@@ -102,16 +104,16 @@ function MarketRows({
           <React.Fragment key={key}>
             <tr className={`${trCls} cursor-pointer`} onClick={() => onToggle(key)}>
               <td className={tdClsCompact}>{getExchange(m.exchangeId).name}</td>
-              <td className={`${tdClsCompact} num`}>{m.symbol}</td>
-              <td className={`${tdClsCompact} num`}>{fmtPrice(m.markPx, m.tickSize)}</td>
-              <td className={`${tdClsCompact} num`}>
+              <td className={`${tdClsCompact} num whitespace-nowrap`}>{m.symbol}</td>
+              <td className={`${tdClsCompact} num whitespace-nowrap`}>{fmtPrice(m.markPx, m.tickSize)}</td>
+              <td className={`${tdClsCompact} num whitespace-nowrap`}>
                 <span className="text-ds-up">{fmtPrice(m.bidPx, m.tickSize)}</span>
                 {" / "}
                 <span className="text-ds-down">{fmtPrice(m.askPx, m.tickSize)}</span>
               </td>
-              <td className={`${tdClsCompact} num ${rateCls}`}>{fundingText}</td>
-              <td className={`${tdClsCompact} num ${aprCls}`}>{aprText}</td>
-              <td className={`${tdClsCompact} num`}>
+              <td className={`${tdClsCompact} num whitespace-nowrap ${rateCls}`}>{fundingText}</td>
+              <td className={`${tdClsCompact} num whitespace-nowrap ${aprCls}`}>{aprText}</td>
+              <td className={`${tdClsCompact} num whitespace-nowrap`}>
                 {m.maxLeverage == null ? "—" : `${m.maxLeverage}x`}
               </td>
             </tr>
@@ -143,7 +145,7 @@ function MarketRows({
 }
 
 export default function DataPage() {
-  const [view, setView] = useState<DataView>("search");
+  const view = useDataUiStore((s) => s.view);
   const [query, setQuery] = useState("");
   const [checked, setChecked] = useState<string[]>(EXCHANGES.map((e) => e.id));
   const [results, setResults] = useState<MarketInfo[]>([]);
@@ -153,12 +155,6 @@ export default function DataPage() {
   const [cacheUpdatedAt, setCacheUpdatedAt] = useState<number | null>(null);
   const [expandedKey, setExpandedKey] = useState<string | null>(null);
   const reqId = useRef(0);
-
-  const toggleExchange = (id: string) => {
-    setChecked((cur) =>
-      cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id],
-    );
-  };
 
   const runSearch = useCallback(async (q: string, exchangeIds: string[]) => {
     const trimmed = q.trim();
@@ -214,35 +210,15 @@ export default function DataPage() {
 
   return (
     <div>
-      <div className="flex items-center gap-2 mb-3">
-        <div className="flex rounded-lg border border-ds-line bg-ds-panel p-0.5">
-          <button
-            onClick={() => setView("signals")}
-            className={`px-3 py-1 rounded-md text-sm ${
-              view === "signals"
-                ? "bg-ds-accent text-ds-accent-contrast"
-                : "text-ds-text-2 hover:text-ds-text-1"
-            }`}
-          >
-            自定义信号
-          </button>
-          <button
-            onClick={() => setView("search")}
-            className={`px-3 py-1 rounded-md text-sm ${
-              view === "search"
-                ? "bg-ds-accent text-ds-accent-contrast"
-                : "text-ds-text-2 hover:text-ds-text-1"
-            }`}
-          >
-            标的查询
-          </button>
-        </div>
-      </div>
-
       {view === "signals" ? (
         <EmptyState>自定义信号尚未接入 — 下一阶段将支持信号规则创建。</EmptyState>
       ) : (
         <>
+          {/* Absolutely static tool row: the search input stretches, the
+              exchange dropdown and the refresh button are fixed-width —
+              nothing is ever inserted here, so no click, loading state or
+              cache timestamp can push a control sideways. The cache time
+              lives in the results footer below the table instead. */}
           <div className="flex items-center gap-2 mb-3">
             <input
               value={query}
@@ -253,29 +229,19 @@ export default function DataPage() {
               placeholder="输入 BTC、ETH、SOL、NVDA 等标的名称，查询 6 所实时对比数据"
               className="flex-1 min-w-0 bg-ds-panel-2 border border-ds-line rounded-lg px-3 h-8 text-ds-text-1 outline-none focus:border-ds-accent num"
             />
-            <Button onClick={onRefresh} disabled={refreshing}>
-              {refreshing ? "刷新中…" : "刷新"}
-            </Button>
-            {cacheUpdatedAt != null && (
-              <span className="text-xs text-ds-text-3 whitespace-nowrap">
-                缓存更新于 {fmtClock(cacheUpdatedAt)}
-              </span>
-            )}
-          </div>
-
-          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 mb-3 text-sm text-ds-text-2">
-            {EXCHANGES.map((e) => (
-              <label key={e.id} className="flex items-center gap-1.5 cursor-pointer select-none">
-                <input
-                  type="checkbox"
-                  checked={checked.includes(e.id)}
-                  onChange={() => toggleExchange(e.id)}
-                  className="accent-ds-accent"
-                />
-                {e.name}
-              </label>
-            ))}
-            <span className="text-xs text-ds-text-3">只拉取勾选的交易所</span>
+            <div className="w-44 shrink-0">
+              <MultiSelectDropdown
+                options={EXCHANGES.map((e) => ({ value: e.id, label: e.name }))}
+                values={checked}
+                onChange={setChecked}
+                label="交易所"
+              />
+            </div>
+            <div className="shrink-0">
+              <Button onClick={onRefresh} disabled={refreshing}>
+                {refreshing ? "刷新中…" : "刷新"}
+              </Button>
+            </div>
           </div>
 
           {!searched && !searching ? (
@@ -294,7 +260,9 @@ export default function DataPage() {
                 />
               </DataTable>
               <div className="text-xs text-ds-text-3 mt-2">
-                共 {results.length} 个交易所结果 · 点击行查看完整规则详情 · 费率正值（多头付费）为绿，负值为红
+                共 {results.length} 个交易所结果
+                {cacheUpdatedAt != null && <> · 缓存更新于 {fmtClock(cacheUpdatedAt)}</>}
+                {" · "}点击行查看完整规则详情 · 费率正值（多头付费）为绿，负值为红
               </div>
             </div>
           )}
