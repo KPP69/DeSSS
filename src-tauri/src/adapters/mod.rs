@@ -39,6 +39,15 @@ pub(crate) fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 
+/// True when a WS error is the routine TLS close without close_notify
+/// (`unexpected-eof`): the peer dropped the connection mid-TLS (a proxy
+/// or router cutting an idle socket is the usual cause). It is a normal
+/// reconnect event, not an error — log it as a warning and never let it
+/// raise the console red dot.
+pub(crate) fn is_tls_unexpected_eof(msg: &str) -> bool {
+    msg.contains("unexpected-eof") || msg.contains("close_notify")
+}
+
 /// A JSON number-or-numeric-string as f64; anything else reads as 0.
 pub(crate) fn f64_from(v: &serde_json::Value) -> f64 {
     match v {
@@ -59,6 +68,16 @@ mod tests {
         assert_eq!(live_status(false, true, true), "rest-only");
         assert_eq!(live_status(false, false, true), "error");
         assert_eq!(live_status(false, false, false), "connecting");
+    }
+
+    #[test]
+    fn tls_unexpected_eof_matches_rustls_message() {
+        assert!(is_tls_unexpected_eof(
+            "peer closed connection without sending TLS close_notify (unexpected-eof)"
+        ));
+        assert!(is_tls_unexpected_eof("TLS 握手失败：unexpected-eof"));
+        assert!(!is_tls_unexpected_eof("行情连接已关闭"));
+        assert!(!is_tls_unexpected_eof("HTTP 429"));
     }
 }
 /// Unified exchange contract, implemented by the real read-only adapters

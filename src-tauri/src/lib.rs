@@ -55,7 +55,6 @@ pub fn run() {
         catalog,
     });
     let s2 = state.clone();
-    let s3 = state.clone();
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(state)
@@ -76,18 +75,9 @@ pub fn run() {
             .build()?;
             let handle = app.handle().clone();
             commands::spawn_bus_forwarder(handle, s2.clone());
-            // Market catalog: first refresh immediately, then every 15 s.
-            // A single exchange failing keeps its last good rows and logs a
-            // warning; it never blocks the other five.
-            {
-                let catalog = s3.catalog.clone();
-                tauri::async_runtime::spawn(async move {
-                    loop {
-                        catalog.refresh_all().await;
-                        tokio::time::sleep(MarketCatalog::refresh_interval()).await;
-                    }
-                });
-            }
+            // Market catalog: on-demand only — no background refresh loop.
+            // A search or manual refresh fetches the checked exchanges
+            // whose cache is older than 30s; otherwise nothing is fetched.
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

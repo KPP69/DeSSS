@@ -1,14 +1,11 @@
 //! Arcus read-only adapter.
 //!
 //! Official endpoints (docs.arcus.xyz/api-reference, updated 2026-11-12):
-//! - Market list: `GET https://api.arcus.xyz/v1/markets` — the top 2
-//!   active perpetual markets by 24h notional volume are subscribed
-//!   (never hardcoded IDs; live values put BTC-USD / ETH-USD on top).
-//! - Market data: `wss://api.arcus.xyz/v1/ws`,
-//!   `{"type":"subscribe","channel":"l2Orderbook","id":"BTC-USD",
-//!   "nLevels":5}` and the `bbo` channel. `l2Orderbook` frames are full
-//!   snapshots (re-broadcast periodically), so they are applied with
-//!   `apply_snapshot`; BBO frames refresh the best bid/ask tick.
+//! - Market list: `GET https://api.arcus.xyz/v1/markets` — used by the
+//!   on-demand catalog (bulk specs + prices + funding).
+//! - Market data: `wss://api.arcus.xyz/v1/ws`. The WS is kept open only
+//!   as a keepalive (ping every 20s); no book is subscribed — public
+//!   market data comes from the on-demand catalog.
 //! - Account (read-only, no auth): `GET /v1/account?address=0x…`
 //!   `&accountIndex=0` — real equity, free collateral and positions.
 //!   There is no total-PnL field: PnL is derived as
@@ -27,8 +24,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
 use tokio_tungstenite::tungstenite::Message;
 
-use super::book::BookState;
-use super::types::{AccountLive, Balance, LivePosition, Order, OrderRequest, Position, Tick};
+use super::types::{AccountLive, Balance, LivePosition, Order, OrderRequest, Position};
 use super::{f64_from, now_ms, AdapterResult, ExchangeAdapter};
 use crate::bus::{AppEvent, EventBus};
 
@@ -38,36 +34,6 @@ pub const ARCUS_WS_URL: &str = "wss://api.arcus.xyz/v1/ws";
 const WS_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const PING_INTERVAL: Duration = Duration::from_secs(20);
 const POLL_INTERVAL: Duration = Duration::from_secs(10);
-const BOOK_DEPTH: usize = 20;
-const MARKET_COUNT: usize = 2;
-
-/// Rank the market list by 24h notional volume and take the top N active
-/// perpetual display names (`"BTC-USD"` …). Market IDs are never hardcoded.
-fn parse_markets(v: &Value, n: usize) -> Result<Vec<String>, String> {
-    let list = v["markets"]
-        .as_array()
-        .ok_or_else(|| "no markets array in /v1/markets response".to_string())?;
-    let mut ranked: Vec<(f64, String)> = list
-        .iter()
-        .filter(|m| m["status"].as_str().map(|s| s == "ONLINE").unwrap_or(true))
-        .filter(|m| {
-            m["type"]
-                .as_str()
-                .map(|t| t == "PERPETUAL")
-                .unwrap_or(true)
-        })
-        .filter_map(|m| {
-            let name = m["marketDisplayName"].as_str()?.to_string();
-            Some((f64_from(&m["volume24hNotional"]), name))
-        })
-        .collect();
-    ranked.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-    let out: Vec<String> = ranked.into_iter().take(n).map(|(_, name)| name).collect();
-    if out.is_empty() {
-        return Err("no active perpetual markets in /v1/markets response".to_string());
-    }
-    Ok(out)
-}
 
 /// Side of one position: the `side` literal when it parses
 /// (case-insensitive `LONG` / `SHORT`), else the sign of `size`.
@@ -123,32 +89,6 @@ fn parse_account(v: &Value) -> Result<(f64, f64, f64, Vec<LivePosition>), String
     Ok((equity, available, pnl, positions))
 }
 
-/// Parse one `l2Orderbook` contents object into (bids, asks).
-fn parse_book(contents: &Value) -> (Vec<(f64, f64)>, Vec<(f64, f64)>) {
-    let side = |v: &Value| -> Vec<(f64, f64)> {
-        v.as_array()
-            .map(|arr| {
-                arr.iter()
-                    .map(|lv| (f64_from(&lv[0]), f64_from(&lv[1])))
-                    .collect()
-            })
-            .unwrap_or_default()
-    };
-    (side(&contents["bids"]), side(&contents["asks"]))
-}
-
-/// Parse one `bbo` contents object into (best bid, best ask), each
-/// (price, qty). Either side may be null when the book is empty.
-fn parse_bbo(contents: &Value) -> (Option<(f64, f64)>, Option<(f64, f64)>) {
-    let one = |v: &Value| -> Option<(f64, f64)> {
-        if v.is_null() {
-            return None;
-        }
-        Some((f64_from(&v["price"]), f64_from(&v["size"])))
-    };
-    (one(&contents["bestBid"]), one(&contents["bestAsk"]))
-}
-
 /// Last REST snapshot, merged with WS status/latency for `AccountLive`.
 #[derive(Clone, Default)]
 struct Snapshot {
@@ -166,10 +106,6 @@ pub struct ArcusAdapter {
     bus: EventBus,
     live: Arc<RwLock<HashMap<String, AccountLive>>>,
     running: Arc<AtomicBool>,
-    books: Mutex<HashMap<String, BookState>>,
-    /// Resolved market display names (top 2 by volume). Empty until the
-    /// first market-list fetch.
-    resolved_markets: Mutex<Vec<String>>,
     snapshot: Mutex<Snapshot>,
     ws_up: AtomicBool,
     rest_ok: AtomicBool,
@@ -190,12 +126,10 @@ impl ArcusAdapter {
             id: id.to_string(),
             address,
             account_id,
-            http: crate::net::new_http_client(),
+            http: crate::net::shared_http_client(),
             bus,
             live,
             running: Arc::new(AtomicBool::new(false)),
-            books: Mutex::new(HashMap::new()),
-            resolved_markets: Mutex::new(Vec::new()),
             snapshot: Mutex::new(Snapshot::default()),
             ws_up: AtomicBool::new(false),
             rest_ok: AtomicBool::new(false),
@@ -203,10 +137,6 @@ impl ArcusAdapter {
             last_rtt: Mutex::new(None),
             last_rest_rtt: Mutex::new(None),
         }
-    }
-
-    fn markets(&self) -> Vec<String> {
-        self.resolved_markets.lock().unwrap().clone()
     }
 
     /// Latency is always one measured round-trip: the WS ping -> pong RTT
@@ -269,28 +199,6 @@ impl ArcusAdapter {
             *self.last_rest_rtt.lock().unwrap() = Some(r);
         }
         self.publish_live();
-    }
-
-    /// Fetch the market list and resolve the top 2 active perpetuals.
-    async fn resolve_markets(&self) -> Result<(), String> {
-        let url = format!("{ARCUS_REST_URL}/v1/markets");
-        let resp = self
-            .http
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| format!("Arcus 市场列表请求失败：{e:?}"))?;
-        if !resp.status().is_success() {
-            return Err(format!("Arcus 市场列表接口返回 HTTP {}", resp.status()));
-        }
-        let v: Value = resp
-            .json()
-            .await
-            .map_err(|e| format!("市场列表响应解析失败：{e}"))?;
-        let markets = parse_markets(&v, MARKET_COUNT)?;
-        self.log("info", format!("已选出行情市场：{}", markets.join(", ")));
-        *self.resolved_markets.lock().unwrap() = markets;
-        Ok(())
     }
 
     /// One REST read of the account (no auth — address only).
@@ -364,75 +272,14 @@ impl ArcusAdapter {
         }
     }
 
-    fn handle_book(&self, market: &str, contents: &Value) {
-        let (bids, asks) = parse_book(contents);
-        let ts = now_ms();
-        let mut books = self.books.lock().unwrap();
-        let state = books.entry(market.to_string()).or_insert_with(BookState::new);
-        state.apply_snapshot(&bids, &asks);
-        let book = state.to_book(&self.id, market, BOOK_DEPTH, ts);
-        let (best_bid, best_ask) = (
-            book.bids.first().map(|l| l.0).unwrap_or(0.0),
-            book.asks.first().map(|l| l.0).unwrap_or(0.0),
-        );
-        drop(books);
-        self.bus.publish(AppEvent::Book(book));
-        if best_bid > 0.0 && best_ask > 0.0 {
-            self.bus.publish(AppEvent::Tick(Tick {
-                adapter_id: self.id.clone(),
-                symbol: market.to_string(),
-                bid: best_bid,
-                ask: best_ask,
-                last: (best_bid + best_ask) / 2.0,
-                volume24h: 0.0,
-                ts,
-            }));
-        }
-    }
-
-    fn handle_bbo(&self, market: &str, contents: &Value) {
-        let (bid, ask) = parse_bbo(contents);
-        if let (Some((b, _)), Some((a, _))) = (bid, ask) {
-            if b > 0.0 && a > 0.0 {
-                self.bus.publish(AppEvent::Tick(Tick {
-                    adapter_id: self.id.clone(),
-                    symbol: market.to_string(),
-                    bid: b,
-                    ask: a,
-                    last: (b + a) / 2.0,
-                    volume24h: 0.0,
-                    ts: now_ms(),
-                }));
-            }
-        }
-    }
-
-    /// One WS session: resolve markets first, connect, subscribe to
-    /// `l2Orderbook` (nLevels 5) + `bbo` per market, then pump frames.
+    /// One WS session, keepalive only: connect, then ping every 20s so a
+    /// proxy or router never cuts the idle socket. No book is subscribed —
+    /// public market data comes from the on-demand catalog.
     async fn ws_once(&self) -> Result<(), String> {
-        self.resolve_markets().await?;
         let (mut ws, _) =
             crate::net::ws::connect_ws(ARCUS_WS_URL, WS_CONNECT_TIMEOUT, &self.bus).await?;
-        for market in self.markets() {
-            for channel in ["l2Orderbook", "bbo"] {
-                let mut sub = serde_json::json!({
-                    "type": "subscribe",
-                    "channel": channel,
-                    "id": market,
-                });
-                if channel == "l2Orderbook" {
-                    sub["nLevels"] = Value::from(5);
-                }
-                ws.send(Message::Text(sub.to_string().into()))
-                    .await
-                    .map_err(|e| format!("订阅失败：{e}"))?;
-            }
-        }
         self.set_ws(true, None);
-        self.log(
-            "info",
-            format!("行情已连接，已订阅 {}", self.markets().join(", ")),
-        );
+        self.log("info", "行情已连接（仅保活，不订阅盘口）".to_string());
 
         let mut ping_i = tokio::time::interval(PING_INTERVAL);
         let mut stop_i = tokio::time::interval(Duration::from_secs(1));
@@ -451,32 +298,6 @@ impl ArcusAdapter {
                 _ = stop_i.tick() => {}
                 msg = ws.next() => {
                     match msg {
-                        Some(Ok(Message::Text(t))) => {
-                            let text: &str = t.as_ref();
-                            match serde_json::from_str::<Value>(text) {
-                                Ok(v) => {
-                                    // Parse by channel + contents shape,
-                                    // not by the envelope `type`.
-                                    let channel = v["channel"].as_str().unwrap_or("");
-                                    let market = v["id"].as_str().unwrap_or("").to_string();
-                                    let contents = &v["contents"];
-                                    if !market.is_empty() && !contents.is_null() {
-                                        match channel {
-                                            "l2Orderbook" => self.handle_book(&market, contents),
-                                            "bbo" => self.handle_bbo(&market, contents),
-                                            _ => {}
-                                        }
-                                    }
-                                }
-                                Err(e) => self.log(
-                                    "error",
-                                    format!(
-                                        "行情数据解析失败：{e}（前 200 字符：{}）",
-                                        text.chars().take(200).collect::<String>().as_str()
-                                    ),
-                                ),
-                            }
-                        }
                         Some(Ok(Message::Pong(_))) => {
                             if let Some(sent) = ping_sent.take() {
                                 *self.last_rtt.lock().unwrap() = Some(sent.elapsed());
@@ -497,6 +318,11 @@ impl ArcusAdapter {
     }
 
     /// WS reconnect loop with a ladder backoff (5s -> 15s -> 30s cap).
+    /// A dead WS only flips ws_up off — the account keeps its REST-driven
+    /// live state (see live_status). A session that lived longer than 30s
+    /// resets the ladder, so a healthy link that drops once retries fast.
+    /// A TLS close without close_notify (unexpected-eof) is a routine
+    /// drop: warn and reconnect, never an error red dot.
     async fn ws_loop(&self) {
         let mut attempt: usize = 0;
         while self.running.load(Ordering::SeqCst) {
@@ -510,9 +336,18 @@ impl ArcusAdapter {
                     if started.elapsed() > Duration::from_secs(30) {
                         attempt = 0;
                     }
-                    self.set_ws(false, Some(e.clone()));
                     let delay = [5, 15, 30][attempt.min(2)];
-                    self.log("error", format!("行情连接断开：{e}，{delay} 秒后重连"));
+                    if super::is_tls_unexpected_eof(&e) {
+                        *self.last_error.lock().unwrap() = None;
+                        self.set_ws(false, None);
+                        self.log(
+                            "warn",
+                            format!("行情连接断开（TLS 对端关闭），{delay} 秒后重连"),
+                        );
+                    } else {
+                        self.set_ws(false, Some(e.clone()));
+                        self.log("error", format!("行情连接断开：{e}，{delay} 秒后重连"));
+                    }
                     attempt += 1;
                     tokio::time::sleep(Duration::from_secs(delay)).await;
                 }
@@ -601,26 +436,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn markets_rank_by_notional_and_skip_offline() {
-        let v = serde_json::json!({
-            "markets": [
-                {"marketId": 3, "marketDisplayName": "SOL-USD", "status": "ONLINE",
-                 "type": "PERPETUAL", "volume24hNotional": "6900000"},
-                {"marketId": 1, "marketDisplayName": "BTC-USD", "status": "ONLINE",
-                 "type": "PERPETUAL", "volume24hNotional": "32700000"},
-                {"marketId": 2, "marketDisplayName": "ETH-USD", "status": "ONLINE",
-                 "type": "PERPETUAL", "volume24hNotional": "11300000"},
-                {"marketId": 9, "marketDisplayName": "OLD-USD", "status": "OFFLINE",
-                 "type": "PERPETUAL", "volume24hNotional": "999000000"}
-            ]
-        });
-        assert_eq!(
-            parse_markets(&v, 2).expect("parse"),
-            vec!["BTC-USD".to_string(), "ETH-USD".to_string()]
-        );
-    }
-
-    #[test]
     fn account_parse_derives_pnl_and_positions() {
         let v = serde_json::json!({
             "accountIndex": 0,
@@ -658,29 +473,5 @@ mod tests {
         assert_eq!(parse_side(&Value::Null, 1.5), "long");
         assert_eq!(parse_side(&Value::Null, -1.5), "short");
         assert_eq!(parse_side(&serde_json::json!("weird"), -1.0), "short");
-    }
-
-    #[test]
-    fn l2_book_frame_parses_snapshot_levels() {
-        let contents = serde_json::json!({
-            "bids": [["59059.3", "0.203"], ["59058.0", "1.0"]],
-            "asks": [["59059.4", "1.347"]],
-            "lastSequenceId": 123
-        });
-        let (bids, asks) = parse_book(&contents);
-        assert_eq!(bids.len(), 2);
-        assert!((bids[0].0 - 59059.3).abs() < 1e-9);
-        assert!((asks[0].1 - 1.347).abs() < 1e-9);
-    }
-
-    #[test]
-    fn bbo_frame_parses_best_bid_ask() {
-        let contents = serde_json::json!({
-            "bestBid": {"price": "59059.3", "size": "0.203"},
-            "bestAsk": {"price": "59059.4", "size": "1.347"}
-        });
-        let (bid, ask) = parse_bbo(&contents);
-        assert_eq!(bid, Some((59059.3, 0.203)));
-        assert_eq!(ask, Some((59059.4, 1.347)));
     }
 }

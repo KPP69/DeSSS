@@ -2,15 +2,20 @@
 //! for all six exchanges, standardized into [`MarketInfo`] and served to the
 //! Data page's symbol search.
 //!
+//! On-demand only: there is no background refresh loop. A search or manual
+//! refresh fetches (concurrently) the checked exchanges whose cache is
+//! older than [`CACHE_TTL`]; otherwise the cached rows are served. With no
+//! search and no refresh, the catalog makes zero requests.
+//!
 //! Design notes (all endpoints probed live 2026-11-25, no keys needed):
 //! - Hyperliquid / Entropy: one `POST metaAndAssetCtxs` each (weight 20).
 //!   Funding is the **hourly** rate; tick size is derived from price level
 //!   and `szDecimals`; bid/ask are `impactPxs` (execution-price proxy, not
-//!   top-of-book) and are replaced by the WS book when one is subscribed.
+//!   top-of-book).
 //! - Lighter / Lighter RH: `GET orderBookDetails` (all markets) +
 //!   `GET funding-rates` (filter `exchange == "lighter"`). The funding rate
 //!   is an **8h-equivalent**; divide by 8 for the hourly rate. No bid/ask in
-//!   bulk REST — filled from the WS book when subscribed, else null.
+//!   bulk REST, so both stay null.
 //! - AsterDEX: `exchangeInfo` (specs, refreshed at most once an hour —
 //!   890 KB) + `premiumIndex` + `bookTicker` + `fundingInfo` every cycle.
 //!   Funding intervals are **per-symbol** (`fundingInfo` live data:
@@ -19,7 +24,7 @@
 //!   call with a stored API key), so it stays null. No 24h volume / OI in
 //!   these endpoints, so both stay null for AsterDEX.
 //! - Arcus: `GET /v1/markets` alone covers specs, prices and funding.
-//!   Funding is already the **hourly** rate. No bid/ask in REST — WS only.
+//!   Funding is already the **hourly** rate. No bid/ask in REST.
 //!   (docs.arcus.xyz/api-reference/openapi.yml is 404, as is /v1/mid-prices;
 //!   the per-market funding-rates endpoint is not bulk-usable.)
 //! - Liquidity: Hyperliquid `dayNtlVlm` + `openInterest * markPx`,
@@ -46,12 +51,23 @@ use super::asterdex::ASTER_REST_URL;
 use super::hyperliquid::HL_INFO_URL;
 use super::lighter::LighterNetwork;
 use crate::bus::EventBus;
-use crate::net::new_http_client;
+use crate::net::shared_http_client;
 
-/// How often the catalog refreshes fast-moving data (prices / funding).
-const REFRESH_INTERVAL: Duration = Duration::from_secs(15);
+/// Cached rows are fresh for 30s: a search inside that window serves the
+/// cache with no request; older rows are refetched on demand.
+pub const CACHE_TTL: Duration = Duration::from_secs(30);
 /// AsterDEX specs change slowly (890 KB payload) — refetch at most hourly.
 const ASTER_SPECS_TTL: Duration = Duration::from_secs(3600);
+
+/// Exchange ids the catalog knows, in display order.
+pub const KNOWN_EXCHANGES: [&str; 6] = [
+    "hyperliquid",
+    "entropy",
+    "lighter",
+    "lighter_robinhood",
+    "asterdex",
+    "arcus",
+];
 
 /// One standardized market row, shared by all six exchanges. `None` means
 /// the exchange has no public source for that field (e.g. AsterDEX max
@@ -265,7 +281,6 @@ fn parse_hyperliquid(
         let mark_px = num_field(ctx, "markPx");
         let funding = num_field(ctx, "funding");
         // impactPxs is an execution-price proxy, not top-of-book; the WS
-        // book overlay in refresh_all() replaces it when subscribed.
         let (bid_px, ask_px) = match ctx.get("impactPxs").and_then(|p| p.as_array()) {
             Some(p) if p.len() == 2 => (opt_f64(&p[0]), opt_f64(&p[1])),
             _ => (None, None),
@@ -377,7 +392,6 @@ fn parse_lighter(
             bid_px: None,
             ask_px: None,
             // No bulk bid/ask in REST; last trade price is the closest
-            // mid proxy until a WS book arrives (overlay in refresh_all).
             mid_px: num_field(r, "last_trade_price").or(mark_px),
             mark_px,
             index_px: num_field(r, "index_price"),
@@ -622,7 +636,10 @@ async fn fetch_lighter(
     )
 }
 
-/// In-memory market catalog: per-exchange rows, refreshed on a timer.
+async fn fetch_arcus(http: &reqwest::Client) -> Result<Vec<MarketInfo>, String> {
+    let v = get_json(http, &format!("{ARCUS_REST_URL}/v1/markets")).await?;
+    parse_arcus(&v, crate::adapters::now_ms())
+}
 pub struct MarketCatalog {
     http: reqwest::Client,
     bus: EventBus,
@@ -630,31 +647,39 @@ pub struct MarketCatalog {
     last_errors: Mutex<HashMap<String, String>>,
     aster_specs: RwLock<HashMap<String, AsterSpec>>,
     aster_specs_at: Mutex<Option<Instant>>,
+    /// When each exchange's rows were last fetched successfully.
+    fetched_at: Mutex<HashMap<String, Instant>>,
     last_refresh_at: Mutex<Option<i64>>,
 }
 
 impl MarketCatalog {
     pub fn new(bus: EventBus) -> Self {
         Self {
-            http: new_http_client(),
+            http: shared_http_client(),
             bus,
             data: RwLock::new(HashMap::new()),
             last_errors: Mutex::new(HashMap::new()),
             aster_specs: RwLock::new(HashMap::new()),
             aster_specs_at: Mutex::new(None),
+            fetched_at: Mutex::new(HashMap::new()),
             last_refresh_at: Mutex::new(None),
         }
     }
 
-    /// Refresh interval for the background loop.
-    pub fn refresh_interval() -> Duration {
-        REFRESH_INTERVAL
+    /// True when the exchange's cached rows are still inside the TTL.
+    fn is_fresh(&self, exchange_id: &str) -> bool {
+        self.fetched_at
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(exchange_id)
+            .map(|t| t.elapsed() < CACHE_TTL)
+            .unwrap_or(false)
     }
 
     /// Log a refresh failure as a console warning, but only when the
     /// message changed since the last failure for this `key` — a
-    /// persistently failing exchange must not spam the console every
-    /// 15 seconds. `key` is usually the exchange id; the AsterDEX
+    /// persistently failing exchange must not spam the console on every
+    /// search. `key` is usually the exchange id; the AsterDEX
     /// fundingInfo fetch has its own key so its fallback (8h) doesn't
     /// spam or get cleared by the main AsterDEX refresh.
     fn log_refresh_error(&self, key: &str, message: String) {
@@ -679,9 +704,31 @@ impl MarketCatalog {
         }
     }
 
-    /// Refresh all six exchanges (concurrently). A single exchange failing
-    /// leaves its last good rows in place and logs a warning.
-    pub async fn refresh_all(&self) {
+    fn mark_fetched(&self, exchange_id: &str) {
+        self.fetched_at
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(exchange_id.to_string(), Instant::now());
+    }
+
+    /// Fetch (concurrently) the requested exchanges whose cache is stale
+    /// (older than [`CACHE_TTL`]) — or all of them when `force` is set
+    /// (manual refresh). A single exchange failing leaves its last good
+    /// rows in place and logs a warning. Unknown ids are ignored.
+    pub async fn refresh_exchanges(&self, exchange_ids: &[String], force: bool) {
+        let wanted: Vec<&str> = KNOWN_EXCHANGES
+            .iter()
+            .copied()
+            .filter(|id| exchange_ids.iter().any(|x| x == id))
+            .collect();
+        let todo: Vec<&str> = wanted
+            .into_iter()
+            .filter(|id| force || !self.is_fresh(id))
+            .collect();
+        if todo.is_empty() {
+            return;
+        }
+        let need_aster = todo.contains(&"asterdex");
         // AsterDEX specs are big and slow-moving: refetch at most hourly.
         let specs_stale = {
             let at = self
@@ -694,7 +741,7 @@ impl MarketCatalog {
             }
         };
         let specs_future = async {
-            if !specs_stale {
+            if !need_aster || !specs_stale {
                 return Ok(());
             }
             match get_json(
@@ -722,14 +769,41 @@ impl MarketCatalog {
             }
         };
         let (hl, entropy, lighter, lighter_rh, aster_specs_res, arcus) = tokio::join!(
-            fetch_hyperliquid(&self.http, None),
-            fetch_hyperliquid(&self.http, Some("io")),
-            fetch_lighter(&self.http, LighterNetwork::Mainnet),
-            fetch_lighter(&self.http, LighterNetwork::Robinhood),
+            async {
+                if todo.contains(&"hyperliquid") {
+                    Some(fetch_hyperliquid(&self.http, None).await)
+                } else {
+                    None
+                }
+            },
+            async {
+                if todo.contains(&"entropy") {
+                    Some(fetch_hyperliquid(&self.http, Some("io")).await)
+                } else {
+                    None
+                }
+            },
+            async {
+                if todo.contains(&"lighter") {
+                    Some(fetch_lighter(&self.http, LighterNetwork::Mainnet).await)
+                } else {
+                    None
+                }
+            },
+            async {
+                if todo.contains(&"lighter_robinhood") {
+                    Some(fetch_lighter(&self.http, LighterNetwork::Robinhood).await)
+                } else {
+                    None
+                }
+            },
             specs_future,
             async {
-                let v = get_json(&self.http, &format!("{ARCUS_REST_URL}/v1/markets")).await?;
-                parse_arcus(&v, crate::adapters::now_ms())
+                if todo.contains(&"arcus") {
+                    Some(fetch_arcus(&self.http).await)
+                } else {
+                    None
+                }
             },
         );
         for (exchange_id, result) in [
@@ -739,10 +813,14 @@ impl MarketCatalog {
             ("lighter_robinhood", lighter_rh),
             ("arcus", arcus),
         ] {
+            let Some(result) = result else {
+                continue;
+            };
             match result {
                 Ok(rows) => {
                     self.log_refresh_ok(exchange_id);
                     self.store(exchange_id, rows);
+                    self.mark_fetched(exchange_id);
                 }
                 Err(e) => self
                     .log_refresh_error(exchange_id, format!("{exchange_id} 全量行情刷新失败：{e}")),
@@ -751,74 +829,57 @@ impl MarketCatalog {
         // AsterDEX needs specs + the three fast endpoints. fundingInfo
         // (per-symbol settlement interval) is optional: if it fails, rows
         // are still built with the 8h fallback and a deduped warning.
-        let aster = match aster_specs_res {
-            Err(e) => Err(format!("asterdex 全量行情刷新失败：{e}")),
-            Ok(()) => {
-                let specs = {
-                    let slot = self.aster_specs.read().unwrap_or_else(|e| e.into_inner());
-                    slot.clone()
-                };
-                let premium_url = format!("{ASTER_REST_URL}/fapi/v1/premiumIndex");
-                let book_url = format!("{ASTER_REST_URL}/fapi/v1/ticker/bookTicker");
-                let funding_info_url = format!("{ASTER_REST_URL}/fapi/v1/fundingInfo");
-                let (premium, book, funding_info) = tokio::join!(
-                    get_json(&self.http, &premium_url),
-                    get_json(&self.http, &book_url),
-                    get_json(&self.http, &funding_info_url),
-                );
-                let mut intervals: HashMap<String, f64> = HashMap::new();
-                match funding_info {
-                    Ok(v) => {
-                        self.log_refresh_ok("asterdex-fundingInfo");
-                        if let Some(list) = v.as_array() {
-                            for f in list {
-                                if let (Some(s), Some(h)) =
-                                    (str_field(f, "symbol"), num_field(f, "fundingIntervalHours"))
-                                {
-                                    intervals.insert(s.to_string(), h);
+        if need_aster {
+            let aster = match aster_specs_res {
+                Err(e) => Err(format!("asterdex 全量行情刷新失败：{e}")),
+                Ok(()) => {
+                    let specs = {
+                        let slot = self.aster_specs.read().unwrap_or_else(|e| e.into_inner());
+                        slot.clone()
+                    };
+                    let premium_url = format!("{ASTER_REST_URL}/fapi/v1/premiumIndex");
+                    let book_url = format!("{ASTER_REST_URL}/fapi/v1/ticker/bookTicker");
+                    let funding_info_url = format!("{ASTER_REST_URL}/fapi/v1/fundingInfo");
+                    let (premium, book, funding_info) = tokio::join!(
+                        get_json(&self.http, &premium_url),
+                        get_json(&self.http, &book_url),
+                        get_json(&self.http, &funding_info_url),
+                    );
+                    let mut intervals: HashMap<String, f64> = HashMap::new();
+                    match funding_info {
+                        Ok(v) => {
+                            self.log_refresh_ok("asterdex-fundingInfo");
+                            if let Some(list) = v.as_array() {
+                                for f in list {
+                                    if let (Some(s), Some(h)) = (
+                                        str_field(f, "symbol"),
+                                        num_field(f, "fundingIntervalHours"),
+                                    ) {
+                                        intervals.insert(s.to_string(), h);
+                                    }
                                 }
                             }
                         }
+                        Err(e) => self.log_refresh_error(
+                            "asterdex-fundingInfo",
+                            format!("AsterDEX fundingInfo 刷新失败，已按 8h 折算费率：{e}"),
+                        ),
                     }
-                    Err(e) => self.log_refresh_error(
-                        "asterdex-fundingInfo",
-                        format!("AsterDEX fundingInfo 刷新失败，已按 8h 折算费率：{e}"),
-                    ),
-                }
-                match (premium, book) {
-                    (Ok(p), Ok(b)) => {
-                        parse_asterdex(&specs, &p, &b, &intervals, crate::adapters::now_ms())
+                    match (premium, book) {
+                        (Ok(p), Ok(b)) => {
+                            parse_asterdex(&specs, &p, &b, &intervals, crate::adapters::now_ms())
+                        }
+                        (Err(e), _) | (_, Err(e)) => Err(format!("asterdex 全量行情刷新失败：{e}")),
                     }
-                    (Err(e), _) | (_, Err(e)) => Err(format!("asterdex 全量行情刷新失败：{e}")),
                 }
-            }
-        };
-        match aster {
-            Ok(rows) => {
-                self.log_refresh_ok("asterdex");
-                self.store("asterdex", rows);
-            }
-            Err(e) => self.log_refresh_error("asterdex", e),
-        }
-        // Overlay exact WS top-of-book where a live book is subscribed
-        // (replaces the impactPxs proxy on HL/Entropy and fills the null
-        // bid/ask on Lighter/Arcus for subscribed markets).
-        let books = self.bus.snapshot_books();
-        if !books.is_empty() {
-            let mut data = self.data.write().unwrap_or_else(|e| e.into_inner());
-            for b in &books {
-                let Some(bid) = b.bids.first() else {
-                    continue;
-                };
-                let Some(ask) = b.asks.first() else {
-                    continue;
-                };
-                if let Some(row) = data.get_mut(&(b.adapter_id.clone(), b.symbol.clone())) {
-                    row.bid_px = Some(bid.0);
-                    row.ask_px = Some(ask.0);
-                    row.mid_px = Some((bid.0 + ask.0) / 2.0);
-                    row.updated_at = crate::adapters::now_ms();
+            };
+            match aster {
+                Ok(rows) => {
+                    self.log_refresh_ok("asterdex");
+                    self.store("asterdex", rows);
+                    self.mark_fetched("asterdex");
                 }
+                Err(e) => self.log_refresh_error("asterdex", e),
             }
         }
         let mut last = self
@@ -836,19 +897,22 @@ impl MarketCatalog {
             .unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Search cached rows: `base_symbol` matches exactly or by prefix, or
-    /// the native `symbol` matches by substring (case insensitive). An
-    /// empty query returns nothing — the Data page never dumps the whole
-    /// market over IPC.
-    pub fn search(&self, query: &str) -> Vec<MarketInfo> {
+    /// Search cached rows, restricted to the given exchanges:
+    /// `base_symbol` matches exactly or by prefix, or the native `symbol`
+    /// matches by substring (case insensitive). An empty query returns
+    /// nothing — the Data page never dumps the whole market over IPC.
+    pub fn search(&self, query: &str, exchange_ids: &[String]) -> Vec<MarketInfo> {
         let q = query.trim().to_lowercase();
-        if q.is_empty() {
+        if q.is_empty() || exchange_ids.is_empty() {
             return Vec::new();
         }
         let data = self.data.read().unwrap_or_else(|e| e.into_inner());
         let mut out: Vec<MarketInfo> = data
             .values()
             .filter(|row| {
+                if !exchange_ids.iter().any(|x| x == &row.exchange_id) {
+                    return false;
+                }
                 let base = row.base_symbol.to_lowercase();
                 base == q || base.starts_with(&q) || row.symbol.to_lowercase().contains(&q)
             })
@@ -1106,6 +1170,8 @@ mod tests {
     #[test]
     fn search_matches_base_and_symbol_and_empty() {
         let catalog = MarketCatalog::new(EventBus::new(16));
+        let all: Vec<String> = KNOWN_EXCHANGES.iter().map(|s| s.to_string()).collect();
+        let all = &all;
         catalog.store(
             "hyperliquid",
             vec![MarketInfo {
@@ -1158,20 +1224,25 @@ mod tests {
                 updated_at: 0,
             }],
         );
-        assert_eq!(catalog.search(""), Vec::<MarketInfo>::new());
-        assert_eq!(catalog.search("   "), Vec::<MarketInfo>::new());
-        let btc = catalog.search("btc");
+        assert_eq!(catalog.search("", all), Vec::<MarketInfo>::new());
+        assert_eq!(catalog.search("   ", all), Vec::<MarketInfo>::new());
+        let btc = catalog.search("btc", all);
         assert_eq!(btc.len(), 1);
         assert_eq!(btc[0].exchange_id, "hyperliquid");
         // Prefix on base_symbol also matches.
-        assert_eq!(catalog.search("BT").len(), 1);
-        assert_eq!(catalog.search("NV").len(), 1);
+        assert_eq!(catalog.search("BT", all).len(), 1);
+        assert_eq!(catalog.search("NV", all).len(), 1);
+        // Exchange filter: BTC lives only under hyperliquid, so searching
+        // it with only entropy checked returns nothing.
+        let only_entropy = vec!["entropy".to_string()];
+        assert!(catalog.search("btc", &only_entropy).is_empty());
+        assert_eq!(catalog.search("NVDA", &only_entropy).len(), 1);
         // Matches base_symbol even though the native symbol has the io: prefix.
-        let nvda = catalog.search("NVDA");
+        let nvda = catalog.search("NVDA", all);
         assert_eq!(nvda.len(), 1);
         assert_eq!(nvda[0].symbol, "io:NVDA");
         // Substring on the native symbol also matches.
-        assert_eq!(catalog.search("io:").len(), 1);
-        assert!(catalog.search("DOGE").is_empty());
+        assert_eq!(catalog.search("io:", all).len(), 1);
+        assert!(catalog.search("DOGE", all).is_empty());
     }
 }

@@ -7,18 +7,17 @@
 //! - Lighter RH: REST `https://api.rh.lighter.xyz`,
 //!   WS `wss://api.rh.lighter.xyz/stream`, chain 466324, USDG.
 //!
-//! - Market data: WS `order_book/{market_id}`. The first frame after
-//!   subscribe is a full snapshot (`subscribed/order_book`); later frames
-//!   are deltas (`update/order_book`). Every delta's `offset` must be
-//!   strictly greater than the previous one (and `begin_nonce` must match
-//!   the previous `nonce`); on any gap the local book is cleared and the
-//!   connection is re-established to pull a fresh snapshot.
+//! - Market data: none by default. The WS is kept open only as a
+//!   keepalive (ping every 20s) so the account status stays live; no book
+//!   is subscribed — public market data comes from the on-demand catalog.
 //! - Keepalive: send `{"type":"ping"}` at least every 2 minutes; the
 //!   server answers `{"type":"pong"}`. A server `ping` is answered with
 //!   `pong` as well. No auth token is used: market data and the public
 //!   account read are unauthenticated, so there is nothing to refresh.
 //! - Account (read-only): `GET /api/v1/account?by=index&value={index}` —
 //!   real collateral, available balance, unrealised PnL and positions.
+//!   The market list (`/api/v1/orderBooks`) is fetched once at startup
+//!   only to name positions that carry a market id instead of a symbol.
 //!   No order placement in this phase.
 
 use std::collections::HashMap;
@@ -31,15 +30,13 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
 use tokio_tungstenite::tungstenite::Message;
 
-use super::book::BookState;
-use super::types::{AccountLive, Balance, LivePosition, Order, OrderRequest, Position, Tick};
+use super::types::{AccountLive, Balance, LivePosition, Order, OrderRequest, Position};
 use super::{f64_from, now_ms, AdapterResult, ExchangeAdapter};
 use crate::bus::{AppEvent, EventBus};
 
 const WS_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const PING_INTERVAL: Duration = Duration::from_secs(20);
 const POLL_INTERVAL: Duration = Duration::from_secs(10);
-const BOOK_DEPTH: usize = 20;
 
 fn u64_from(v: &Value) -> Option<u64> {
     match v {
@@ -161,11 +158,10 @@ pub struct LighterAdapter {
     bus: EventBus,
     live: Arc<RwLock<HashMap<String, AccountLive>>>,
     running: Arc<AtomicBool>,
-    /// market_id -> local book.
-    books: Mutex<HashMap<u64, BookState>>,
     /// symbol ("BTC"/"ETH") -> market_id, resolved from /api/v1/orderBooks.
     market_ids: Mutex<HashMap<String, u64>>,
-    /// market_id -> symbol, for naming books/ticks.
+    /// market_id -> symbol, for naming positions that carry only a
+    /// market id.
     symbols: Mutex<HashMap<u64, String>>,
     snapshot: Mutex<Snapshot>,
     /// WS health and REST health are tracked separately so a dead market
@@ -191,11 +187,10 @@ impl LighterAdapter {
             network,
             account_index,
             account_id,
-            http: crate::net::new_http_client_with_timeout(20),
+            http: crate::net::shared_http_client(),
             bus,
             live,
             running: Arc::new(AtomicBool::new(false)),
-            books: Mutex::new(HashMap::new()),
             market_ids: Mutex::new(HashMap::new()),
             symbols: Mutex::new(HashMap::new()),
             snapshot: Mutex::new(Snapshot::default()),
@@ -281,33 +276,6 @@ impl LighterAdapter {
             .get(&market_id)
             .cloned()
             .unwrap_or_else(|| format!("market-{market_id}"))
-    }
-
-    fn publish_book(&self, market_id: u64) {
-        let symbol = self.symbol_for(market_id);
-        let ts = now_ms();
-        let books = self.books.lock().unwrap();
-        let Some(state) = books.get(&market_id) else {
-            return;
-        };
-        let book = state.to_book(&self.id, &symbol, BOOK_DEPTH, ts);
-        let (best_bid, best_ask) = (
-            book.bids.first().map(|l| l.0).unwrap_or(0.0),
-            book.asks.first().map(|l| l.0).unwrap_or(0.0),
-        );
-        drop(books);
-        self.bus.publish(AppEvent::Book(book));
-        if best_bid > 0.0 && best_ask > 0.0 {
-            self.bus.publish(AppEvent::Tick(Tick {
-                adapter_id: self.id.clone(),
-                symbol,
-                bid: best_bid,
-                ask: best_ask,
-                last: (best_bid + best_ask) / 2.0,
-                volume24h: 0.0,
-                ts,
-            }));
-        }
     }
 
     /// Resolve BTC/ETH market ids from the public market list. Market ids
@@ -460,8 +428,16 @@ impl LighterAdapter {
     }
 
     /// REST poll loop, independent of the market WS: as long as REST works,
-    /// equity and positions keep showing even while the WS is down.
+    /// equity and positions keep showing even while the WS is down. The
+    /// market list is resolved once up front so positions that carry only
+    /// a market id can be named; a failure there only warns.
     async fn rest_loop(&self) {
+        if let Err(e) = self.fetch_markets().await {
+            self.log(
+                "warn",
+                format!("市场列表读取失败，持仓可能显示 market-id：{e}"),
+            );
+        }
         self.poll_account().await;
         let mut tick = tokio::time::interval(POLL_INTERVAL);
         tick.tick().await;
@@ -474,84 +450,16 @@ impl LighterAdapter {
         }
     }
 
-    /// Handle one order_book frame. Returns Err on a sequence gap, in
-    /// which case the caller drops the connection and resubscribes for a
-    /// fresh snapshot.
-    fn handle_book_frame(&self, msg: &Value) -> Result<(), String> {
-        let channel = msg["channel"].as_str().unwrap_or("");
-        let Some(market_id) = channel
-            .strip_prefix("order_book:")
-            .and_then(|s| s.parse::<u64>().ok())
-        else {
-            return Ok(());
-        };
-        let ob = &msg["order_book"];
-        let parse_side = |v: &Value| -> Vec<(f64, f64)> {
-            v.as_array()
-                .map(|arr| {
-                    arr.iter()
-                        .map(|lv| (f64_from(&lv["price"]), f64_from(&lv["size"])))
-                        .collect()
-                })
-                .unwrap_or_default()
-        };
-        let bids = parse_side(&ob["bids"]);
-        let asks = parse_side(&ob["asks"]);
-        let nonce = u64_from(&ob["nonce"]);
-        let begin_nonce = u64_from(&ob["begin_nonce"]);
-        let is_snapshot = msg["type"].as_str() == Some("subscribed/order_book");
-
-        let mut books = self.books.lock().unwrap();
-        let state = books.entry(market_id).or_insert_with(BookState::new);
-        if is_snapshot {
-            state.apply_snapshot_with_nonce(nonce, &bids, &asks);
-        } else {
-            // Continuity uses begin_nonce only — `offset` is server-scoped
-            // and may jump, so it must never trigger a resync by itself.
-            if let Err(gap) = state.apply_delta(&bids, &asks, begin_nonce, nonce) {
-                state.clear();
-                return Err(format!(
-                    "lighter order_book gap for market {market_id}: {gap}"
-                ));
-            }
-        }
-        drop(books);
-        self.publish_book(market_id);
-        Ok(())
-    }
-
-    /// One WS session: resolve markets, connect, subscribe, then pump
-    /// frames until the socket drops or the adapter stops. REST polling
+    /// One WS session, keepalive only: connect, then ping every 20s so a
+    /// proxy or router never cuts the idle socket. No book is subscribed —
+    /// public market data comes from the on-demand catalog. REST polling
     /// lives in rest_loop() and is unaffected by WS failures.
     async fn ws_once(&self) -> Result<(), String> {
-        self.fetch_markets().await?;
-        {
-            let mut books = self.books.lock().unwrap();
-            books.clear();
-            for mid in self.market_ids.lock().unwrap().values() {
-                books.insert(*mid, BookState::new());
-            }
-        }
-
         let (mut ws, _) =
             crate::net::ws::connect_ws(self.network.ws_url(), WS_CONNECT_TIMEOUT, &self.bus)
                 .await?;
-
-        let market_ids: Vec<u64> = self.market_ids.lock().unwrap().values().copied().collect();
-        for mid in &market_ids {
-            let sub = serde_json::json!({
-                "type": "subscribe",
-                "channel": format!("order_book/{mid}"),
-            });
-            ws.send(Message::Text(sub.to_string().into()))
-                .await
-                .map_err(|e| format!("订阅失败：{e}"))?;
-        }
         self.set_ws(true, None);
-        self.log(
-            "info",
-            format!("行情已连接，已订阅 {} 个市场", market_ids.len()),
-        );
+        self.log("info", "行情已连接（仅保活，不订阅盘口）".to_string());
 
         let mut ping_i = tokio::time::interval(PING_INTERVAL);
         let mut stop_i = tokio::time::interval(Duration::from_secs(1));
@@ -583,10 +491,6 @@ impl LighterAdapter {
                                             *self.last_rtt.lock().unwrap() = Some(sent.elapsed());
                                             self.publish_live();
                                         }
-                                    } else if v["type"].as_str().is_some_and(|t| t.ends_with("/order_book")) {
-                                        if let Err(e) = self.handle_book_frame(&v) {
-                                            return Err(e);
-                                        }
                                     } else if v.get("error").is_some() {
                                         self.log("error", format!("行情收到错误消息：{v}"));
                                     }
@@ -617,6 +521,8 @@ impl LighterAdapter {
     /// A dead WS only flips ws_up off — the account keeps its REST-driven
     /// live state (see live_status). A session that lived longer than 30s
     /// resets the ladder, so a healthy link that drops once retries fast.
+    /// A TLS close without close_notify (unexpected-eof) is a routine
+    /// drop: warn and reconnect, never an error red dot.
     async fn ws_loop(&self) {
         let mut attempt: usize = 0;
         while self.running.load(Ordering::SeqCst) {
@@ -630,9 +536,18 @@ impl LighterAdapter {
                     if started.elapsed() > Duration::from_secs(30) {
                         attempt = 0;
                     }
-                    self.set_ws(false, Some(e.clone()));
                     let delay = [5, 15, 30][attempt.min(2)];
-                    self.log("error", format!("行情连接断开：{e}，{delay} 秒后重连"));
+                    if super::is_tls_unexpected_eof(&e) {
+                        *self.last_error.lock().unwrap() = None;
+                        self.set_ws(false, None);
+                        self.log(
+                            "warn",
+                            format!("行情连接断开（TLS 对端关闭），{delay} 秒后重连"),
+                        );
+                    } else {
+                        self.set_ws(false, Some(e.clone()));
+                        self.log("error", format!("行情连接断开：{e}，{delay} 秒后重连"));
+                    }
                     attempt += 1;
                     tokio::time::sleep(Duration::from_secs(delay)).await;
                 }
@@ -784,67 +699,5 @@ mod tests {
             err.contains("code"),
             "error must list the keys present: {err}"
         );
-    }
-
-    #[test]
-    fn book_frame_gap_triggers_resync_error() {
-        let (bus, live) = test_ctx();
-        let a = LighterAdapter::new(
-            "lighter",
-            LighterNetwork::Mainnet,
-            1,
-            "acc-1".into(),
-            bus,
-            live,
-        );
-        let snap = serde_json::json!({
-            "type": "subscribed/order_book",
-            "channel": "order_book:0",
-            "order_book": {
-                "offset": 100, "nonce": 50, "begin_nonce": 0,
-                "bids": [{"price": "100", "size": "1"}],
-                "asks": [{"price": "101", "size": "1"}]
-            }
-        });
-        assert!(a.handle_book_frame(&snap).is_ok());
-        // Offset jumps are ignored (offset is server-scoped, not a
-        // continuity counter): a big jump with a matching begin_nonce
-        // must be accepted.
-        let jump = serde_json::json!({
-            "type": "update/order_book",
-            "channel": "order_book:0",
-            "order_book": {
-                "offset": 999, "nonce": 51, "begin_nonce": 50,
-                "bids": [], "asks": []
-            }
-        });
-        assert!(a.handle_book_frame(&jump).is_ok());
-        // Nonce gap: begin_nonce no longer matches the last nonce — must
-        // fail so the caller clears + resubscribes.
-        let gap = serde_json::json!({
-            "type": "update/order_book",
-            "channel": "order_book:0",
-            "order_book": {
-                "offset": 1000, "nonce": 52, "begin_nonce": 49,
-                "bids": [], "asks": []
-            }
-        });
-        assert!(a.handle_book_frame(&gap).is_err());
-        // The gap above cleared the book, so this delta applies to an
-        // empty book with no nonce baseline and is accepted.
-        let good = serde_json::json!({
-            "type": "update/order_book",
-            "channel": "order_book:0",
-            "order_book": {
-                "offset": 1001, "nonce": 53, "begin_nonce": 52,
-                "bids": [{"price": "100", "size": "0"}],
-                "asks": []
-            }
-        });
-        assert!(a.handle_book_frame(&good).is_ok());
-    }
-
-    fn test_ctx() -> (EventBus, Arc<RwLock<HashMap<String, AccountLive>>>) {
-        (EventBus::new(16), Arc::new(RwLock::new(HashMap::new())))
     }
 }

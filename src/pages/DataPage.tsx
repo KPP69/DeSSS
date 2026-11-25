@@ -1,14 +1,14 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Button, DataTable, EmptyState, tdClsCompact, trCls } from "../components/ui";
-import { useLiveStore } from "../store/useLiveStore";
-import { getExchange } from "../lib/exchanges";
+import { EXCHANGES, getExchange } from "../lib/exchanges";
 import { api } from "../lib/tauri";
 import type { MarketInfo } from "../lib/types";
 
 /**
- * Data page: on-demand symbol search over the bulk market catalog (phase 4)
- * plus the live WS books for connected accounts. The page never dumps the
- * whole market — without a query it shows a search guide only.
+ * Data page: on-demand symbol search over the bulk market catalog (phase 4).
+ * No background refresh and no WS book subscription: a search or manual
+ * refresh fetches only the checked exchanges (30s cache), and the page
+ * never dumps the whole market — without a query it shows a search guide.
  */
 
 type DataView = "search" | "signals";
@@ -52,15 +52,14 @@ function fmtUsdCompact(v: number | null): string {
 const HEADERS = [
   "交易所",
   "原始合约",
-  "买一 / 卖一",
   "标记价",
+  "买一 / 卖一",
+  "资金费率",
+  "年化 APR",
   "最大杠杆",
-  "1h 费率 / 年化 APR",
-  "最小步长 / 名义",
-  "结算周期 & 币种",
 ];
 // Fixed column ratios, summing to 100 (960x640-safe, horizontal scroll).
-const COL_WIDTHS = ["12%", "14%", "16%", "12%", "9%", "15%", "12%", "10%"];
+const COL_WIDTHS = ["14%", "16%", "14%", "16%", "14%", "13%", "13%"];
 
 function MarketRows({
   rows,
@@ -75,7 +74,7 @@ function MarketRows({
     <>
       {rows.map((m) => {
         const key = `${m.exchangeId}:${m.symbol}`;
-        const fundingCls =
+        const rateCls =
           m.funding1h == null
             ? ""
             : m.funding1h > 0
@@ -83,32 +82,37 @@ function MarketRows({
               : m.funding1h < 0
                 ? "text-ds-down"
                 : "";
+        const aprCls =
+          m.fundingApr == null
+            ? ""
+            : m.fundingApr > 0
+              ? "text-ds-up"
+              : m.fundingApr < 0
+                ? "text-ds-down"
+                : "";
         const fundingText =
           m.funding1h == null
             ? "—"
-            : `${m.funding1h >= 0 ? "+" : ""}${(m.funding1h * 100).toFixed(4)}% / 年化 ${
-                m.fundingApr == null ? "—" : `${m.fundingApr.toFixed(2)}%`
-              }`;
+            : `${m.funding1h >= 0 ? "+" : ""}${(m.funding1h * 100).toFixed(4)}%`;
+        const aprText =
+          m.fundingApr == null
+            ? "—"
+            : `${m.fundingApr >= 0 ? "+" : ""}${m.fundingApr.toFixed(2)}%`;
         return (
           <React.Fragment key={key}>
             <tr className={`${trCls} cursor-pointer`} onClick={() => onToggle(key)}>
               <td className={tdClsCompact}>{getExchange(m.exchangeId).name}</td>
               <td className={`${tdClsCompact} num`}>{m.symbol}</td>
+              <td className={`${tdClsCompact} num`}>{fmtPrice(m.markPx, m.tickSize)}</td>
               <td className={`${tdClsCompact} num`}>
                 <span className="text-ds-up">{fmtPrice(m.bidPx, m.tickSize)}</span>
                 {" / "}
                 <span className="text-ds-down">{fmtPrice(m.askPx, m.tickSize)}</span>
               </td>
-              <td className={`${tdClsCompact} num`}>{fmtPrice(m.markPx, m.tickSize)}</td>
+              <td className={`${tdClsCompact} num ${rateCls}`}>{fundingText}</td>
+              <td className={`${tdClsCompact} num ${aprCls}`}>{aprText}</td>
               <td className={`${tdClsCompact} num`}>
                 {m.maxLeverage == null ? "—" : `${m.maxLeverage}x`}
-              </td>
-              <td className={`${tdClsCompact} num ${fundingCls}`}>{fundingText}</td>
-              <td className={`${tdClsCompact} num`}>
-                {fmtStep(m.stepSize)} / {m.minNotional == null ? "—" : `$${fmtStep(m.minNotional)}`}
-              </td>
-              <td className={tdClsCompact}>
-                {m.fundingIntervalHours}h · {m.settlementCurrency}
               </td>
             </tr>
             {expandedKey === key && (
@@ -117,6 +121,8 @@ function MarketRows({
                   <div className="flex flex-wrap gap-x-5 gap-y-1 text-xs text-ds-text-2 num">
                     <span>指数价：<span className="text-ds-text-1">{fmtPrice(m.indexPx, m.tickSize)}</span></span>
                     <span>中间价：<span className="text-ds-text-1">{fmtPrice(m.midPx, m.tickSize)}</span></span>
+                    <span>原始费率：<span className="text-ds-text-1">{m.fundingRateRaw == null ? "—" : `${m.fundingRateRaw >= 0 ? "+" : ""}${(m.fundingRateRaw * 100).toFixed(4)}%`}</span></span>
+                    <span>结算周期：<span className="text-ds-text-1">{m.fundingIntervalHours}h</span></span>
                     <span>价格步长：<span className="text-ds-text-1">{fmtStep(m.tickSize)}</span></span>
                     <span>数量步长：<span className="text-ds-text-1">{fmtStep(m.stepSize)}</span></span>
                     <span>最小名义：<span className="text-ds-text-1">{m.minNotional == null ? "—" : `$${fmtStep(m.minNotional)}`}</span></span>
@@ -137,10 +143,9 @@ function MarketRows({
 }
 
 export default function DataPage() {
-  const books = useLiveStore((s) => s.books);
-  const bookList = Object.values(books);
   const [view, setView] = useState<DataView>("search");
   const [query, setQuery] = useState("");
+  const [checked, setChecked] = useState<string[]>(EXCHANGES.map((e) => e.id));
   const [results, setResults] = useState<MarketInfo[]>([]);
   const [searched, setSearched] = useState(false);
   const [searching, setSearching] = useState(false);
@@ -149,7 +154,13 @@ export default function DataPage() {
   const [expandedKey, setExpandedKey] = useState<string | null>(null);
   const reqId = useRef(0);
 
-  const runSearch = useCallback(async (q: string) => {
+  const toggleExchange = (id: string) => {
+    setChecked((cur) =>
+      cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id],
+    );
+  };
+
+  const runSearch = useCallback(async (q: string, exchangeIds: string[]) => {
     const trimmed = q.trim();
     if (!trimmed) {
       setResults([]);
@@ -159,7 +170,7 @@ export default function DataPage() {
     const id = ++reqId.current;
     setSearching(true);
     try {
-      const rows = await api.searchMarketInfo(trimmed);
+      const rows = await api.searchMarketInfo(trimmed, exchangeIds);
       if (reqId.current === id) {
         setResults(rows);
         setSearched(true);
@@ -179,22 +190,23 @@ export default function DataPage() {
   }, []);
 
   // Debounced live search while typing; Enter searches immediately.
+  // Re-runs when the checked exchanges change (same query, new selection).
   useEffect(() => {
     if (!query.trim()) {
       setResults([]);
       setSearched(false);
       return;
     }
-    const t = setTimeout(() => void runSearch(query), 300);
+    const t = setTimeout(() => void runSearch(query, checked), 300);
     return () => clearTimeout(t);
-  }, [query, runSearch]);
+  }, [query, checked, runSearch]);
 
   const onRefresh = async () => {
     setRefreshing(true);
     try {
-      const r = await api.refreshMarketCatalog();
+      const r = await api.refreshMarketCatalog(checked);
       if (r.updatedAt > 0) setCacheUpdatedAt(r.updatedAt);
-      if (query.trim()) await runSearch(query);
+      if (query.trim()) await runSearch(query, checked);
     } finally {
       setRefreshing(false);
     }
@@ -205,16 +217,6 @@ export default function DataPage() {
       <div className="flex items-center gap-2 mb-3">
         <div className="flex rounded-lg border border-ds-line bg-ds-panel p-0.5">
           <button
-            onClick={() => setView("search")}
-            className={`px-3 py-1 rounded-md text-sm ${
-              view === "search"
-                ? "bg-ds-accent text-ds-accent-contrast"
-                : "text-ds-text-2 hover:text-ds-text-1"
-            }`}
-          >
-            标的查询
-          </button>
-          <button
             onClick={() => setView("signals")}
             className={`px-3 py-1 rounded-md text-sm ${
               view === "signals"
@@ -223,6 +225,16 @@ export default function DataPage() {
             }`}
           >
             自定义信号
+          </button>
+          <button
+            onClick={() => setView("search")}
+            className={`px-3 py-1 rounded-md text-sm ${
+              view === "search"
+                ? "bg-ds-accent text-ds-accent-contrast"
+                : "text-ds-text-2 hover:text-ds-text-1"
+            }`}
+          >
+            标的查询
           </button>
         </div>
       </div>
@@ -236,7 +248,7 @@ export default function DataPage() {
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               onKeyDown={(e) => {
-                if (e.key === "Enter") void runSearch(query);
+                if (e.key === "Enter") void runSearch(query, checked);
               }}
               placeholder="输入 BTC、ETH、SOL、NVDA 等标的名称，查询 6 所实时对比数据"
               className="flex-1 min-w-0 bg-ds-panel-2 border border-ds-line rounded-lg px-3 h-8 text-ds-text-1 outline-none focus:border-ds-accent num"
@@ -251,6 +263,21 @@ export default function DataPage() {
             )}
           </div>
 
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 mb-3 text-sm text-ds-text-2">
+            {EXCHANGES.map((e) => (
+              <label key={e.id} className="flex items-center gap-1.5 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={checked.includes(e.id)}
+                  onChange={() => toggleExchange(e.id)}
+                  className="accent-ds-accent"
+                />
+                {e.name}
+              </label>
+            ))}
+            <span className="text-xs text-ds-text-3">只拉取勾选的交易所</span>
+          </div>
+
           {!searched && !searching ? (
             <EmptyState>输入 BTC、ETH、SOL、NVDA 等标的名称，查询 6 所实时对比数据。</EmptyState>
           ) : searching && results.length === 0 ? (
@@ -259,7 +286,7 @@ export default function DataPage() {
             <EmptyState>未找到包含「{query.trim()}」的标的。</EmptyState>
           ) : (
             <div className="mb-6">
-              <DataTable headers={HEADERS} minWidth={760} colWidths={COL_WIDTHS} compact>
+              <DataTable headers={HEADERS} minWidth={720} colWidths={COL_WIDTHS} compact>
                 <MarketRows
                   rows={results}
                   expandedKey={expandedKey}
@@ -271,62 +298,6 @@ export default function DataPage() {
               </div>
             </div>
           )}
-
-          <div className="font-semibold text-ds-text-1 mb-2 flex items-center gap-2">
-            真实行情 · 交易所 WebSocket 实时订阅
-          </div>
-          {bookList.length === 0 ? (
-            <EmptyState>暂无真实行情 — 请先在「账户」页面连接任意交易所账户。</EmptyState>
-          ) : (
-            <div className="mb-6">
-              <DataTable
-                headers={["交易所", "交易对", "买一", "卖一", "中间价", "盘口深度"]}
-                minWidth={680}
-                rows={bookList.map((b) => [
-                  <span key="e">{getExchange(b.adapterId).name}</span>,
-                  <span key="s" className="num">{b.symbol}</span>,
-                  <span key="bid" className="num text-ds-up">{b.bids[0] ? b.bids[0][0].toFixed(2) : "—"}</span>,
-                  <span key="ask" className="num text-ds-down">{b.asks[0] ? b.asks[0][0].toFixed(2) : "—"}</span>,
-                  <span key="mid" className="num">
-                    {b.bids[0] && b.asks[0] ? ((b.bids[0][0] + b.asks[0][0]) / 2).toFixed(2) : "—"}
-                  </span>,
-                  <span key="d" className="num text-ds-text-2">
-                    {b.bids.length} / {b.asks.length}
-                  </span>,
-                ])}
-              />
-              <div className="mt-3 grid grid-cols-2 gap-4">
-                {bookList.map((b) => (
-                  <div key={`${b.adapterId}:${b.symbol}`} className="rounded-[10px] border border-ds-line bg-ds-panel shadow-card p-3">
-                    <div className="text-xs text-ds-text-2 mb-2">
-                      {getExchange(b.adapterId).name} · <span className="num">{b.symbol}</span> · 盘口前 5 档
-                    </div>
-                    <div className="grid grid-cols-2 gap-3 text-xs num">
-                      <div>
-                        <div className="text-ds-text-3 mb-1">买盘</div>
-                        {b.bids.slice(0, 5).map(([p, q], i) => (
-                          <div key={i} className="flex justify-between py-0.5">
-                            <span className="text-ds-up">{p.toFixed(2)}</span>
-                            <span className="text-ds-up">{q}</span>
-                          </div>
-                        ))}
-                      </div>
-                      <div>
-                        <div className="text-ds-text-3 mb-1">卖盘</div>
-                        {b.asks.slice(0, 5).map(([p, q], i) => (
-                          <div key={i} className="flex justify-between py-0.5">
-                            <span className="text-ds-down">{p.toFixed(2)}</span>
-                            <span className="text-ds-down">{q}</span>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-          <div className="text-xs text-ds-text-3">历史数据存储与回放尚未接入。</div>
         </>
       )}
     </div>

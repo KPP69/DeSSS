@@ -305,15 +305,20 @@ pub fn get_vault_status(state: State<'_, Arc<AppState>>) -> Result<Option<String
     Ok(state.vault.init_error().map(|e| e.to_string()))
 }
 
-/// Search the cached market catalog by base symbol (exact or prefix) or
-/// native symbol (substring, case insensitive). An empty query returns
-/// nothing — the Data page never dumps the whole market over IPC.
+/// Search the market catalog by base symbol (exact or prefix) or native
+/// symbol (substring, case insensitive), restricted to the checked
+/// exchanges. A search fetches a checked exchange's bulk endpoint only
+/// when its cache is older than 30s; otherwise the cache is served. An
+/// empty query returns nothing — the Data page never dumps the whole
+/// market over IPC. Public data needs no account.
 #[tauri::command]
-pub fn search_market_info(
+pub async fn search_market_info(
     state: State<'_, Arc<AppState>>,
     query: String,
-) -> Vec<crate::adapters::market_catalog::MarketInfo> {
-    state.catalog.search(&query)
+    exchange_ids: Vec<String>,
+) -> Result<Vec<crate::adapters::market_catalog::MarketInfo>, String> {
+    state.catalog.refresh_exchanges(&exchange_ids, false).await;
+    Ok(state.catalog.search(&query, &exchange_ids))
 }
 
 #[derive(serde::Serialize)]
@@ -323,15 +328,16 @@ pub struct CatalogRefresh {
     pub updated_at: i64,
 }
 
-/// Manually trigger a full catalog refresh (all six exchanges) and return
-/// the cached row count plus the refresh timestamp (unix ms) for the
-/// Data page's "缓存更新于" display. Async commands with a `State` input
-/// must return a `Result` (Tauri requirement).
+/// Manually refresh the checked exchanges (ignoring the 30s cache) and
+/// return the cached row count plus the refresh timestamp (unix ms) for
+/// the Data page's "缓存更新于" display. Async commands with a `State`
+/// input must return a `Result` (Tauri requirement).
 #[tauri::command]
 pub async fn refresh_market_catalog(
     state: State<'_, Arc<AppState>>,
+    exchange_ids: Vec<String>,
 ) -> Result<CatalogRefresh, String> {
-    state.catalog.refresh_all().await;
+    state.catalog.refresh_exchanges(&exchange_ids, true).await;
     Ok(CatalogRefresh {
         count: state.catalog.len(),
         updated_at: state.catalog.last_refresh_at().unwrap_or(0),

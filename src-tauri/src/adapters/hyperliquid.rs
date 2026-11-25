@@ -1,13 +1,16 @@
 //! Hyperliquid read-only adapter, shared by Hyperliquid mainnet and
 //! Entropy (HIP-3, `dex = "io"`).
 //!
-//! - Market data: `wss://api.hyperliquid.xyz/ws`, `l2Book` subscription.
-//!   Each frame carries the full book, so it is applied as a snapshot.
+//! - Market data: none by default. The WS is kept open only as a
+//!   keepalive (ping every 20s) so the account status stays live; no book
+//!   is subscribed — public market data comes from the on-demand catalog.
 //! - Account (read-only): `POST https://api.hyperliquid.xyz/info`
 //!   `clearinghouseState` — real equity, withdrawable margin, open
 //!   positions and unrealised PnL. No order placement in this phase.
-//! - Entropy reuses the same endpoints: market names carry the `io:`
-//!   prefix and the REST call adds `"dex": "io"`.
+//! - Unified account: one master wallet shares a single pool across
+//!   mainnet perp (`dex = ""`), Entropy (`dex = "io"`) and spot. The
+//!   account read always aggregates all three, so the Hyperliquid and
+//!   Entropy adapters publish identical numbers for the same wallet.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -19,8 +22,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
 use tokio_tungstenite::tungstenite::Message;
 
-use super::book::BookState;
-use super::types::{AccountLive, Balance, LivePosition, Order, OrderRequest, Position, Tick};
+use super::types::{AccountLive, Balance, LivePosition, Order, OrderRequest, Position};
 use super::{f64_from, now_ms, AdapterResult, ExchangeAdapter};
 use crate::bus::{AppEvent, EventBus};
 
@@ -30,22 +32,6 @@ pub const HL_INFO_URL: &str = "https://api.hyperliquid.xyz/info";
 const WS_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const PING_INTERVAL: Duration = Duration::from_secs(20);
 const POLL_INTERVAL: Duration = Duration::from_secs(10);
-const BOOK_DEPTH: usize = 20;
-
-/// Parse a `meta` response into the active perp contract names. The names
-/// already carry the dex prefix for HIP-3 markets (e.g. `io:NVDA`); delisted
-/// contracts are skipped.
-fn parse_meta_universe(v: &Value) -> Vec<String> {
-    v["universe"]
-        .as_array()
-        .map(|arr| {
-            arr.iter()
-                .filter(|u| !u["isDelisted"].as_bool().unwrap_or(false))
-                .filter_map(|u| u["name"].as_str().map(|s| s.to_string()))
-                .collect()
-        })
-        .unwrap_or_default()
-}
 
 /// One spot balance row from `spotClearinghouseState`.
 #[derive(Clone, Debug)]
@@ -121,6 +107,16 @@ fn merge_spot(
     snap
 }
 
+/// Add one perp snapshot into another (same master wallet, different
+/// dex): equity, available margin and PnL sum, positions concatenate.
+fn merge_perp(mut dst: Snapshot, src: Snapshot) -> Snapshot {
+    dst.equity_usd += src.equity_usd;
+    dst.available_usd += src.available_usd;
+    dst.pnl_usd += src.pnl_usd;
+    dst.positions.extend(src.positions);
+    dst
+}
+
 /// Last REST snapshot, merged with WS status/latency for `AccountLive`.
 #[derive(Clone, Default)]
 struct Snapshot {
@@ -139,11 +135,6 @@ pub struct HyperliquidAdapter {
     bus: EventBus,
     live: Arc<RwLock<HashMap<String, AccountLive>>>,
     running: Arc<AtomicBool>,
-    books: Mutex<HashMap<String, BookState>>,
-    /// WS coins resolved at connect time. For HIP-3 (dex) these come from
-    /// `meta` + current holdings, never hardcoded; for mainnet the default
-    /// BTC/ETH is used until resolved.
-    resolved_symbols: Mutex<Vec<String>>,
     snapshot: Mutex<Snapshot>,
     /// WS health and REST health are tracked separately so a dead market
     /// WS never hides a healthy REST account read (see live_status).
@@ -163,23 +154,15 @@ impl HyperliquidAdapter {
         bus: EventBus,
         live: Arc<RwLock<HashMap<String, AccountLive>>>,
     ) -> Self {
-        let symbols = if dex.is_some() {
-            vec!["io:BTC", "io:ETH"]
-        } else {
-            vec!["BTC", "ETH"]
-        };
-        let _ = symbols;
         Self {
             id: id.to_string(),
             dex: dex.map(|d| d.to_string()),
             address,
             account_id,
-            http: crate::net::new_http_client(),
+            http: crate::net::shared_http_client(),
             bus,
             live,
             running: Arc::new(AtomicBool::new(false)),
-            books: Mutex::new(HashMap::new()),
-            resolved_symbols: Mutex::new(Vec::new()),
             snapshot: Mutex::new(Snapshot::default()),
             ws_up: AtomicBool::new(false),
             rest_ok: AtomicBool::new(false),
@@ -187,21 +170,6 @@ impl HyperliquidAdapter {
             last_rtt: Mutex::new(None),
             last_rest_rtt: Mutex::new(None),
         }
-    }
-
-    fn symbols(&self) -> Vec<String> {
-        let resolved = self.resolved_symbols.lock().unwrap().clone();
-        if !resolved.is_empty() {
-            return resolved;
-        }
-        // Fallback before the first resolution (mainnet only — the dex path
-        // resolves before subscribing and never uses this fallback).
-        vec!["BTC".to_string(), "ETH".to_string()]
-    }
-
-    /// WS subscription coin for a display symbol.
-    fn coin_of(symbol: &str) -> &str {
-        symbol
     }
 
     /// Latency is always one measured round-trip: the WS ping -> pong RTT
@@ -271,14 +239,15 @@ impl HyperliquidAdapter {
         self.publish_live();
     }
 
-    /// One REST read of clearinghouseState. Returns (snapshot, balance).
-    async fn fetch_clearinghouse(&self) -> Result<(Snapshot, Balance), String> {
+    /// One REST read of clearinghouseState for one dex (`None` = mainnet
+    /// perp, `Some("io")` = Entropy). Returns (snapshot, balance).
+    async fn fetch_clearinghouse(&self, dex: Option<&str>) -> Result<(Snapshot, Balance), String> {
         let mut body = serde_json::json!({
             "type": "clearinghouseState",
             "user": self.address,
         });
-        if let Some(dex) = &self.dex {
-            body["dex"] = Value::String(dex.clone());
+        if let Some(dex) = dex {
+            body["dex"] = Value::String(dex.to_string());
         }
         let resp = self
             .http
@@ -341,17 +310,6 @@ impl HyperliquidAdapter {
         Ok((snap, balance))
     }
 
-    /// Live mid price for a coin from the local book, if subscribed.
-    fn mark_price(&self, coin: &str) -> Option<f64> {
-        let books = self.books.lock().unwrap();
-        let state = books.get(coin)?;
-        let book = state.to_book(&self.id, coin, 1, 0);
-        match (book.bids.first(), book.asks.first()) {
-            (Some(b), Some(a)) => Some((b.0 + a.0) / 2.0),
-            _ => None,
-        }
-    }
-
     /// One REST read of spotClearinghouseState (mainnet only; the dex
     /// variant has no spot side). Returns the raw balance rows.
     async fn fetch_spot_state(&self) -> Result<Vec<SpotBalance>, String> {
@@ -376,20 +334,35 @@ impl HyperliquidAdapter {
         Ok(parse_spot_balances(&v))
     }
 
-    /// Full account read: perp clearinghouseState, plus spot balances
-    /// merged in on mainnet (unified accounts keep their USDC pool and
-    /// spot holdings on the spot side).
+    /// Full account read: mainnet perp + Entropy (dex "io") + spot, all
+    /// aggregated into one unified snapshot for this master wallet. The
+    /// mainnet leg is required; the io and spot legs only warn on failure
+    /// (an unused io sub-account or a missing spot pool must not hide the
+    /// main account). Because both the Hyperliquid and the Entropy
+    /// adapters run this same aggregation, the two sides always show the
+    /// same available balance and positions.
     async fn fetch_account_state(&self) -> Result<(Snapshot, Balance), String> {
-        let (mut snap, _) = self.fetch_clearinghouse().await?;
-        if self.dex.is_none() {
-            match self.fetch_spot_state().await {
-                Ok(spot) => {
-                    let mark = |coin: &str| self.mark_price(coin);
-                    snap = merge_spot(snap, &spot, &mark);
-                }
-                Err(e) => {
-                    self.log("warn", format!("现货账户读取失败，只用永续仓位：{e}"));
-                }
+        let (main, io, spot) = tokio::join!(
+            self.fetch_clearinghouse(None),
+            self.fetch_clearinghouse(Some("io")),
+            self.fetch_spot_state(),
+        );
+        let (mut snap, _) = main?;
+        match io {
+            Ok((io_snap, _)) => snap = merge_perp(snap, io_snap),
+            Err(e) => {
+                self.log("warn", format!("Entropy 账户读取失败，只用主站：{e}"));
+            }
+        }
+        match spot {
+            Ok(spot) => {
+                // No book is subscribed any more, so spot holdings are
+                // valued at their entry notional (unrealised PnL 0) until
+                // a live mark exists.
+                snap = merge_spot(snap, &spot, &|_| None);
+            }
+            Err(e) => {
+                self.log("warn", format!("现货账户读取失败，只用永续仓位：{e}"));
             }
         }
         let balance = Balance {
@@ -403,62 +376,6 @@ impl HyperliquidAdapter {
             ts: now_ms(),
         };
         Ok((snap, balance))
-    }
-
-    /// HIP-3 only: fetch the dex universe from `meta` and resolve the
-    /// coins to subscribe — current holdings first, then the first active
-    /// contracts, up to 2. Never hardcodes `io:BTC` / `io:ETH`.
-    async fn resolve_symbols(&self) -> Result<(), String> {
-        let dex = self.dex.clone().unwrap_or_default();
-        let body = serde_json::json!({ "type": "meta", "dex": dex });
-        let resp = self
-            .http
-            .post(HL_INFO_URL)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| format!("Hyperliquid 市场信息请求失败：{e:?}"))?;
-        if !resp.status().is_success() {
-            return Err(format!(
-                "Hyperliquid 市场信息接口返回 HTTP {}",
-                resp.status()
-            ));
-        }
-        let v: Value = resp
-            .json()
-            .await
-            .map_err(|e| format!("市场信息响应解析失败：{e}"))?;
-        let universe = parse_meta_universe(&v);
-        if universe.is_empty() {
-            return Err(format!(
-                "hyperliquid meta for dex {dex} returned no active contracts"
-            ));
-        }
-        let held: Vec<String> = self
-            .snapshot
-            .lock()
-            .unwrap()
-            .positions
-            .iter()
-            .map(|p| p.symbol.clone())
-            .filter(|c| universe.contains(c))
-            .collect();
-        let mut coins: Vec<String> = Vec::new();
-        for c in held {
-            if !coins.contains(&c) {
-                coins.push(c);
-            }
-        }
-        for name in universe {
-            if coins.len() >= 2 {
-                break;
-            }
-            if !coins.contains(&name) {
-                coins.push(name);
-            }
-        }
-        *self.resolved_symbols.lock().unwrap() = coins;
-        Ok(())
     }
 
     async fn poll_account(&self) {
@@ -493,69 +410,15 @@ impl HyperliquidAdapter {
         }
     }
 
-    fn handle_l2book(&self, coin: &str, levels: &Value) {
-        let parse_side = |v: &Value| -> Vec<(f64, f64)> {
-            v.as_array()
-                .map(|arr| {
-                    arr.iter()
-                        .map(|lv| (f64_from(&lv["px"]), f64_from(&lv["sz"])))
-                        .collect()
-                })
-                .unwrap_or_default()
-        };
-        let bids = levels.get(0).map(&parse_side).unwrap_or_default();
-        let asks = levels.get(1).map(&parse_side).unwrap_or_default();
-        let ts = now_ms();
-        let mut books = self.books.lock().unwrap();
-        let state = books.entry(coin.to_string()).or_insert_with(BookState::new);
-        state.apply_snapshot(&bids, &asks);
-        let book = state.to_book(&self.id, coin, BOOK_DEPTH, ts);
-        let (best_bid, best_ask) = (
-            book.bids.first().map(|l| l.0).unwrap_or(0.0),
-            book.asks.first().map(|l| l.0).unwrap_or(0.0),
-        );
-        drop(books);
-        self.bus.publish(AppEvent::Book(book));
-        if best_bid > 0.0 && best_ask > 0.0 {
-            self.bus.publish(AppEvent::Tick(Tick {
-                adapter_id: self.id.clone(),
-                symbol: coin.to_string(),
-                bid: best_bid,
-                ask: best_ask,
-                last: (best_bid + best_ask) / 2.0,
-                volume24h: 0.0,
-                ts,
-            }));
-        }
-    }
-
-    /// One WS session: resolve dex symbols (needs the REST snapshot),
-    /// connect, subscribe, then pump frames until the socket drops or the
-    /// adapter stops. REST polling lives in rest_loop() and is unaffected
-    /// by WS failures.
+    /// One WS session, keepalive only: connect, then ping every 20s so a
+    /// proxy or router never cuts the idle socket. No book is subscribed —
+    /// public market data comes from the on-demand catalog. REST polling
+    /// lives in rest_loop() and is unaffected by WS failures.
     async fn ws_once(&self) -> Result<(), String> {
-        if self.dex.is_some() {
-            // Fresh REST read first: symbol resolution prefers the coins
-            // the user actually holds.
-            self.poll_account().await;
-            self.resolve_symbols().await?;
-        }
         let (mut ws, _) =
             crate::net::ws::connect_ws(HL_WS_URL, WS_CONNECT_TIMEOUT, &self.bus).await?;
-        for sym in self.symbols() {
-            let sub = serde_json::json!({
-                "method": "subscribe",
-                "subscription": { "type": "l2Book", "coin": Self::coin_of(&sym) },
-            });
-            ws.send(Message::Text(sub.to_string().into()))
-                .await
-                .map_err(|e| format!("订阅失败：{e}"))?;
-        }
         self.set_ws(true, None);
-        self.log(
-            "info",
-            format!("行情已连接，已订阅 {}", self.symbols().join(", ")),
-        );
+        self.log("info", "行情已连接（仅保活，不订阅盘口）".to_string());
 
         let mut ping_i = tokio::time::interval(PING_INTERVAL);
         let mut stop_i = tokio::time::interval(Duration::from_secs(1));
@@ -577,29 +440,13 @@ impl HyperliquidAdapter {
                     match msg {
                         Some(Ok(Message::Text(t))) => {
                             let text: &str = t.as_ref();
-                            match serde_json::from_str::<Value>(text) {
-                                Ok(v) => match v["channel"].as_str() {
-                                    Some("l2Book") => {
-                                        let coin = v["data"]["coin"].as_str().unwrap_or("").to_string();
-                                        if !coin.is_empty() {
-                                            self.handle_l2book(&coin, &v["data"]["levels"]);
-                                        }
+                            if let Ok(v) = serde_json::from_str::<Value>(text) {
+                                if v["channel"].as_str() == Some("pong") {
+                                    if let Some(sent) = ping_sent.take() {
+                                        *self.last_rtt.lock().unwrap() = Some(sent.elapsed());
+                                        self.publish_live();
                                     }
-                                    Some("pong") => {
-                                        if let Some(sent) = ping_sent.take() {
-                                            *self.last_rtt.lock().unwrap() = Some(sent.elapsed());
-                                            self.publish_live();
-                                        }
-                                    }
-                                    _ => {}
-                                },
-                                Err(e) => self.log(
-                                    "error",
-                                    format!(
-                                        "行情数据解析失败：{e}（前 200 字符：{}）",
-                                        text.chars().take(200).collect::<String>().as_str()
-                                    ),
-                                ),
+                                }
                             }
                         }
                         Some(Ok(Message::Close(_))) => return Err("Hyperliquid 行情连接已关闭".to_string()),
@@ -619,6 +466,8 @@ impl HyperliquidAdapter {
     /// A dead WS only flips ws_up off — the account keeps its REST-driven
     /// live state (see live_status). A session that lived longer than 30s
     /// resets the ladder, so a healthy link that drops once retries fast.
+    /// A TLS close without close_notify (unexpected-eof) is a routine
+    /// drop: warn and reconnect, never an error red dot.
     async fn ws_loop(&self) {
         let mut attempt: usize = 0;
         while self.running.load(Ordering::SeqCst) {
@@ -632,9 +481,18 @@ impl HyperliquidAdapter {
                     if started.elapsed() > Duration::from_secs(30) {
                         attempt = 0;
                     }
-                    self.set_ws(false, Some(e.clone()));
                     let delay = [5, 15, 30][attempt.min(2)];
-                    self.log("error", format!("行情连接断开：{e}，{delay} 秒后重连"));
+                    if super::is_tls_unexpected_eof(&e) {
+                        *self.last_error.lock().unwrap() = None;
+                        self.set_ws(false, None);
+                        self.log(
+                            "warn",
+                            format!("行情连接断开（TLS 对端关闭），{delay} 秒后重连"),
+                        );
+                    } else {
+                        self.set_ws(false, Some(e.clone()));
+                        self.log("error", format!("行情连接断开：{e}，{delay} 秒后重连"));
+                    }
                     attempt += 1;
                     tokio::time::sleep(Duration::from_secs(delay)).await;
                 }
@@ -727,18 +585,38 @@ mod tests {
     use super::*;
 
     #[test]
-    fn meta_universe_parses_prefixed_names_and_skips_delisted() {
-        let v = serde_json::json!({
-            "universe": [
-                {"name": "io:NVDA", "szDecimals": 2, "maxLeverage": 20},
-                {"name": "io:TSLA", "szDecimals": 3, "maxLeverage": 20},
-                {"name": "io:OLD", "szDecimals": 2, "maxLeverage": 5, "isDelisted": true}
-            ]
-        });
-        assert_eq!(
-            parse_meta_universe(&v),
-            vec!["io:NVDA".to_string(), "io:TSLA".to_string()]
-        );
+    fn merge_perp_adds_two_dex_snapshots() {
+        let main = Snapshot {
+            equity_usd: 1000.0,
+            available_usd: 800.0,
+            pnl_usd: 10.0,
+            positions: vec![LivePosition {
+                symbol: "BTC".to_string(),
+                side: "long".to_string(),
+                qty: 0.1,
+                entry_price: 58000.0,
+                mark_price: 58100.0,
+                unrealized_pnl: 10.0,
+            }],
+        };
+        let io = Snapshot {
+            equity_usd: 200.0,
+            available_usd: 150.0,
+            pnl_usd: -5.0,
+            positions: vec![LivePosition {
+                symbol: "io:NVDA".to_string(),
+                side: "short".to_string(),
+                qty: 2.0,
+                entry_price: 143.0,
+                mark_price: 140.0,
+                unrealized_pnl: 6.0,
+            }],
+        };
+        let merged = merge_perp(main, io);
+        assert!((merged.equity_usd - 1200.0).abs() < 1e-9);
+        assert!((merged.available_usd - 950.0).abs() < 1e-9);
+        assert!((merged.pnl_usd - 5.0).abs() < 1e-9);
+        assert_eq!(merged.positions.len(), 2);
     }
 
     #[test]

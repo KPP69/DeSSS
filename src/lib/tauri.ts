@@ -9,8 +9,12 @@ export const api = {
   setProxy: (url: string) => invoke<ProxyState>("set_proxy", { url }),
   // Market catalog (phase 4): bulk specs + prices + funding for all six
   // exchanges, searched on demand (empty query returns nothing).
-  searchMarketInfo: (query: string) => invoke<MarketInfo[]>("search_market_info", { query }),
-  refreshMarketCatalog: () => invoke<CatalogRefresh>("refresh_market_catalog"),
+  // A search fetches only the checked exchanges whose cache is older
+  // than 30s; the refresh button forces a refetch of the checked ones.
+  searchMarketInfo: (query: string, exchangeIds: string[]) =>
+    invoke<MarketInfo[]>("search_market_info", { query, exchangeIds }),
+  refreshMarketCatalog: (exchangeIds: string[]) =>
+    invoke<CatalogRefresh>("refresh_market_catalog", { exchangeIds }),
   // Account center (phase 2). Credentials go to the Rust vault exactly once;
   // nothing secret is ever returned.
   listAccounts: () => invoke<AccountView[]>("list_accounts"),

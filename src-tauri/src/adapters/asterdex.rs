@@ -37,23 +37,19 @@ use sha2::Sha256;
 use sha3::{Digest, Keccak256};
 use tokio_tungstenite::tungstenite::Message;
 
-use super::book::BookState;
-use super::types::{AccountLive, Balance, LivePosition, Order, OrderRequest, Position, Tick};
+use super::types::{AccountLive, Balance, LivePosition, Order, OrderRequest, Position};
 use super::{f64_from, now_ms, AdapterResult, ExchangeAdapter};
 use crate::bus::{AppEvent, EventBus};
 
 pub const ASTER_REST_URL: &str = "https://fapi.asterdex.com";
-pub const ASTER_WS_URL: &str =
-    "wss://fstream.asterdex.com/stream?streams=btcusdt@depth5/ethusdt@depth5";
+/// Single-stream endpoint with no subscription: the WS is kept open only
+/// as a keepalive (ping every 20s). No book is subscribed — public market
+/// data comes from the on-demand catalog.
+pub const ASTER_WS_URL: &str = "wss://fstream.asterdex.com/ws";
 
 const WS_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const PING_INTERVAL: Duration = Duration::from_secs(20);
 const POLL_INTERVAL: Duration = Duration::from_secs(10);
-const BOOK_DEPTH: usize = 20;
-
-/// Symbols subscribed on the WS (lowercase on the wire) and shown in the
-/// Data page (exchange-native uppercase form).
-const SYMBOLS: [&str; 2] = ["BTCUSDT", "ETHUSDT"];
 
 /// HMAC-SHA256 of `query` with `secret`, lowercase hex. Pure Rust
 /// (`hmac` + `sha2`); the secret never leaves this function and never
@@ -256,23 +252,6 @@ fn parse_positions(v: &Value) -> Vec<LivePosition> {
     out
 }
 
-/// Parse one `depthUpdate` frame (`<symbol>@depth5`) into (symbol, bids,
-/// asks). Levels are `[price, qty]` string pairs; the frame is a full
-/// top-5 snapshot on every push.
-fn parse_depth(data: &Value) -> Option<(String, Vec<(f64, f64)>, Vec<(f64, f64)>)> {
-    let symbol = data["s"].as_str()?.to_string();
-    let side = |v: &Value| -> Vec<(f64, f64)> {
-        v.as_array()
-            .map(|arr| {
-                arr.iter()
-                    .map(|lv| (f64_from(&lv[0]), f64_from(&lv[1])))
-                    .collect()
-            })
-            .unwrap_or_default()
-    };
-    Some((symbol, side(&data["b"]), side(&data["a"])))
-}
-
 /// Last REST snapshot, merged with WS status/latency for `AccountLive`.
 #[derive(Clone, Default)]
 struct Snapshot {
@@ -305,7 +284,6 @@ pub struct AsterdexAdapter {
     bus: EventBus,
     live: Arc<RwLock<HashMap<String, AccountLive>>>,
     running: Arc<AtomicBool>,
-    books: Mutex<HashMap<String, BookState>>,
     snapshot: Mutex<Snapshot>,
     ws_up: AtomicBool,
     rest_ok: AtomicBool,
@@ -331,11 +309,10 @@ impl AsterdexAdapter {
             api_key,
             api_secret,
             agent: None,
-            http: crate::net::new_http_client(),
+            http: crate::net::shared_http_client(),
             bus,
             live,
             running: Arc::new(AtomicBool::new(false)),
-            books: Mutex::new(HashMap::new()),
             snapshot: Mutex::new(Snapshot {
                 currency: "USDT".to_string(),
                 ..Snapshot::default()
@@ -599,9 +576,8 @@ impl AsterdexAdapter {
     /// 证都没有时记原因后退出，WS 盘口不受影响。
     async fn rest_loop(&self) {
         // Agent-wallet mode (V3) and API Key mode (V1) both poll; with
-        // neither credential the reason is logged once and the loop
-        // exits: the WS book keeps running on its own and public market
-        // data is unaffected.
+        // neither credential the reason is logged once and the loop exits
+        // (the keepalive WS still runs).
         if self.agent.is_none() && (self.api_key.is_none() || self.api_secret.is_none()) {
             self.log(
                 "warn",
@@ -622,42 +598,16 @@ impl AsterdexAdapter {
         }
     }
 
-    fn handle_depth(&self, data: &Value) {
-        let Some((symbol, bids, asks)) = parse_depth(data) else {
-            return;
-        };
-        let ts = now_ms();
-        let mut books = self.books.lock().unwrap();
-        let state = books.entry(symbol.clone()).or_insert_with(BookState::new);
-        state.apply_snapshot(&bids, &asks);
-        let book = state.to_book(&self.id, &symbol, BOOK_DEPTH, ts);
-        let (best_bid, best_ask) = (
-            book.bids.first().map(|l| l.0).unwrap_or(0.0),
-            book.asks.first().map(|l| l.0).unwrap_or(0.0),
-        );
-        drop(books);
-        self.bus.publish(AppEvent::Book(book));
-        if best_bid > 0.0 && best_ask > 0.0 {
-            self.bus.publish(AppEvent::Tick(Tick {
-                adapter_id: self.id.clone(),
-                symbol,
-                bid: best_bid,
-                ask: best_ask,
-                last: (best_bid + best_ask) / 2.0,
-                volume24h: 0.0,
-                ts,
-            }));
-        }
-    }
-
-    /// One WS session on the combined depth5 stream. The server sends a
+    /// One WS session, keepalive only: connect, then ping every 20s so a
+    /// proxy or router never cuts the idle socket. The server sends a
     /// protocol ping every 5 minutes (answered automatically); our own
-    /// ping/pong pair measures the RTT.
+    /// ping/pong pair measures the RTT. No book is subscribed — public
+    /// market data comes from the on-demand catalog.
     async fn ws_once(&self) -> Result<(), String> {
         let (mut ws, _) =
             crate::net::ws::connect_ws(ASTER_WS_URL, WS_CONNECT_TIMEOUT, &self.bus).await?;
         self.set_ws(true, None);
-        self.log("info", format!("行情已连接，已订阅 {}", SYMBOLS.join(", ")));
+        self.log("info", "行情已连接（仅保活，不订阅盘口）".to_string());
 
         let mut ping_i = tokio::time::interval(PING_INTERVAL);
         let mut stop_i = tokio::time::interval(Duration::from_secs(1));
@@ -676,26 +626,6 @@ impl AsterdexAdapter {
                 _ = stop_i.tick() => {}
                 msg = ws.next() => {
                     match msg {
-                        Some(Ok(Message::Text(t))) => {
-                            let text: &str = t.as_ref();
-                            match serde_json::from_str::<Value>(text) {
-                                Ok(v) => {
-                                    // Combined stream wraps the payload:
-                                    // {"stream": "...", "data": {...}}.
-                                    let data = v.get("data").unwrap_or(&v);
-                                    if data["e"].as_str() == Some("depthUpdate") {
-                                        self.handle_depth(data);
-                                    }
-                                }
-                                Err(e) => self.log(
-                                    "error",
-                                    format!(
-                                        "行情数据解析失败：{e}（前 200 字符：{}）",
-                                        text.chars().take(200).collect::<String>().as_str()
-                                    ),
-                                ),
-                            }
-                        }
                         Some(Ok(Message::Pong(_))) => {
                             if let Some(sent) = ping_sent.take() {
                                 *self.last_rtt.lock().unwrap() = Some(sent.elapsed());
@@ -716,6 +646,11 @@ impl AsterdexAdapter {
     }
 
     /// WS reconnect loop with a ladder backoff (5s -> 15s -> 30s cap).
+    /// A dead WS only flips ws_up off — the account keeps its REST-driven
+    /// live state (see live_status). A session that lived longer than 30s
+    /// resets the ladder, so a healthy link that drops once retries fast.
+    /// A TLS close without close_notify (unexpected-eof) is a routine
+    /// drop: warn and reconnect, never an error red dot.
     async fn ws_loop(&self) {
         let mut attempt: usize = 0;
         while self.running.load(Ordering::SeqCst) {
@@ -729,9 +664,18 @@ impl AsterdexAdapter {
                     if started.elapsed() > Duration::from_secs(30) {
                         attempt = 0;
                     }
-                    self.set_ws(false, Some(e.clone()));
                     let delay = [5, 15, 30][attempt.min(2)];
-                    self.log("error", format!("行情连接断开：{e}，{delay} 秒后重连"));
+                    if super::is_tls_unexpected_eof(&e) {
+                        *self.last_error.lock().unwrap() = None;
+                        self.set_ws(false, None);
+                        self.log(
+                            "warn",
+                            format!("行情连接断开（TLS 对端关闭），{delay} 秒后重连"),
+                        );
+                    } else {
+                        self.set_ws(false, Some(e.clone()));
+                        self.log("error", format!("行情连接断开：{e}，{delay} 秒后重连"));
+                    }
                     attempt += 1;
                     tokio::time::sleep(Duration::from_secs(delay)).await;
                 }
@@ -1011,21 +955,5 @@ mod tests {
         .expect("decode");
         assert_eq!(ok[0], 0xac);
         assert_eq!(ok[31], 0x80);
-    }
-
-    #[test]
-    fn depth5_frame_parses_snapshot_levels() {
-        let v = serde_json::json!({
-            "stream": "btcusdt@depth5",
-            "data": {"e": "depthUpdate", "E": 1571889248277i64, "s": "BTCUSDT",
-                     "b": [["59059.3", "0.203"], ["59058.0", "1.0"]],
-                     "a": [["59059.4", "1.347"]]}
-        });
-        let data = v.get("data").unwrap();
-        let (symbol, bids, asks) = parse_depth(data).expect("parse");
-        assert_eq!(symbol, "BTCUSDT");
-        assert_eq!(bids.len(), 2);
-        assert!((bids[0].0 - 59059.3).abs() < 1e-9);
-        assert!((asks[0].1 - 1.347).abs() < 1e-9);
     }
 }
