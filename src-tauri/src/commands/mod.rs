@@ -199,7 +199,6 @@ async fn connect_account_inner(
     }
     let a = adapter.clone();
     tauri::async_runtime::spawn(async move {
-        use crate::adapters::ExchangeAdapter;
         a.run().await;
     });
     // Return the latest live snapshot (connecting), if any was published.
@@ -326,12 +325,15 @@ pub struct CatalogRefresh {
 
 /// Manually trigger a full catalog refresh (all six exchanges) and return
 /// the cached row count plus the refresh timestamp (unix ms) for the
-/// Data page's "缓存更新于" display.
+/// Data page's "缓存更新于" display. Async commands with a `State` input
+/// must return a `Result` (Tauri requirement).
 #[tauri::command]
-pub async fn refresh_market_catalog(state: State<'_, Arc<AppState>>) -> CatalogRefresh {
+pub async fn refresh_market_catalog(
+    state: State<'_, Arc<AppState>>,
+) -> Result<CatalogRefresh, String> {
     state.catalog.refresh_all().await;
-    CatalogRefresh {
+    Ok(CatalogRefresh {
         count: state.catalog.len(),
         updated_at: state.catalog.last_refresh_at().unwrap_or(0),
-    }
+    })
 }
