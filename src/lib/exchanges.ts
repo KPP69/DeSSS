@@ -70,7 +70,7 @@ export const EXCHANGES: ExchangeDef[] = [
   },
   {
     id: "lighter_robinhood",
-    name: "Lighter (Robinhood Chain)",
+    name: "Lighter RH",
     fields: [
       { key: "account_index", label: "Account Index", type: "number", required: true, min: 0 },
       {

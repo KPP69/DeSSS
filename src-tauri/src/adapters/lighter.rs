@@ -1,10 +1,10 @@
-//! Lighter read-only adapter, shared by Lighter mainnet and Lighter on
-//! Robinhood Chain (same REST/WS API, different base URLs and chain ID).
+//! Lighter read-only adapter, shared by Lighter mainnet and Lighter RH
+//! (same REST/WS API, different base URLs and chain ID).
 //!
 //! Official endpoints (docs.lighter.xyz / apidocs.lighter.xyz):
 //! - Mainnet: REST `https://mainnet.zklighter.elliot.ai`,
 //!   WS `wss://mainnet.zklighter.elliot.ai/stream`, chain 304, USDC.
-//! - Robinhood Chain: REST `https://api.rh.lighter.xyz`,
+//! - Lighter RH: REST `https://api.rh.lighter.xyz`,
 //!   WS `wss://api.rh.lighter.xyz/stream`, chain 466324, USDG.
 //!
 //! - Market data: WS `order_book/{market_id}`. The first frame after
@@ -662,7 +662,7 @@ impl ExchangeAdapter for LighterAdapter {
     }
     fn name(&self) -> &str {
         if self.network == LighterNetwork::Robinhood {
-            "Lighter (Robinhood Chain)"
+            "Lighter RH"
         } else {
             "Lighter"
         }

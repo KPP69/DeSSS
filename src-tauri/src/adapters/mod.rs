@@ -1,3 +1,5 @@
+pub mod arcus;
+pub mod asterdex;
 pub mod book;
 pub mod hyperliquid;
 pub mod lighter;

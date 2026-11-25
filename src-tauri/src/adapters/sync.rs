@@ -4,14 +4,18 @@
 //! live snapshot map the frontend reads through `list_account_live`.
 //! Adapters are built from the account row + vault credentials — only the
 //! public identifiers are used (wallet address for Hyperliquid/Entropy,
-//! account index for Lighter). Private keys are never read here and never
-//! leave the vault.
+//! account index for Lighter, wallet address for Arcus). Private keys are
+//! never read here and never leave the vault. AsterDEX is the exception
+//! that needs a secret: its API Key/Secret pair is passed to the adapter
+//! for HMAC signing only, and never logged.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 
 use serde_json::Value;
 
+use super::arcus::ArcusAdapter;
+use super::asterdex::AsterdexAdapter;
 use super::hyperliquid::HyperliquidAdapter;
 use super::lighter::{LighterAdapter, LighterNetwork};
 use super::types::AccountLive;
@@ -70,9 +74,10 @@ impl SyncManager {
     }
 }
 
-/// Build a read-only adapter for one stored account. Returns an error for
-/// exchanges that have no read-only adapter in this phase (AsterDEX, Arcus)
-/// and when the needed public identifier is missing from the vault record.
+/// Build a read-only adapter for one stored account. Returns an error
+/// when the needed public identifier is missing from the vault record.
+/// AsterDEX never errors on missing credentials: the adapter starts the
+/// public WS book anyway and logs the missing-key reason to the console.
 pub fn build_adapter(
     row: &AccountRow,
     credentials: &Value,
@@ -120,6 +125,54 @@ pub fn build_adapter(
                 &row.exchange_id,
                 network,
                 index,
+                account_id,
+                bus,
+                live,
+            )))
+        }
+        "asterdex" => {
+            // The Agent-wallet mode needs V3 EIP-712 auth (unsupported in
+            // this phase); the adapter logs that and runs the public WS
+            // book only. Same for a missing key pair.
+            let mode = credentials
+                .get("mode")
+                .and_then(|v| v.as_str())
+                .unwrap_or("api");
+            let (api_key, api_secret) = if mode == "agent" {
+                (None, None)
+            } else {
+                (
+                    credentials
+                        .get("api_key")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                    credentials
+                        .get("api_secret")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                )
+            };
+            Ok(Arc::new(AsterdexAdapter::new(
+                &row.exchange_id,
+                account_id,
+                api_key,
+                api_secret,
+                bus,
+                live,
+            )))
+        }
+        "arcus" => {
+            let address = credentials
+                .get("wallet_address")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "wallet_address is missing from the stored credentials".to_string())?
+                .to_string();
+            if !address.starts_with("0x") || address.len() != 42 {
+                return Err("stored wallet_address is not a valid 0x address".to_string());
+            }
+            Ok(Arc::new(ArcusAdapter::new(
+                &row.exchange_id,
+                address,
                 account_id,
                 bus,
                 live,

@@ -132,13 +132,13 @@ pub fn validate_credentials(
             let api_key_index = require_index(creds, "api_key_index", "API Key Index")?;
             if api_key_index == 157 {
                 return Err(
-                    "API Key Index 157 is reserved on Lighter (Robinhood Chain) and cannot be used"
+                    "API Key Index 157 is reserved on Lighter RH and cannot be used"
                         .to_string(),
                 );
             }
             if !(4..=156).contains(&api_key_index) && !(158..=254).contains(&api_key_index) {
                 return Err(
-                    "Lighter (Robinhood Chain) API Key Index must be 4-156 or 158-254"
+                    "Lighter RH API Key Index must be 4-156 or 158-254"
                         .to_string(),
                 );
             }
