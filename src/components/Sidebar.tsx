@@ -1,6 +1,5 @@
 import React from "react";
 import { useAppStore, type PageKey } from "../store/useAppStore";
-import { useMarketStore } from "../store/useMarketStore";
 
 const items: { key: PageKey; label: string }[] = [
   { key: "account", label: "账户" },
@@ -13,32 +12,37 @@ const items: { key: PageKey; label: string }[] = [
 
 export default function Sidebar() {
   const { page, setPage } = useAppStore();
-  const connected = useMarketStore((s) => s.connected);
   return (
-    <aside className="w-52 shrink-0 h-full bg-panel border-r border-line flex flex-col">
-      <div className="p-4 font-bold text-lg text-t1">DeSSS</div>
-      <div className="px-4 pb-3 text-xs">
-        <span className={connected ? "text-profit" : "text-t3"}>
-          ● {connected ? "Mock 已连接" : "Mock 未启动"}
-        </span>
+    <aside className="w-56 shrink-0 h-full bg-ds-panel border-r border-ds-line flex flex-col">
+      <div className="shrink-0 h-14 flex items-center px-4 text-lg font-semibold text-ds-text-1">
+        DeSSS
       </div>
-      <nav className="flex flex-col gap-1 px-2">
-        {items.map((i) => (
-          <button
-            key={i.key}
-            onClick={() => setPage(i.key)}
-            className={
-              "text-left px-3 py-2 rounded transition-colors " +
-              (page === i.key
-                ? "bg-overlay text-t1"
-                : "text-t2 hover:bg-overlay/60 hover:text-t1")
-            }
-          >
-            {i.label}
-          </button>
-        ))}
+      <nav className="flex flex-col gap-1.5 px-3">
+        {items.map((i) => {
+          const active = page === i.key;
+          return (
+            <button
+              key={i.key}
+              onClick={() => setPage(i.key)}
+              className={
+                "relative h-10 flex items-center px-3 text-sm rounded-lg transition-colors " +
+                (active
+                  ? "bg-ds-accent-soft/10 text-ds-text-1 font-medium"
+                  : "text-ds-text-2 hover:bg-ds-bg-2 hover:text-ds-text-1")
+              }
+            >
+              {active && (
+                <span className="absolute left-0 top-1.5 bottom-1.5 w-0.5 rounded-full bg-ds-accent" />
+              )}
+              {i.label}
+            </button>
+          );
+        })}
       </nav>
-      <div className="mt-auto p-3 text-[11px] text-t3">Portable · ./data/desss.db</div>
+      <div className="mt-auto p-4 text-xs text-ds-text-3 space-y-0.5">
+        <div>DeSSS v0.1.0</div>
+        <div>Portable · ./data/desss.db</div>
+      </div>
     </aside>
   );
 }

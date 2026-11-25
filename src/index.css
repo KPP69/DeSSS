@@ -12,26 +12,31 @@ body,
 
 body {
   margin: 0;
-  background: var(--ds-bg);
-  color: var(--ds-text-1);
-  font-family: Inter, system-ui, -apple-system, "Segoe UI", sans-serif;
+  background: rgb(var(--ds-bg));
+  color: rgb(var(--ds-text-1));
+  /* System UI font stack, no bundled fonts. */
+  font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
+  /* Type scale: top-bar title 18px / section title 13px semibold /
+     body & tables 13px / helper & table headers 12px / badges & timestamps 11px. */
+  font-size: 13px;
   -webkit-font-smoothing: antialiased;
 }
 
-/* All numeric readouts (amounts, prices, PnL, indexes) use tabular figures
-   so live updates never jitter horizontally. */
+/* All numeric readouts (amounts, prices, quantities, latency) use the
+   system monospace stack + tabular figures so live updates never jitter
+   horizontally. */
 .num {
   font-variant-numeric: tabular-nums;
-  font-family: "JetBrains Mono", Consolas, "SF Mono", monospace;
+  font-family: "Cascadia Mono", Consolas, "SF Mono", Menlo, monospace;
 }
 
-/* Slim scrollbars that match the terminal theme (dropdowns, tables, main). */
+/* Slim scrollbars that follow the current theme. */
 *::-webkit-scrollbar {
   width: 8px;
   height: 8px;
 }
 *::-webkit-scrollbar-thumb {
-  background: #26314a;
+  background: rgb(var(--ds-text-3) / 0.45);
   border-radius: 4px;
 }
 *::-webkit-scrollbar-track {

@@ -1,20 +1,161 @@
 /**
- * DeSSS design tokens — single source of truth for the dark quant-terminal
- * theme. Tailwind semantic colors in tailwind.config.js mirror these values;
- * components should use the Tailwind names (bg-app, bg-panel, bg-overlay,
- * border-line, text-t1/t2/t3, bg-primary, text-profit/loss/warn).
+ * DeSSS design tokens — three themes, one variable scheme.
+ *
+ * Every color is an RGB channel triplet (no alpha baked in); Tailwind maps
+ * them with `rgb(var(--ds-*) / <alpha-value>)`, so any token can be used
+ * at any opacity (`bg-ds-accent-soft/10`, `border-ds-line/50`, ...).
+ *
+ * Theme is selected with `:root[data-theme="light" | "warm" | "dark"]`
+ * (see src/store/useThemeStore.ts). Plain `:root` carries the dark values
+ * as a fallback so the first paint is never unstyled.
+ *
+ * 90/10 rule: 90% of the UI is neutral bg / panel / text; the remaining
+ * 10% is accent (primary actions, selected state, focus) and up/down
+ * (PnL, book, direction badges). Status is always carried by text or a
+ * +/- sign as well, never by color alone.
+ *
+ * `-soft` channels reuse the base hue and are used at low alpha
+ * (e.g. selected-row / badge backgrounds). `-contrast` is the text color
+ * on a filled surface of that hue. `--ds-overlay` is the modal scrim.
  */
+
+/* ---- Fallback: dark (also the value before the store applies) ---- */
 :root {
-  --ds-bg: #0b0e14;
-  --ds-panel: #121722;
-  --ds-overlay: #181f2e;
-  --ds-border: #1e2636;
-  --ds-primary: #3b82f6;
-  --ds-profit: #10b981;
-  --ds-loss: #ef4444;
-  --ds-warn: #f59e0b;
-  --ds-text-1: #f1f5f9;
-  --ds-text-2: #94a3b8;
-  --ds-text-3: #64748b;
-  --ds-radius: 0.5rem;
+  --ds-bg: 11 15 20;
+  --ds-bg-2: 16 22 30;
+  --ds-panel: 17 24 34;
+  --ds-panel-2: 23 32 44;
+  --ds-line: 34 48 63;
+  --ds-line-strong: 49 66 83;
+  --ds-text-1: 232 238 246;
+  --ds-text-2: 159 174 190;
+  --ds-text-3: 108 122 138;
+  --ds-accent: 91 141 239;
+  --ds-accent-hover: 122 165 245;
+  --ds-accent-soft: 91 141 239;
+  --ds-accent-contrast: 255 255 255;
+  --ds-up: 46 211 160;
+  --ds-up-hover: 74 223 178;
+  --ds-up-soft: 46 211 160;
+  --ds-up-contrast: 5 46 34;
+  --ds-down: 255 107 107;
+  --ds-down-hover: 255 133 133;
+  --ds-down-soft: 255 107 107;
+  --ds-down-contrast: 42 10 10;
+  --ds-warn: 245 181 68;
+  --ds-warn-hover: 247 194 100;
+  --ds-warn-soft: 245 181 68;
+  --ds-warn-contrast: 46 32 4;
+  --ds-info: 86 199 216;
+  --ds-info-hover: 116 211 224;
+  --ds-info-soft: 86 199 216;
+  --ds-info-contrast: 4 42 48;
+  --ds-overlay: 0 0 0;
+  --ds-ring: 91 141 239;
+  --ds-shadow-card: 0 1px 2px rgb(0 0 0 / 0.4), 0 4px 12px rgb(0 0 0 / 0.35);
+}
+
+:root[data-theme="light"] {
+  --ds-bg: 244 246 249;
+  --ds-bg-2: 238 242 247;
+  --ds-panel: 255 255 255;
+  --ds-panel-2: 247 249 252;
+  --ds-line: 220 227 236;
+  --ds-line-strong: 198 208 221;
+  --ds-text-1: 16 24 40;
+  --ds-text-2: 71 84 103;
+  --ds-text-3: 122 134 153;
+  --ds-accent: 46 95 232;
+  --ds-accent-hover: 37 79 209;
+  --ds-accent-soft: 46 95 232;
+  --ds-accent-contrast: 255 255 255;
+  --ds-up: 8 127 91;
+  --ds-up-hover: 6 107 76;
+  --ds-up-soft: 8 127 91;
+  --ds-up-contrast: 255 255 255;
+  --ds-down: 201 42 31;
+  --ds-down-hover: 169 35 24;
+  --ds-down-soft: 201 42 31;
+  --ds-down-contrast: 255 255 255;
+  --ds-warn: 181 71 8;
+  --ds-warn-hover: 150 64 10;
+  --ds-warn-soft: 181 71 8;
+  --ds-warn-contrast: 255 255 255;
+  --ds-info: 14 112 144;
+  --ds-info-hover: 11 92 118;
+  --ds-info-soft: 14 112 144;
+  --ds-info-contrast: 255 255 255;
+  --ds-overlay: 16 24 40;
+  --ds-ring: 46 95 232;
+  --ds-shadow-card: 0 1px 2px rgb(16 24 40 / 0.05), 0 1px 3px rgb(16 24 40 / 0.08);
+}
+
+:root[data-theme="warm"] {
+  --ds-bg: 245 240 230;
+  --ds-bg-2: 239 232 218;
+  --ds-panel: 255 252 245;
+  --ds-panel-2: 246 240 227;
+  --ds-line: 226 214 194;
+  --ds-line-strong: 205 189 164;
+  --ds-text-1: 42 33 24;
+  --ds-text-2: 106 89 71;
+  --ds-text-3: 153 136 114;
+  --ds-accent: 140 90 43;
+  --ds-accent-hover: 117 74 34;
+  --ds-accent-soft: 140 90 43;
+  --ds-accent-contrast: 255 255 255;
+  --ds-up: 46 125 79;
+  --ds-up-hover: 37 104 64;
+  --ds-up-soft: 46 125 79;
+  --ds-up-contrast: 255 255 255;
+  --ds-down: 178 58 46;
+  --ds-down-hover: 150 46 36;
+  --ds-down-soft: 178 58 46;
+  --ds-down-contrast: 255 255 255;
+  --ds-warn: 152 106 18;
+  --ds-warn-hover: 126 87 15;
+  --ds-warn-soft: 152 106 18;
+  --ds-warn-contrast: 255 255 255;
+  --ds-info: 20 108 99;
+  --ds-info-hover: 15 87 77;
+  --ds-info-soft: 20 108 99;
+  --ds-info-contrast: 255 255 255;
+  --ds-overlay: 42 33 24;
+  --ds-ring: 140 90 43;
+  --ds-shadow-card: 0 1px 2px rgb(42 33 24 / 0.06), 0 1px 3px rgb(42 33 24 / 0.09);
+}
+
+:root[data-theme="dark"] {
+  --ds-bg: 11 15 20;
+  --ds-bg-2: 16 22 30;
+  --ds-panel: 17 24 34;
+  --ds-panel-2: 23 32 44;
+  --ds-line: 34 48 63;
+  --ds-line-strong: 49 66 83;
+  --ds-text-1: 232 238 246;
+  --ds-text-2: 159 174 190;
+  --ds-text-3: 108 122 138;
+  --ds-accent: 91 141 239;
+  --ds-accent-hover: 122 165 245;
+  --ds-accent-soft: 91 141 239;
+  --ds-accent-contrast: 255 255 255;
+  --ds-up: 46 211 160;
+  --ds-up-hover: 74 223 178;
+  --ds-up-soft: 46 211 160;
+  --ds-up-contrast: 5 46 34;
+  --ds-down: 255 107 107;
+  --ds-down-hover: 255 133 133;
+  --ds-down-soft: 255 107 107;
+  --ds-down-contrast: 42 10 10;
+  --ds-warn: 245 181 68;
+  --ds-warn-hover: 247 194 100;
+  --ds-warn-soft: 245 181 68;
+  --ds-warn-contrast: 46 32 4;
+  --ds-info: 86 199 216;
+  --ds-info-hover: 116 211 224;
+  --ds-info-soft: 86 199 216;
+  --ds-info-contrast: 4 42 48;
+  --ds-overlay: 0 0 0;
+  --ds-ring: 91 141 239;
+  --ds-shadow-card: 0 1px 2px rgb(0 0 0 / 0.4), 0 4px 12px rgb(0 0 0 / 0.35);
 }

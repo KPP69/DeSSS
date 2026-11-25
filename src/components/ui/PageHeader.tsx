@@ -10,7 +10,7 @@ export default function PageHeader({
 }) {
   return (
     <div className="flex items-center justify-between mb-5 min-h-[40px]">
-      <h1 className="text-xl font-semibold text-t1">{title}</h1>
+      <h1 className="text-[15px] font-semibold text-ds-text-1">{title}</h1>
       <div className="flex items-center gap-2">{children}</div>
     </div>
   );

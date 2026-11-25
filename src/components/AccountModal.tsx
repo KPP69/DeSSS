@@ -108,8 +108,8 @@ export default function AccountModal({ open, editing, onClose }: Props) {
   }
 
   const inputCls =
-    "w-full bg-panel border border-line rounded px-3 py-2 text-sm text-t1 outline-none focus:border-primary";
-  const labelCls = "block text-xs text-t2 mb-1";
+    "w-full bg-ds-panel border border-ds-line rounded-lg px-3 h-8 text-ds-text-1 outline-none focus:border-ds-accent";
+  const labelCls = "block text-xs text-ds-text-2 mb-1";
 
   return (
     <Modal
@@ -148,21 +148,21 @@ export default function AccountModal({ open, editing, onClose }: Props) {
               disabled={isEdit}
             />
             {isEdit ? (
-              <p className="text-xs text-t3 mt-1">
+              <p className="text-xs text-ds-text-3 mt-1">
                 交易所创建后不可修改；如需更换，请删除后重新创建。
               </p>
             ) : (
-              def.note && <p className="text-xs text-t3 mt-1">{def.note}</p>
+              def.note && <p className="text-xs text-ds-text-3 mt-1">{def.note}</p>
             )}
           </div>
           {isEdit && (
-            <div className="text-xs text-t3 space-y-1">
+            <div className="text-xs text-ds-text-3 space-y-1">
               <p>
-                标识：<span className="num text-t2">{editing.maskedIdentifier}</span>
+                标识：<span className="num text-ds-text-2">{editing.maskedIdentifier}</span>
               </p>
               <p>
                 凭证状态：
-                <span className={editing.credentialConfigured ? "text-profit" : "text-warn"}>
+                <span className="text-ds-text-2">
                   {editing.credentialConfigured ? "已配置" : "未配置"}
                 </span>
               </p>
@@ -185,10 +185,10 @@ export default function AccountModal({ open, editing, onClose }: Props) {
                       setMode(m.id);
                       setValues({});
                     }}
-                    className={`px-3 py-1.5 text-sm rounded border ${
+                    className={`h-8 px-3 rounded-lg border text-[13px] ${
                       mode === m.id
-                        ? "border-primary text-primary bg-panel"
-                        : "border-line text-t2 bg-panel/50"
+                        ? "border-ds-line text-ds-text-1 bg-ds-panel-2"
+                        : "border-ds-line text-ds-text-2 bg-ds-panel/50"
                     }`}
                   >
                     {m.label}
@@ -201,7 +201,7 @@ export default function AccountModal({ open, editing, onClose }: Props) {
             <div key={f.key}>
               <label className={labelCls}>
                 {f.label}
-                {f.required && <span className="text-loss"> *</span>}
+                {f.required && <span className="text-ds-text-3"> *</span>}
               </label>
               <input
                 className={inputCls}
@@ -211,17 +211,17 @@ export default function AccountModal({ open, editing, onClose }: Props) {
                 onChange={(e) => setValues((v) => ({ ...v, [f.key]: e.target.value }))}
                 placeholder={isEdit ? "留空保留原凭证" : undefined}
               />
-              {f.hint && <p className="text-xs text-warn/80 mt-1">{f.hint}</p>}
+              {f.hint && <p className="text-xs text-ds-text-3 mt-1">{f.hint}</p>}
             </div>
           ))}
-          <p className="text-xs text-t3">
+          <p className="text-xs text-ds-text-3">
             凭证只会加密保存在本机 ./data/vault.enc，不会上传或写入数据库明文。
           </p>
         </div>
       </div>
 
       {formError && (
-        <div className="mt-4 text-sm text-loss bg-loss/10 border border-loss/30 rounded px-3 py-2">
+        <div className="mt-4 text-ds-down bg-ds-panel border border-ds-line rounded px-3 py-2">
           {formError}
         </div>
       )}

@@ -22,3 +22,25 @@ uuid = { version = "1", features = ["v4","serde"] }
 rand = "0.8"
 thiserror = "2"
 aes-gcm = "0.10"
+# Phase 3: read-only exchange adapters (pure Rust TLS, no OpenSSL).
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
+futures-util = "0.3"
+tokio-rustls = "0.26"
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring", "logging"] }
+webpki-roots = "0.26"
+# AsterDEX V1 signed REST: HMAC-SHA256 over the query string (pure Rust).
+hmac = "0.12"
+sha2 = "0.10"
+# AsterDEX V3 Agent wallets: EIP-712 signing (pure Rust, no OpenSSL).
+k256 = { version = "0.13", features = ["ecdsa"] }
+sha3 = "0.10"
+hex = "0.4"
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.52"
+
+# Test-only: generate a self-signed cert for the local mock CONNECT +
+# TLS WebSocket integration test (net/ws.rs).
+[dev-dependencies]
+rcgen = "0.13"

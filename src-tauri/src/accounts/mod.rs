@@ -13,7 +13,7 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 
 use crate::data_engine::{AccountRow, DataEngine};
-use crate::vault::VaultStore;
+use crate::vault::{VaultError, VaultStore};
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -67,7 +67,7 @@ fn field_str<'a>(creds: &'a Map<String, Value>, key: &str) -> Option<&'a str> {
 fn require_str(creds: &Map<String, Value>, key: &str, label: &str) -> Result<String, String> {
     field_str(creds, key)
         .map(|s| s.to_string())
-        .ok_or_else(|| format!("missing required field: {label}"))
+        .ok_or_else(|| format!("缺少必填项：{label}"))
 }
 
 /// Index fields may arrive as JSON numbers or numeric strings.
@@ -80,7 +80,7 @@ fn field_index(creds: &Map<String, Value>, key: &str) -> Option<i64> {
 }
 
 fn require_index(creds: &Map<String, Value>, key: &str, label: &str) -> Result<i64, String> {
-    field_index(creds, key).ok_or_else(|| format!("missing or invalid field: {label}"))
+    field_index(creds, key).ok_or_else(|| format!("字段缺失或无效：{label}"))
 }
 
 fn mask_address(addr: &str) -> String {
@@ -122,36 +122,37 @@ pub fn validate_credentials(
             let account_index = require_index(creds, "account_index", "Account Index")?;
             let api_key_index = require_index(creds, "api_key_index", "API Key Index")?;
             if !(4..=254).contains(&api_key_index) {
-                return Err("Lighter API Key Index must be between 4 and 254".to_string());
+                return Err("Lighter API Key Index 须在 4–254 之间".to_string());
             }
             require_str(creds, "api_key_private_key", "API Key 私钥")?;
-            Ok(format!("Account #{account_index} · API key #{api_key_index}"))
+            Ok(format!(
+                "Account #{account_index} · API key #{api_key_index}"
+            ))
         }
         "lighter_robinhood" => {
             let account_index = require_index(creds, "account_index", "Account Index")?;
             let api_key_index = require_index(creds, "api_key_index", "API Key Index")?;
             if api_key_index == 157 {
-                return Err(
-                    "API Key Index 157 is reserved on Lighter (Robinhood Chain) and cannot be used"
-                        .to_string(),
-                );
+                return Err("Lighter RH 的 API Key Index 157 已保留，不可用".to_string());
             }
             if !(4..=156).contains(&api_key_index) && !(158..=254).contains(&api_key_index) {
-                return Err(
-                    "Lighter (Robinhood Chain) API Key Index must be 4-156 or 158-254"
-                        .to_string(),
-                );
+                return Err("Lighter RH API Key Index 须为 4–156 或 158–254".to_string());
             }
             require_str(creds, "api_key_private_key", "API Key 私钥")?;
-            Ok(format!("Account #{account_index} · API key #{api_key_index}"))
+            Ok(format!(
+                "Account #{account_index} · API key #{api_key_index}"
+            ))
         }
         "asterdex" => {
             let mode = field_str(creds, "mode").unwrap_or("api");
             match mode {
                 "agent" => {
-                    let wallet = require_str(creds, "agent_wallet_address", "Agent 钱包地址")?;
+                    // V3 signing needs the master wallet (user) as well as
+                    // the agent address (signer) and the agent private key.
+                    let master = require_str(creds, "master_wallet_address", "主钱包地址")?;
+                    require_str(creds, "agent_wallet_address", "Agent 钱包地址")?;
                     require_str(creds, "agent_private_key", "Agent 钱包私钥")?;
-                    Ok(mask_address(&wallet))
+                    Ok(mask_address(&master))
                 }
                 _ => {
                     let api_key = require_str(creds, "api_key", "API Key")?;
@@ -165,17 +166,17 @@ pub fn validate_credentials(
             require_str(creds, "signing_private_key", "交易签名私钥/凭证")?;
             Ok(mask_address(&wallet))
         }
-        other => Err(format!("unsupported exchange: {other}")),
+        other => Err(format!("不支持的交易所：{other}")),
     }
 }
 
 fn validate_label(label: &str) -> Result<String, String> {
     let label = label.trim();
     if label.is_empty() {
-        return Err("account label must not be empty".to_string());
+        return Err("账户名不能为空".to_string());
     }
     if label.chars().count() > 64 {
-        return Err("account label is too long (max 64 characters)".to_string());
+        return Err("账户名过长（最多 64 个字符）".to_string());
     }
     Ok(label.to_string())
 }
@@ -188,6 +189,16 @@ fn has_new_credentials(creds: &Map<String, Value>) -> bool {
         Value::Number(n) => n.as_i64().is_some() || n.as_f64().is_some(),
         _ => false,
     })
+}
+
+/// Combine a primary failure with a rollback outcome. A failed rollback is
+/// never swallowed: the caller gets both errors in one message so a
+/// SQLite/vault divergence is visible to the user instead of silent.
+fn with_rollback_error(main_err: String, rollback: Result<(), VaultError>) -> String {
+    match rollback {
+        Ok(()) => main_err,
+        Err(rb) => format!("{main_err} （回滚也失败：{rb}）"),
+    }
 }
 
 pub fn list_accounts(db: &DataEngine) -> Result<Vec<AccountView>, String> {
@@ -207,7 +218,7 @@ pub fn create_account(
 ) -> Result<AccountView, String> {
     let label = validate_label(label)?;
     if !SUPPORTED_EXCHANGES.contains(&exchange_id) {
-        return Err(format!("unsupported exchange: {exchange_id}"));
+        return Err(format!("不支持的交易所：{exchange_id}"));
     }
     let masked = validate_credentials(exchange_id, &credentials)?;
     let id = uuid::Uuid::new_v4().to_string();
@@ -216,7 +227,7 @@ pub fn create_account(
     // again so the two stores never disagree.
     vault
         .set(&id, Value::Object(credentials))
-        .map_err(|e| format!("failed to store credentials: {e}"))?;
+        .map_err(|e| format!("保存凭证失败：{e}"))?;
     let row = AccountRow {
         id: id.clone(),
         label,
@@ -228,8 +239,7 @@ pub fn create_account(
         credential_configured: true,
     };
     if let Err(e) = db.insert_account(&row) {
-        let _ = vault.remove(&id);
-        return Err(e);
+        return Err(with_rollback_error(e, vault.remove(&id).map(|_| ())));
     }
     Ok(AccountView::from(&row))
 }
@@ -244,7 +254,7 @@ pub fn update_account(
 ) -> Result<AccountView, String> {
     let existing = db
         .get_account(id)?
-        .ok_or_else(|| "account not found".to_string())?;
+        .ok_or_else(|| "找不到该账户".to_string())?;
     // Exchange lock, enforced on the server side: the requested exchange
     // must match what is already stored, no matter what the caller sends.
     if exchange_id != existing.exchange_id {
@@ -267,18 +277,14 @@ pub fn update_account(
         let old_creds = vault.get(id);
         vault
             .set(id, Value::Object(creds))
-            .map_err(|e| format!("failed to store credentials: {e}"))?;
+            .map_err(|e| format!("保存凭证失败：{e}"))?;
         if let Err(e) = db.update_account_meta(id, &label, &masked, true, now) {
             // Roll the vault back to the previous credentials.
-            match old_creds {
-                Some(old) => {
-                    let _ = vault.set(id, old);
-                }
-                None => {
-                    let _ = vault.remove(id);
-                }
-            }
-            return Err(e);
+            let rollback = match old_creds {
+                Some(old) => vault.set(id, old),
+                None => vault.remove(id).map(|_| ()),
+            };
+            return Err(with_rollback_error(e, rollback));
         }
         let mut view = AccountView::from(&existing);
         view.label = label;
@@ -305,16 +311,15 @@ pub fn update_account(
 pub fn delete_account(db: &DataEngine, vault: &VaultStore, id: &str) -> Result<(), String> {
     let _existing = db
         .get_account(id)?
-        .ok_or_else(|| "account not found".to_string())?;
+        .ok_or_else(|| "找不到该账户".to_string())?;
     // Remove the vault entry first; if the DB delete then fails, restore it.
-    let old_creds = vault
-        .remove(id)
-        .map_err(|e| format!("failed to remove credentials: {e}"))?;
+    let old_creds = vault.remove(id).map_err(|e| format!("删除凭证失败：{e}"))?;
     if let Err(e) = db.delete_account(id) {
-        if let Some(old) = old_creds {
-            let _ = vault.set(id, old);
-        }
-        return Err(e);
+        let rollback = match old_creds {
+            Some(old) => vault.set(id, old),
+            None => Ok(()),
+        };
+        return Err(with_rollback_error(e, rollback));
     }
     Ok(())
 }
@@ -481,5 +486,22 @@ mod tests {
         let key_bytes = std::fs::read(&paths.vault_key_path).unwrap();
         assert_ne!(key_bytes.len(), 0);
         let _ = PathBuf::new();
+    }
+
+    #[test]
+    fn rollback_error_keeps_main_error_when_rollback_succeeds() {
+        let msg = with_rollback_error("db insert failed".to_string(), Ok(()));
+        assert_eq!(msg, "db insert failed");
+    }
+
+    #[test]
+    fn rollback_error_reports_failed_rollback() {
+        let msg = with_rollback_error(
+            "db insert failed".to_string(),
+            Err(VaultError::MissingKeyWithData),
+        );
+        assert!(msg.contains("db insert failed"));
+        assert!(msg.contains("回滚也失败"));
+        assert!(msg.contains("vault.key 缺失"));
     }
 }

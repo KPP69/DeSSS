@@ -38,19 +38,19 @@ const MIN_ENC_LEN: usize = NONCE_LEN + 16;
 
 #[derive(Debug, thiserror::Error)]
 pub enum VaultError {
-    #[error("vault.key is missing but vault.enc exists; refusing to generate a new key because that would orphan the existing encrypted credentials")]
+    #[error("vault.key 缺失，但 vault.enc 存在；拒绝生成新密钥，否则已有加密凭证将无法恢复")]
     MissingKeyWithData,
-    #[error("vault.key has an invalid length ({0} bytes, expected 32); the file may be corrupted")]
+    #[error("vault.key 长度不正确（{0} 字节，应为 32 字节），文件可能已损坏")]
     InvalidKeyLength(usize),
-    #[error("failed to decrypt vault.enc; the file may be corrupted or does not match vault.key. The original file was left untouched")]
+    #[error("vault.enc 解密失败，文件可能已损坏或与 vault.key 不匹配，原文件未做任何修改")]
     DecryptFailed,
-    #[error("vault.enc is malformed (too short to contain a nonce and authentication tag)")]
+    #[error("vault.enc 格式错误（太短，不含随机数与认证标签）")]
     MalformedVault,
-    #[error("failed to encrypt vault contents")]
+    #[error("加密凭证失败")]
     EncryptFailed,
-    #[error("vault file I/O error: {0}")]
+    #[error("vault 文件读写失败：{0}")]
     Io(#[from] std::io::Error),
-    #[error("vault data serialization error: {0}")]
+    #[error("vault 数据序列化失败：{0}")]
     Serde(#[from] serde_json::Error),
 }
 
@@ -82,12 +82,32 @@ fn decrypt_bytes(key: &[u8; KEY_LEN], data: &[u8]) -> VaultResult<Vec<u8>> {
         .map_err(|_| VaultError::DecryptFailed)
 }
 
+/// Create the temp file for an atomic write. On Unix the file is created
+/// with mode 0600 in the same open() call, so sensitive material (the vault
+/// key) never exists on disk with looser permissions — no create-then-chmod
+/// window. Windows keeps the default permissions.
+#[cfg(unix)]
+fn create_tmp_file(tmp: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(tmp)
+}
+
+#[cfg(not(unix))]
+fn create_tmp_file(tmp: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::File::create(tmp)
+}
+
 /// Write `bytes` to `path` via a temp file + atomic rename, so a crash
 /// mid-write can never corrupt the previous good file.
 fn atomic_write(path: &Path, bytes: &[u8]) -> VaultResult<()> {
     let tmp = path.with_extension("tmp");
     {
-        let mut f = std::fs::File::create(&tmp)?;
+        let mut f = create_tmp_file(&tmp)?;
         f.write_all(bytes)?;
         f.sync_all()?;
     }
@@ -95,24 +115,8 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> VaultResult<()> {
     Ok(())
 }
 
-#[cfg(unix)]
-fn set_key_permissions(path: &Path) -> VaultResult<()> {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn set_key_permissions(_path: &Path) -> VaultResult<()> {
-    // Windows: keep normal file permissions so the portable build can
-    // create/read/update the key file without special handling.
-    Ok(())
-}
-
 fn write_key_file(path: &Path, key: &[u8; KEY_LEN]) -> VaultResult<()> {
-    atomic_write(path, key)?;
-    set_key_permissions(path)?;
-    Ok(())
+    atomic_write(path, key)
 }
 
 fn read_key_file(path: &Path) -> VaultResult<[u8; KEY_LEN]> {

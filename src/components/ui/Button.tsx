@@ -3,19 +3,20 @@ import React from "react";
 type Variant = "primary" | "secondary" | "danger" | "ghost";
 type Size = "sm" | "md";
 
+// Controls are 32px tall (md) with 8px radius; table actions use sm (28px).
 const base =
-  "inline-flex items-center justify-center rounded font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-primary/50";
+  "inline-flex items-center justify-center font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-ds-ring/50";
 
 const variants: Record<Variant, string> = {
-  primary: "bg-primary text-white hover:bg-primary/85 active:bg-primary/75",
-  secondary: "border border-line text-t1 bg-panel hover:bg-overlay active:bg-overlay/70",
-  danger: "bg-loss text-white hover:bg-loss/85 active:bg-loss/75",
-  ghost: "text-t2 hover:text-t1 hover:bg-overlay",
+  primary: "bg-ds-accent text-ds-accent-contrast hover:bg-ds-accent-hover active:bg-ds-accent/80",
+  secondary: "border border-ds-line text-ds-text-1 bg-ds-panel hover:bg-ds-panel-2 active:bg-ds-panel-2/70",
+  danger: "bg-ds-down text-ds-down-contrast hover:bg-ds-down-hover active:bg-ds-down/80",
+  ghost: "text-ds-text-2 hover:text-ds-text-1 hover:bg-ds-panel-2",
 };
 
 const sizes: Record<Size, string> = {
-  sm: "px-3 py-1 text-xs",
-  md: "px-4 py-2 text-sm",
+  sm: "px-2 py-1 text-xs rounded-md",
+  md: "h-8 px-3.5 text-[13px] rounded-lg",
 };
 
 export type ButtonProps = React.ButtonHTMLAttributes<HTMLButtonElement> & {
