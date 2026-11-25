@@ -1,7 +1,6 @@
 pub mod book;
 pub mod hyperliquid;
 pub mod lighter;
-pub mod mock;
 pub mod sync;
 pub mod types;
 use self::types::*;
@@ -45,7 +44,9 @@ mod tests {
         assert_eq!(live_status(false, false, false), "connecting");
     }
 }
-/// Unified exchange contract. No real exchange is implemented in scaffold phase; only MockAdapter.
+/// Unified exchange contract, implemented by the real read-only adapters
+/// (Hyperliquid / Entropy / Lighter). No mock adapter remains: every
+/// number the app shows comes from a real exchange read.
 #[async_trait]
 pub trait ExchangeAdapter: Send + Sync {
     fn id(&self) -> &str;

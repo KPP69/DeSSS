@@ -2,8 +2,7 @@ import React, { useEffect } from "react";
 import AppShell from "./components/AppShell";
 import { Button } from "./components/ui";
 import { useAppStore, type PageKey } from "./store/useAppStore";
-import { useMarketStore } from "./store/useMarketStore";
-import { api, onTick, onBalance, onBook, onAccountLive, onLog } from "./lib/tauri";
+import { api, onBook, onAccountLive, onLog } from "./lib/tauri";
 import { useLiveStore } from "./store/useLiveStore";
 import { useConsoleStore } from "./store/useConsoleStore";
 import { useAccountUiStore } from "./store/useAccountUiStore";
@@ -31,9 +30,6 @@ const PAGE_KEYS: PageKey[] = ["account", "strategy", "trading", "data", "risk", 
 export default function App() {
   const page = useAppStore((s) => s.page);
   const setPage = useAppStore((s) => s.setPage);
-  const setTick = useMarketStore((s) => s.setTick);
-  const setBalance = useMarketStore((s) => s.setBalance);
-  const setConnected = useMarketStore((s) => s.setConnected);
   const openAdd = useAccountUiStore((s) => s.openAdd);
 
   // Current page <-> URL hash (#/account, #/trading, ...).
@@ -52,14 +48,10 @@ export default function App() {
 
   useEffect(() => {
     let u1: (() => void) | undefined, u2: (() => void) | undefined;
-    let u3: (() => void) | undefined, u4: (() => void) | undefined;
-    let u5: (() => void) | undefined;
-    onTick(setTick).then((u) => (u1 = u));
-    onBalance(setBalance).then((u) => (u2 = u));
-    onBook((b) => useLiveStore.getState().setBook(b)).then((u) => (u3 = u));
-    onAccountLive((a) => useLiveStore.getState().setLive(a)).then((u) => (u4 = u));
-    onLog((l) => useConsoleStore.getState().addLog(l)).then((u) => (u5 = u));
-    api.startMock().then(() => setConnected(true)).catch(() => {});
+    let u3: (() => void) | undefined;
+    onBook((b) => useLiveStore.getState().setBook(b)).then((u) => (u1 = u));
+    onAccountLive((a) => useLiveStore.getState().setLive(a)).then((u) => (u2 = u));
+    onLog((l) => useConsoleStore.getState().addLog(l)).then((u) => (u3 = u));
     // Instant numbers after a refresh: latest books + account states +
     // recent console logs the backend already holds in memory, instead
     // of waiting for the next WS frame / REST poll.
@@ -75,8 +67,6 @@ export default function App() {
       u1?.();
       u2?.();
       u3?.();
-      u4?.();
-      u5?.();
     };
   }, []);
 

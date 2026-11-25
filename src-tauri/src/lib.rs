@@ -11,7 +11,6 @@ pub mod vault;
 
 use std::sync::Arc;
 
-use adapters::mock::MockAdapter;
 use adapters::sync::SyncManager;
 use bus::EventBus;
 use portable::PortablePaths;
@@ -19,7 +18,6 @@ use portable::PortablePaths;
 pub struct AppState {
     pub paths: PortablePaths,
     pub bus: EventBus,
-    pub mock: Arc<MockAdapter>,
     pub db: data_engine::DataEngine,
     pub vault: Arc<vault::VaultHandle>,
     pub sync: Arc<SyncManager>,
@@ -44,12 +42,10 @@ pub fn run() {
     // 4096: the bus carries high-frequency book frames; a burst must lag
     // the forwarder, never kill it (see spawn_bus_forwarder).
     let bus = EventBus::new(4096);
-    let mock = Arc::new(MockAdapter::new(bus.clone()));
     let sync = Arc::new(SyncManager::new());
     let state = Arc::new(AppState {
         paths,
         bus,
-        mock,
         db,
         vault,
         sync,
@@ -79,9 +75,6 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_app_info,
-            commands::start_mock,
-            commands::stop_mock,
-            commands::get_snapshot,
             commands::list_accounts,
             commands::create_account,
             commands::update_account,

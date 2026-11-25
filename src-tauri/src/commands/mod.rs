@@ -20,26 +20,6 @@ pub fn get_app_info(state: State<'_, Arc<AppState>>) -> AppInfo {
         portable: true,
     }
 }
-#[tauri::command]
-pub async fn start_mock(state: State<'_, Arc<AppState>>) -> Result<(), String> {
-    state.mock.clone().start_loops();
-    Ok(())
-}
-#[tauri::command]
-pub fn stop_mock(state: State<'_, Arc<AppState>>) -> Result<(), String> {
-    state.mock.stop();
-    Ok(())
-}
-#[tauri::command]
-pub async fn get_snapshot(state: State<'_, Arc<AppState>>) -> Result<serde_json::Value, String> {
-    use crate::adapters::ExchangeAdapter;
-    let b = state
-        .mock
-        .get_balances("mock-account")
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(serde_json::json!({"ticks":[],"balances":b}))
-}
 pub fn spawn_bus_forwarder(handle: AppHandle, state: Arc<AppState>) {
     tauri::async_runtime::spawn(async move {
         let mut rx = state.bus.subscribe();

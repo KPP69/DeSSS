@@ -1,6 +1,5 @@
 import React from "react";
 import { useAppStore, type PageKey } from "../store/useAppStore";
-import { useMarketStore } from "../store/useMarketStore";
 
 const items: { key: PageKey; label: string }[] = [
   { key: "account", label: "账户" },
@@ -13,19 +12,10 @@ const items: { key: PageKey; label: string }[] = [
 
 export default function Sidebar() {
   const { page, setPage } = useAppStore();
-  const connected = useMarketStore((s) => s.connected);
   return (
     <aside className="w-56 shrink-0 h-full bg-ds-panel border-r border-ds-line flex flex-col">
       <div className="shrink-0 h-14 flex items-center px-4 text-lg font-semibold text-ds-text-1">
         DeSSS
-      </div>
-      <div className="shrink-0 px-4 pb-3 text-xs text-ds-text-2 flex items-center gap-2">
-        <span
-          className={`inline-block w-1.5 h-1.5 rounded-full ${
-            connected ? "bg-ds-up" : "bg-ds-text-3"
-          }`}
-        />
-        {connected ? "Mock 已连接" : "Mock 未启动"}
       </div>
       <nav className="flex flex-col gap-1.5 px-3">
         {items.map((i) => {

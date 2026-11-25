@@ -1,12 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { Tick, Balance, AppInfo, AccountView, CredentialMap, OrderBook, AccountLive, LogEntry, RuntimeSnapshot, ProxyState } from "./types";
+import type { AppInfo, AccountView, CredentialMap, OrderBook, AccountLive, LogEntry, RuntimeSnapshot, ProxyState } from "./types";
 
 export const api = {
   getAppInfo: () => invoke<AppInfo>("get_app_info"),
-  startMock: () => invoke<void>("start_mock"),
-  stopMock: () => invoke<void>("stop_mock"),
-  getSnapshot: () => invoke<{ ticks: Tick[]; balances: Balance[] }>("get_snapshot"),
   getRuntimeSnapshot: () => invoke<RuntimeSnapshot>("get_runtime_snapshot"),
   getProxy: () => invoke<ProxyState>("get_proxy"),
   setProxy: (url: string) => invoke<ProxyState>("set_proxy", { url }),
@@ -26,12 +23,6 @@ export const api = {
   listAccountLive: () => invoke<AccountLive[]>("list_account_live"),
 };
 
-export function onTick(cb: (t: Tick) => void): Promise<UnlistenFn> {
-  return listen<Tick>("market://tick", (e) => cb(e.payload));
-}
-export function onBalance(cb: (b: Balance) => void): Promise<UnlistenFn> {
-  return listen<Balance>("account://balance", (e) => cb(e.payload));
-}
 export function onBook(cb: (b: OrderBook) => void): Promise<UnlistenFn> {
   return listen<OrderBook>("market://book", (e) => cb(e.payload));
 }

@@ -1,13 +1,12 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import AccountModal from "../components/AccountModal";
-import { Badge, Button, ConfirmDialog, DataTable, StatCard, tdClsCompact, trCls } from "../components/ui";
+import { Badge, Button, ConfirmDialog, DataTable, tdClsCompact, trCls } from "../components/ui";
 import { getExchange } from "../lib/exchanges";
 import { api } from "../lib/tauri";
 import { useAccountStore } from "../store/useAccountStore";
 import type { AccountView } from "../lib/types";
 import { useAccountUiStore } from "../store/useAccountUiStore";
 import { useLiveStore, latencyTone } from "../store/useLiveStore";
-import { useMarketStore } from "../store/useMarketStore";
 
 function fmt(n: number): string {
   return n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -34,7 +33,6 @@ export default function AccountPage() {
   const vaultError = useAccountStore((s) => s.vaultError);
   const fetchAll = useAccountStore((s) => s.fetchAll);
   const remove = useAccountStore((s) => s.remove);
-  const balances = useMarketStore((s) => s.balances);
   const live = useLiveStore((s) => s.live);
   const setLive = useLiveStore((s) => s.setLive);
   const removeLive = useLiveStore((s) => s.removeLive);
@@ -72,15 +70,6 @@ export default function AccountPage() {
     }
   }, [accounts, live, setLive]);
 
-  // Overview cards show Mock data only, clearly labelled as simulated.
-  const mock = useMemo(() => {
-    const totalEquity = balances.reduce((sum, b) => sum + b.equityUsd, 0);
-    const available = balances
-      .filter((b) => b.asset === "USDT")
-      .reduce((sum, b) => sum + b.free, 0);
-    return { totalEquity, available, pnl: 0 };
-  }, [balances]);
-
   return (
     <div>
       {vaultError && (
@@ -95,38 +84,11 @@ export default function AccountPage() {
         </div>
       )}
 
-      {/* Overview: mock data, clearly labelled */}
-      <div className="mb-2 text-xs text-ds-text-3 flex items-center gap-2">
-        以下为模拟账户数据，非真实资产；下方真实账户会单独显示交易所同步到的真实权益。
-        <Badge tone="mock">Mock 模拟</Badge>
-      </div>
-      <div className="grid grid-cols-3 gap-3 mb-3 mt-4">
-        <StatCard compact title="总权益" value={`$${fmt(mock.totalEquity)}`} sub="模拟数据 · Mock" />
-        <StatCard compact title="可用权益" value={`$${fmt(mock.available)}`} sub="模拟数据 · Mock" />
-        <StatCard compact title="总盈亏" value={`$${fmt(mock.pnl)}`} sub="模拟数据 · Mock" />
-      </div>
-
-      {/* Account columns: name 104 / info flexible / exchange 84 /
-          equity 128 / PnL 88 / actions fixed 184px, never shrunk or wrapped,
-          so 连接/编辑/删除 always fit at 960x640 and 1280x800. The table
-          keeps overflow-x-auto as a fallback for narrower windows. */}
-      <DataTable headers={HEADERS} minWidth={680} compact colWidths={[104, "auto", 84, 128, 88, 184]}>
-        {/* Built-in mock account row */}
-        <tr className={trCls}>
-          <td className={tdClsCompact}>
-            <span className="inline-flex items-center gap-2">
-              模拟账户 <Badge tone="mock">Mock</Badge>
-            </span>
-          </td>
-          <td className={`${tdClsCompact} text-ds-text-3`}>模拟数据</td>
-          <td className={tdClsCompact}>MockAdapter</td>
-          <td className={`${tdClsCompact} num`}>
-            <div>${fmt(mock.totalEquity)}</div>
-            <div className="text-ds-text-3 text-xs">可用 ${fmt(mock.available)}</div>
-          </td>
-          <td className={`${tdClsCompact} num`}>${fmt(mock.pnl)}</td>
-          <td className={`${tdClsCompact} text-ds-text-3`}>—</td>
-        </tr>
+      {/* Account columns, strictly locked by percentage (sum 100%):
+          账户名 14% / 账户信息 22% / 交易所 14% / 权益 16% / 盈亏 12% /
+          操作 22%. table-fixed + w-full keeps the ratios at any window
+          size; min-w-700px is the floor, overflow-x-auto is the fallback. */}
+      <DataTable headers={HEADERS} minWidth={700} compact colWidths={["14%", "22%", "14%", "16%", "12%", "22%"]}>
         {accounts.map((a) => {
           const lv = live[a.id];
           const syncable = SYNCABLE.has(a.exchangeId);
@@ -169,7 +131,7 @@ export default function AccountPage() {
                 <td className={`${tdClsCompact} text-ds-text-3`}>—</td>
               </>
             )}
-            <td className={`${tdClsCompact} whitespace-nowrap`}>
+            <td className="text-center px-2 py-1.5 text-[13px] text-ds-text-1 whitespace-nowrap">
               <div className="flex items-center justify-center gap-1.5">
                 {syncable && a.credentialConfigured && !lv && (
                   <Button

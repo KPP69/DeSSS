@@ -8,14 +8,13 @@ type Tone =
   | "neutral"
   | "online"
   | "offline"
-  | "mock"
   | "configured"
   | "danger";
 
 // Badge pattern: 5px dot + text, 20px tall, 5px radius, 11px text.
 // Semantic tones carry meaning through the dot + the colored label together
 // (the text itself always says what the state is); neutral chrome is used
-// for plain labels such as Mock / configured.
+// for plain labels such as configured.
 const tones: Record<Tone, { cls: string; dot: string }> = {
   up: { cls: "text-ds-up border-ds-up/30 bg-ds-up-soft/10", dot: "bg-ds-up" },
   online: { cls: "text-ds-up border-ds-up/30 bg-ds-up-soft/10", dot: "bg-ds-up" },
@@ -25,7 +24,6 @@ const tones: Record<Tone, { cls: string; dot: string }> = {
   info: { cls: "text-ds-info border-ds-info/30 bg-ds-info-soft/10", dot: "bg-ds-info" },
   neutral: { cls: "text-ds-text-2 border-ds-line bg-ds-panel-2", dot: "bg-ds-text-3" },
   offline: { cls: "text-ds-text-2 border-ds-line bg-ds-panel-2", dot: "bg-ds-text-3" },
-  mock: { cls: "text-ds-text-2 border-ds-line bg-ds-panel-2", dot: "bg-ds-text-3" },
   configured: { cls: "text-ds-text-2 border-ds-line bg-ds-panel-2", dot: "bg-ds-text-3" },
 };
 

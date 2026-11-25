@@ -1,17 +1,17 @@
 import React from "react";
 import { Badge, DataTable, EmptyState } from "../components/ui";
-import { useMarketStore } from "../store/useMarketStore";
 import { useLiveStore } from "../store/useLiveStore";
 import { useAccountStore } from "../store/useAccountStore";
 import { getExchange } from "../lib/exchanges";
 
+/**
+ * Trading page: real positions only. The live book (BBO + top-5 depth)
+ * lives on the Data page now; order and trade history are clean empty
+ * placeholders until the order flow lands. No mock data anywhere.
+ */
 export default function TradingPage() {
-  const ticks = useMarketStore((s) => s.ticks);
-  const books = useLiveStore((s) => s.books);
   const live = useLiveStore((s) => s.live);
   const accounts = useAccountStore((s) => s.accounts);
-  const mockList = Object.values(ticks).filter((t) => t.adapterId === "mock");
-  const bookList = Object.values(books);
   const positions = Object.values(live).flatMap((a) =>
     a.positions.map((p) => ({ ...p, accountId: a.accountId, adapterId: a.adapterId, currency: a.currency }))
   );
@@ -20,64 +20,8 @@ export default function TradingPage() {
 
   return (
     <div>
-      {/* Real market data */}
-      <div className="font-semibold text-ds-text-1 mb-2 flex items-center gap-2">
-        真实行情 · 交易所 WebSocket 实时订阅
-      </div>
-      {bookList.length === 0 ? (
-        <EmptyState>暂无真实行情 — 请先在「账户」页面连接 Hyperliquid / Entropy / Lighter 账户。</EmptyState>
-      ) : (
-        <div className="mb-6">
-          <DataTable
-            headers={["交易所", "交易对", "买一", "卖一", "中间价", "盘口深度"]}
-            minWidth={680}
-            rows={bookList.map((b) => [
-              <span key="e">{getExchange(b.adapterId).name}</span>,
-              <span key="s" className="num">{b.symbol}</span>,
-              <span key="bid" className="num text-ds-up">{b.bids[0] ? b.bids[0][0].toFixed(2) : "—"}</span>,
-              <span key="ask" className="num text-ds-down">{b.asks[0] ? b.asks[0][0].toFixed(2) : "—"}</span>,
-              <span key="mid" className="num">
-                {b.bids[0] && b.asks[0] ? ((b.bids[0][0] + b.asks[0][0]) / 2).toFixed(2) : "—"}
-              </span>,
-              <span key="d" className="num text-ds-text-2">
-                {b.bids.length} / {b.asks.length}
-              </span>,
-            ])}
-          />
-          <div className="mt-3 grid grid-cols-2 gap-4">
-            {bookList.map((b) => (
-              <div key={`${b.adapterId}:${b.symbol}`} className="rounded-[10px] border border-ds-line bg-ds-panel shadow-card p-3">
-                <div className="text-xs text-ds-text-2 mb-2">
-                  {getExchange(b.adapterId).name} · <span className="num">{b.symbol}</span> · 盘口前 5 档
-                </div>
-                <div className="grid grid-cols-2 gap-3 text-xs num">
-                  <div>
-                    <div className="text-ds-text-3 mb-1">买盘</div>
-                    {b.bids.slice(0, 5).map(([p, q], i) => (
-                      <div key={i} className="flex justify-between py-0.5">
-                        <span className="text-ds-up">{p.toFixed(2)}</span>
-                        <span className="text-ds-up">{q}</span>
-                      </div>
-                    ))}
-                  </div>
-                  <div>
-                    <div className="text-ds-text-3 mb-1">卖盘</div>
-                    {b.asks.slice(0, 5).map(([p, q], i) => (
-                      <div key={i} className="flex justify-between py-0.5">
-                        <span className="text-ds-down">{p.toFixed(2)}</span>
-                        <span className="text-ds-down">{q}</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
       {/* Real positions */}
-      <div className="font-semibold text-ds-text-1 mb-2">真实持仓 · 来自已连接账户的只读同步</div>
+      <div className="font-semibold text-ds-text-1 mb-2">当前持仓 · 来自已连接账户的只读同步</div>
       {positions.length === 0 ? (
         <EmptyState>暂无真实持仓 — 连接账户后，交易所同步到的当前持仓会显示在这里。</EmptyState>
       ) : (
@@ -109,26 +53,12 @@ export default function TradingPage() {
         </div>
       )}
 
-      {/* Mock data, kept separate and labelled */}
-      <div className="font-semibold text-ds-text-1 mb-2">模拟行情</div>
-      <div className="text-ds-text-2 mb-3">
-        Mock 行情 · 每 500ms 推送 · 来自 EventBus → Tauri event <code className="num">market://tick</code>
-      </div>
-      {mockList.length === 0 ? (
-        <EmptyState>等待 Mock 行情推送…</EmptyState>
-      ) : (
-        <DataTable
-          headers={["交易对", "最新价", "买一 / 卖一"]}
-          minWidth={560}
-          rows={mockList.map((t) => [
-            <span key="s" className="num">{t.symbol}</span>,
-            <span key="l" className="num">{t.last.toFixed(2)}</span>,
-            <span key="ba" className="num text-ds-text-2">
-              {t.bid.toFixed(2)} / {t.ask.toFixed(2)}
-            </span>,
-          ])}
-        />
-      )}
+      {/* Future order flow: clean placeholders, no fake rows. */}
+      <div className="font-semibold text-ds-text-1 mb-2 mt-6">委托挂单</div>
+      <EmptyState>委托挂单尚未接入 — 下单与撤单功能上线后，当前挂单会显示在这里。</EmptyState>
+
+      <div className="font-semibold text-ds-text-1 mb-2 mt-6">成交记录</div>
+      <EmptyState>成交记录尚未接入 — 订单成交后，成交历史会显示在这里。</EmptyState>
     </div>
   );
 }
