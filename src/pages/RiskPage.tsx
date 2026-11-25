@@ -4,7 +4,10 @@ import { EmptyState } from "../components/ui";
 export default function RiskPage() {
   return (
     <div>
-      <EmptyState>空壳页面 — 接口契约已就绪，业务待接入（不接真实交易所）</EmptyState>
+      <EmptyState>
+        <div className="text-[13px] font-semibold text-ds-text-1">风控引擎尚未接入</div>
+        <div className="mt-1">后续阶段接入真实风控引擎后，限额、敞口与风控检查会显示在这里。</div>
+      </EmptyState>
     </div>
   );
 }

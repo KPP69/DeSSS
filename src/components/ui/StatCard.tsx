@@ -21,16 +21,16 @@ export default function StatCard({
   compact?: boolean;
 }) {
   const valueColor =
-    tone === "profit" ? "text-profit" : tone === "loss" ? "text-loss" : "text-t1";
+    tone === "profit" ? "text-ds-up" : tone === "loss" ? "text-ds-down" : "text-ds-text-1";
   return (
     <div
-      className={`bg-panel border border-line rounded-lg flex flex-col items-center text-center ${
+      className={`bg-ds-panel border border-ds-line rounded-[10px] shadow-card flex flex-col items-center text-center ${
         compact ? "px-3 py-2" : "p-5"
       }`}
     >
-      <div className="text-xs text-t2 text-center">{title}</div>
+      <div className="text-xs text-ds-text-2 text-center">{title}</div>
       <div className={`num font-semibold text-center ${compact ? "text-[15px] mt-1" : "text-base mt-1"} ${valueColor}`}>{value}</div>
-      {sub && <div className="text-xs text-t3 mt-1 text-center">{sub}</div>}
+      {sub && <div className="text-xs text-ds-text-3 mt-1 text-center">{sub}</div>}
     </div>
   );
 }

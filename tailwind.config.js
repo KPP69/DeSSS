@@ -1,27 +1,55 @@
 /** @type {import('tailwindcss').Config} */
+// Every color is an RGB channel from src/styles/tokens.css, so the same
+// class works in all three themes (light / warm / dark) and at any alpha
+// (`bg-ds-accent-soft/10`, `border-ds-line/50`). Components must use
+// these semantic names, never raw hex.
+const rgb = (name) => `rgb(var(--ds-${name}) / <alpha-value>)`;
+
 export default {
   content: ["./index.html", "./src/**/*.{ts,tsx}"],
   theme: {
     extend: {
-      // DeSSS design tokens (dark quant-terminal theme).
-      // Pages and components must reference these semantic names instead of
-      // scattering raw hex values. Source of truth: src/styles/tokens.css.
       colors: {
-        app: "#0D1117", // page background
-        panel: "#131720", // card background
-        overlay: "#171D29", // modal / popover background
-        line: "rgba(255,255,255,0.06)", // unified border, barely visible
-        primary: "#3D6FB4", // muted steady blue
-        profit: "#10B981",
-        loss: "#EF4444",
-        warn: "#F59E0B",
-        t1: "#E6EDF3", // primary text
-        t2: "#8B949E", // secondary text
-        t3: "#5C6574", // muted text
+        ds: {
+          bg: rgb("bg"), // page background
+          "bg-2": rgb("bg-2"), // hover / recessed background
+          panel: rgb("panel"), // card background
+          "panel-2": rgb("panel-2"), // modal / popover / input background
+          line: rgb("line"), // unified border
+          "line-strong": rgb("line-strong"), // emphasized border
+          "text-1": rgb("text-1"), // primary text
+          "text-2": rgb("text-2"), // secondary text
+          "text-3": rgb("text-3"), // muted text
+          accent: rgb("accent"), // primary action / selected state
+          "accent-hover": rgb("accent-hover"),
+          "accent-soft": rgb("accent-soft"), // soft tint, use at low alpha
+          "accent-contrast": rgb("accent-contrast"), // text on filled accent
+          up: rgb("up"), // profit / bid / long
+          "up-hover": rgb("up-hover"),
+          "up-soft": rgb("up-soft"),
+          "up-contrast": rgb("up-contrast"),
+          down: rgb("down"), // loss / ask / short
+          "down-hover": rgb("down-hover"),
+          "down-soft": rgb("down-soft"),
+          "down-contrast": rgb("down-contrast"),
+          warn: rgb("warn"),
+          "warn-hover": rgb("warn-hover"),
+          "warn-soft": rgb("warn-soft"),
+          "warn-contrast": rgb("warn-contrast"),
+          info: rgb("info"),
+          "info-hover": rgb("info-hover"),
+          "info-soft": rgb("info-soft"),
+          "info-contrast": rgb("info-contrast"),
+          overlay: rgb("overlay"), // modal scrim, use at /50–/60
+          ring: rgb("ring"), // focus ring
+        },
       },
       fontFamily: {
-        sans: ["Inter", "system-ui", "-apple-system", "Segoe UI", "sans-serif"],
-        mono: ["JetBrains Mono", "Consolas", "SF Mono", "monospace"],
+        sans: ['"Segoe UI"', '"PingFang SC"', '"Microsoft YaHei"', "system-ui", "-apple-system", "sans-serif"],
+        mono: ['"Cascadia Mono"', "Consolas", '"SF Mono"', "Menlo", "monospace"],
+      },
+      boxShadow: {
+        card: "var(--ds-shadow-card)",
       },
     },
   },

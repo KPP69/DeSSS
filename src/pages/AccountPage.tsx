@@ -25,19 +25,6 @@ const STATUS_LABEL: Record<string, string> = {
   disconnected: "已断开",
 };
 
-function latencyDot(tone: string): string {
-  switch (tone) {
-    case "online":
-      return "bg-profit";
-    case "warn":
-      return "bg-warn";
-    case "danger":
-      return "bg-loss";
-    default:
-      return "bg-t3";
-  }
-}
-
 const HEADERS = ["账户名", "账户信息", "交易所", "权益 / 可用", "盈亏", "操作"];
 
 export default function AccountPage() {
@@ -97,19 +84,19 @@ export default function AccountPage() {
   return (
     <div>
       {vaultError && (
-        <div className="mb-4 text-loss bg-panel border border-line rounded px-4 py-3">
+        <div className="mb-4 text-ds-down bg-ds-panel border border-ds-line rounded px-4 py-3">
           Vault 初始化失败，账户凭证功能不可用：{vaultError}
-          <span className="text-t3">（原有 vault 文件未被修改，请检查 data 目录下的 vault.key / vault.enc）</span>
+          <span className="text-ds-text-3">（原有 vault 文件未被修改，请检查 data 目录下的 vault.key / vault.enc）</span>
         </div>
       )}
       {error && !vaultError && (
-        <div className="mb-4 text-loss bg-panel border border-line rounded px-4 py-3">
+        <div className="mb-4 text-ds-down bg-ds-panel border border-ds-line rounded px-4 py-3">
           {error}
         </div>
       )}
 
       {/* Overview: mock data, clearly labelled */}
-      <div className="mb-2 text-xs text-t3 flex items-center gap-2">
+      <div className="mb-2 text-xs text-ds-text-3 flex items-center gap-2">
         以下为模拟账户数据，非真实资产；下方真实账户会单独显示交易所同步到的真实权益。
         <Badge tone="mock">Mock 模拟</Badge>
       </div>
@@ -119,7 +106,11 @@ export default function AccountPage() {
         <StatCard compact title="总盈亏" value={`$${fmt(mock.pnl)}`} sub="模拟数据 · Mock" />
       </div>
 
-      <DataTable headers={HEADERS} minWidth={970} compact colWidths={[150, 250, 120, 170, 100, 180]}>
+      {/* Account columns: name 104 / info flexible / exchange 84 /
+          equity 128 / PnL 88 / actions fixed 184px, never shrunk or wrapped,
+          so 连接/编辑/删除 always fit at 960x640 and 1280x800. The table
+          keeps overflow-x-auto as a fallback for narrower windows. */}
+      <DataTable headers={HEADERS} minWidth={680} compact colWidths={[104, "auto", 84, 128, 88, 184]}>
         {/* Built-in mock account row */}
         <tr className={trCls}>
           <td className={tdClsCompact}>
@@ -127,14 +118,14 @@ export default function AccountPage() {
               模拟账户 <Badge tone="mock">Mock</Badge>
             </span>
           </td>
-          <td className={`${tdClsCompact} text-t3`}>模拟数据</td>
+          <td className={`${tdClsCompact} text-ds-text-3`}>模拟数据</td>
           <td className={tdClsCompact}>MockAdapter</td>
           <td className={`${tdClsCompact} num`}>
             <div>${fmt(mock.totalEquity)}</div>
-            <div className="text-t3 text-xs">可用 ${fmt(mock.available)}</div>
+            <div className="text-ds-text-3 text-xs">可用 ${fmt(mock.available)}</div>
           </td>
           <td className={`${tdClsCompact} num`}>${fmt(mock.pnl)}</td>
-          <td className={`${tdClsCompact} text-t3`}>—</td>
+          <td className={`${tdClsCompact} text-ds-text-3`}>—</td>
         </tr>
         {accounts.map((a) => {
           const lv = live[a.id];
@@ -147,13 +138,12 @@ export default function AccountPage() {
             </td>
             <td className={tdClsCompact}>
               <div className="flex flex-col items-center gap-0.5 leading-tight w-full">
-                <span className="block w-full truncate text-xs text-t3 num">{a.maskedIdentifier}</span>
+                <span className="block w-full truncate text-xs text-ds-text-3 num">{a.maskedIdentifier}</span>
                 <Badge tone={a.credentialConfigured ? "configured" : "warn"}>
                   {a.credentialConfigured ? "凭证已配置" : "未配置凭证"}
                 </Badge>
                 {lv && (
                   <Badge tone={tone}>
-                    <span className={`inline-block w-1.5 h-1.5 rounded-full ${latencyDot(tone)}`} />
                     {STATUS_LABEL[lv.status] ?? lv.status}
                     {lv.latencyMs !== null && (lv.status === "connected" || lv.status === "rest-only")
                       ? ` · ${lv.latencyMs}ms`
@@ -162,25 +152,25 @@ export default function AccountPage() {
                 )}
               </div>
             </td>
-            <td className={tdClsCompact}>{getExchange(a.exchangeId).name}</td>
+            <td className={`${tdClsCompact} leading-tight`}>{getExchange(a.exchangeId).name}</td>
             {lv ? (
               <>
                 <td className={`${tdClsCompact} num`}>
-                  <div>${fmt(lv.equityUsd)} <span className="text-t3 text-xs">{lv.currency}</span></div>
-                  <div className="text-t3 text-xs">可用 ${fmt(lv.availableUsd)}</div>
+                  <div>${fmt(lv.equityUsd)} <span className="text-ds-text-3 text-xs">{lv.currency}</span></div>
+                  <div className="text-ds-text-3 text-xs">可用 ${fmt(lv.availableUsd)}</div>
                 </td>
-                <td className={`${tdClsCompact} num ${lv.pnlUsd > 0 ? "text-profit" : lv.pnlUsd < 0 ? "text-loss" : ""}`}>
+                <td className={`${tdClsCompact} num ${lv.pnlUsd > 0 ? "text-ds-up" : lv.pnlUsd < 0 ? "text-ds-down" : ""}`}>
                   {lv.pnlUsd > 0 ? "+" : ""}${fmt(lv.pnlUsd)}
                 </td>
               </>
             ) : (
               <>
-                <td className={`${tdClsCompact} text-t3`}>{syncable ? "未连接" : "本阶段不支持"}</td>
-                <td className={`${tdClsCompact} text-t3`}>—</td>
+                <td className={`${tdClsCompact} text-ds-text-3`}>{syncable ? "未连接" : "本阶段不支持"}</td>
+                <td className={`${tdClsCompact} text-ds-text-3`}>—</td>
               </>
             )}
-            <td className={tdClsCompact}>
-              <div className="flex items-center justify-center gap-2">
+            <td className={`${tdClsCompact} whitespace-nowrap`}>
+              <div className="flex items-center justify-center gap-1.5">
                 {syncable && a.credentialConfigured && !lv && (
                   <Button
                     variant="secondary"
@@ -220,8 +210,8 @@ export default function AccountPage() {
           );
         })}
         {accounts.length === 0 && (
-          <tr className="border-t border-line">
-            <td colSpan={HEADERS.length} className="text-center px-4 py-8 text-t3">
+          <tr className="border-t border-ds-line">
+            <td colSpan={HEADERS.length} className="text-center px-4 py-8 text-ds-text-3">
               {loading ? "加载中…" : "暂无真实账户，点击上方「添加账户」创建。账户凭证只加密保存在本机。"}
             </td>
           </tr>

@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
-import { EmptyState, Button } from "../components/ui";
+import { Button } from "../components/ui";
+import ThemeSwitcher from "../components/ThemeSwitcher";
 import { api } from "../lib/tauri";
 import type { ProxyState } from "../lib/types";
 
@@ -41,9 +42,16 @@ export default function SystemPage() {
 
   return (
     <div>
-      <div className="bg-panel border border-line rounded-lg p-4 mb-4 max-w-xl">
-        <div className="font-medium text-t1 mb-1">本地代理（Clash Verge 等）</div>
-        <div className="text-xs text-t2 mb-3 leading-relaxed">
+      <div className="bg-ds-panel border border-ds-line rounded-[10px] shadow-card p-4 mb-4 max-w-xl">
+        <div className="font-semibold text-ds-text-1 mb-1">外观主题</div>
+        <div className="text-xs text-ds-text-2 mb-3 leading-relaxed">
+          浅色 / 暖色 / 深色，切换后立即生效，保存在本机。
+        </div>
+        <ThemeSwitcher />
+      </div>
+      <div className="bg-ds-panel border border-ds-line rounded-[10px] shadow-card p-4 mb-4 max-w-xl">
+        <div className="font-semibold text-ds-text-1 mb-1">本地代理（Clash Verge 等）</div>
+        <div className="text-xs text-ds-text-2 mb-3 leading-relaxed">
           留空则不设置自定义代理，自动读取环境变量与 Windows 系统代理。填写后 REST 与 WS 都会走该代理。
         </div>
         <div className="flex items-center gap-2">
@@ -51,20 +59,19 @@ export default function SystemPage() {
             value={input}
             onChange={(e) => setInput(e.target.value)}
             placeholder="http://127.0.0.1:7897"
-            className="flex-1 min-w-0 bg-overlay border border-line rounded px-3 py-2 text-t1 outline-none focus:border-primary num"
+            className="flex-1 min-w-0 bg-ds-panel-2 border border-ds-line rounded-lg px-3 h-8 text-ds-text-1 outline-none focus:border-ds-accent num"
           />
           <Button onClick={save} disabled={saving}>
             {saving ? "保存中…" : "保存"}
           </Button>
         </div>
         {proxy && (
-          <div className="text-xs text-t3 mt-2 num">
+          <div className="text-xs text-ds-text-3 mt-2 num">
             当前生效：{proxy.effective ?? "未使用代理（直连）"}
           </div>
         )}
-        {msg && <div className="text-xs text-t2 mt-2">{msg}</div>}
+        {msg && <div className="text-xs text-ds-text-2 mt-2">{msg}</div>}
       </div>
-      <EmptyState>空壳页面 — 接口契约已就绪，业务待接入（不接真实交易所）</EmptyState>
     </div>
   );
 }

@@ -4,7 +4,10 @@ import { EmptyState } from "../components/ui";
 export default function DataPage() {
   return (
     <div>
-      <EmptyState>空壳页面 — 接口契约已就绪，业务待接入（不接真实交易所）</EmptyState>
+      <EmptyState>
+        <div className="text-[13px] font-semibold text-ds-text-1">数据中心尚未接入</div>
+        <div className="mt-1">后续阶段接入真实行情存储与回放后，历史数据与下载任务会显示在这里。</div>
+      </EmptyState>
     </div>
   );
 }

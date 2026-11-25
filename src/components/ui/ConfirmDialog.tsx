@@ -37,7 +37,7 @@ export default function ConfirmDialog({
         </>
       }
     >
-      <div className="text-t2 pb-2">{message}</div>
+      <div className="text-ds-text-2 pb-2">{message}</div>
     </Modal>
   );
 }

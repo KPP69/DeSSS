@@ -107,14 +107,14 @@ export default function SelectDropdown({
         onKeyDown={onTriggerKey}
         aria-haspopup="listbox"
         aria-expanded={open}
-        className={`w-full text-left px-3 py-2 rounded border transition-colors focus:outline-none focus:ring-2 focus:ring-primary/50 ${
+        className={`w-full text-left h-8 px-3 rounded-lg border transition-colors focus:outline-none focus:ring-2 focus:ring-ds-ring/50 ${
           disabled
-            ? "bg-panel/50 border-line text-t3 cursor-not-allowed"
-            : "bg-panel border-line text-t1 hover:border-t3"
+            ? "bg-ds-panel/50 border-ds-line text-ds-text-3 cursor-not-allowed"
+            : "bg-ds-panel border-ds-line text-ds-text-1 hover:border-ds-text-3"
         }`}
       >
         {selected?.label ?? placeholder}
-        {!disabled && <span className="float-right text-t3">▾</span>}
+        {!disabled && <span className="float-right text-ds-text-3">▾</span>}
       </button>
       {open &&
         !disabled &&
@@ -122,7 +122,7 @@ export default function SelectDropdown({
           <div
             ref={menuRef}
             role="listbox"
-            className="fixed z-[9999] max-h-56 overflow-y-auto bg-overlay border border-line rounded shadow-2xl py-1"
+            className="fixed z-[9999] max-h-56 overflow-y-auto bg-ds-panel-2 border border-ds-line rounded shadow-2xl py-1"
             style={{ top: pos.top, left: pos.left, width: pos.width }}
           >
             {options.map((o, i) => (
@@ -137,8 +137,8 @@ export default function SelectDropdown({
                   close();
                 }}
                 className={`block w-full text-left px-3 py-2 ${
-                  i === highlight ? "bg-white/5" : ""
-                } ${o.value === value ? "text-t1 font-medium" : "text-t1"}`}
+                  i === highlight ? "bg-ds-accent-soft/10" : ""
+                } ${o.value === value ? "text-ds-text-1 font-medium" : "text-ds-text-1"}`}
               >
                 {o.label}
               </button>

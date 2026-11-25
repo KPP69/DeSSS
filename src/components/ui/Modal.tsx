@@ -32,18 +32,18 @@ export default function Modal({
   if (!open) return null;
 
   return (
-    <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/60 p-4">
+    <div className="fixed inset-0 z-40 flex items-center justify-center bg-ds-overlay/60 p-4">
       <div
-        className={`bg-overlay border border-line rounded-lg ${widthClass} max-w-[94vw] max-h-[90vh] flex flex-col shadow-2xl`}
+        className={`bg-ds-panel-2 border border-ds-line rounded-[10px] ${widthClass} max-w-[94vw] max-h-[90vh] flex flex-col shadow-2xl`}
         role="dialog"
         aria-modal="true"
         aria-label={title}
       >
         <div className="flex items-center justify-between px-6 py-4 shrink-0">
-          <h2 className="text-[15px] font-semibold text-t1">{title}</h2>
+          <h2 className="text-[15px] font-semibold text-ds-text-1">{title}</h2>
           <button
             onClick={onClose}
-            className="text-t2 hover:text-t1 text-base leading-none px-1"
+            className="text-ds-text-2 hover:text-ds-text-1 text-base leading-none px-1"
             aria-label="关闭"
           >
             ×

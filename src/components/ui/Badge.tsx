@@ -1,18 +1,32 @@
 import React from "react";
 
-type Tone = "online" | "offline" | "mock" | "configured" | "warn" | "danger" | "neutral";
+type Tone =
+  | "up"
+  | "down"
+  | "warn"
+  | "info"
+  | "neutral"
+  | "online"
+  | "offline"
+  | "mock"
+  | "configured"
+  | "danger";
 
-// 90/10 rule: badges are always neutral chrome. The tone prop stays for
-// API compatibility; meaning comes from the text (and the 6px status dot
-// the caller may put inside), never from a colored border or label.
-const tones: Record<Tone, string> = {
-  online: "text-t2 border-line bg-panel",
-  configured: "text-t2 border-line bg-panel",
-  offline: "text-t2 border-line bg-panel",
-  neutral: "text-t2 border-line bg-panel",
-  mock: "text-t2 border-line bg-panel",
-  warn: "text-t2 border-line bg-panel",
-  danger: "text-t2 border-line bg-panel",
+// Badge pattern: 5px dot + text, 20px tall, 5px radius, 11px text.
+// Semantic tones carry meaning through the dot + the colored label together
+// (the text itself always says what the state is); neutral chrome is used
+// for plain labels such as Mock / configured.
+const tones: Record<Tone, { cls: string; dot: string }> = {
+  up: { cls: "text-ds-up border-ds-up/30 bg-ds-up-soft/10", dot: "bg-ds-up" },
+  online: { cls: "text-ds-up border-ds-up/30 bg-ds-up-soft/10", dot: "bg-ds-up" },
+  down: { cls: "text-ds-down border-ds-down/30 bg-ds-down-soft/10", dot: "bg-ds-down" },
+  danger: { cls: "text-ds-down border-ds-down/30 bg-ds-down-soft/10", dot: "bg-ds-down" },
+  warn: { cls: "text-ds-warn border-ds-warn/30 bg-ds-warn-soft/10", dot: "bg-ds-warn" },
+  info: { cls: "text-ds-info border-ds-info/30 bg-ds-info-soft/10", dot: "bg-ds-info" },
+  neutral: { cls: "text-ds-text-2 border-ds-line bg-ds-panel-2", dot: "bg-ds-text-3" },
+  offline: { cls: "text-ds-text-2 border-ds-line bg-ds-panel-2", dot: "bg-ds-text-3" },
+  mock: { cls: "text-ds-text-2 border-ds-line bg-ds-panel-2", dot: "bg-ds-text-3" },
+  configured: { cls: "text-ds-text-2 border-ds-line bg-ds-panel-2", dot: "bg-ds-text-3" },
 };
 
 export default function Badge({
@@ -22,10 +36,12 @@ export default function Badge({
   tone?: Tone;
   children: React.ReactNode;
 }) {
+  const t = tones[tone];
   return (
     <span
-      className={`inline-flex items-center gap-1 text-xs leading-5 border rounded px-1.5 ${tones[tone]}`}
+      className={`inline-flex items-center gap-1 h-5 px-1.5 rounded-[5px] border text-[11px] leading-none ${t.cls}`}
     >
+      <span className={`inline-block w-[5px] h-[5px] rounded-full shrink-0 ${t.dot}`} />
       {children}
     </span>
   );
