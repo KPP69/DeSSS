@@ -42,7 +42,7 @@ export type ProxyState = { custom: string | null; effective: string | null };
 export type AccountLive = {
   accountId: string;
   adapterId: string;
-  /** "connecting" | "connected" | "reconnecting" | "error" | "disconnected" */
+  /** "connecting" | "connected" | "error" | "disconnected" */
   status: string;
   latencyMs: number | null;
   equityUsd: number;
@@ -53,3 +53,36 @@ export type AccountLive = {
   error: string | null;
   ts: number;
 };
+
+/** One standardized market row from the bulk catalog (phase 4). `null`
+ * means the exchange has no public source for that field (e.g. AsterDEX
+ * max leverage — there is no public endpoint for it — or an AsterDEX
+ * funding interval that could not be confirmed, which also leaves the
+ * 1h rate and the APR null). Bid/ask come only from a real order book;
+ * a `null` here only means the per-symbol fill failed for that row. */
+export type MarketInfo = {
+  exchangeId: string;
+  symbol: string;
+  baseSymbol: string;
+  settlementCurrency: string;
+  maxLeverage: number | null;
+  tickSize: number | null;
+  stepSize: number | null;
+  minNotional: number | null;
+  bidPx: number | null;
+  askPx: number | null;
+  midPx: number | null;
+  markPx: number | null;
+  indexPx: number | null;
+  fundingRateRaw: number | null;
+  fundingIntervalHours: number | null;
+  funding1h: number | null;
+  fundingApr: number | null;
+  nextFundingTime: number | null;
+  volume24hUsd: number | null;
+  openInterestUsd: number | null;
+  updatedAt: number;
+};
+
+/** Result of a manual catalog refresh: cached rows + refresh timestamp. */
+export type CatalogRefresh = { count: number; updatedAt: number };

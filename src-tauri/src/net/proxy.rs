@@ -8,7 +8,7 @@
 //!    (`HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings`).
 //!
 //! reqwest's own default only reads env vars, so the file/registry sources
-//! are applied explicitly (REST in `new_http_client_with_timeout`, WS in
+//! are applied explicitly (REST in the shared HTTP client, WS in
 //! `ws::connect_ws`). Only plain `http://` proxies are supported — that is
 //! what Clash Verge exposes locally.
 

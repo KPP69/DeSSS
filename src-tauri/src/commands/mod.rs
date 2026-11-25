@@ -73,7 +73,7 @@ pub fn spawn_bus_forwarder(handle: AppHandle, state: Arc<AppState>) {
 
 /// Latest in-memory books + account states + recent logs, for the
 /// frontend to show numbers immediately after a refresh instead of
-/// waiting for the next WS frame / REST poll.
+/// waiting for the next REST poll.
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeSnapshot {
@@ -198,10 +198,23 @@ async fn connect_account_inner(
         return Err("该账户已被移除".to_string());
     }
     let a = adapter.clone();
-    tauri::async_runtime::spawn(async move {
-        use crate::adapters::ExchangeAdapter;
+    let handle = tokio::spawn(async move {
         a.run().await;
     });
+    state.sync.register_task(id.clone(), handle);
+    // The account may have been deleted between the DB re-check and the
+    // spawn: if it is gone now, abort the just-spawned task at once
+    // instead of leaving an orphaned poll loop (and its credentials)
+    // behind. A delete landing after this check aborts the task via the
+    // registered handle in stop_account_sync instead.
+    if state.db.get_account(&id)?.is_none() {
+        state.sync.abort_task(&id);
+        if let Some(adapter) = state.sync.remove(&id) {
+            let _ = adapter.disconnect().await;
+        }
+        state.sync.remove_live(&id);
+        return Err("该账户已被移除".to_string());
+    }
     // Return the latest live snapshot (connecting), if any was published.
     Ok(state
         .sync
@@ -224,13 +237,15 @@ async fn connect_account_inner(
 }
 
 /// Stop whatever is running for an account and drop its cached live
-/// state: the adapter's run loop (REST poll + WS reconnect ladder) is
-/// aborted and the live snapshot is removed. Used by both disconnect and
+/// state: abort the run task first (so no task keeps the adapter — and
+/// the credentials it holds — alive past this call), then disconnect the
+/// adapter and remove the live snapshot. Used by both disconnect and
 /// delete — delete must stop the sync before the DB row and vault
 /// credential disappear, or the adapter would keep syncing a deleted
 /// account. A disconnect failure is a warning, never a reason to block
 /// the delete.
 async fn stop_account_sync(state: &Arc<AppState>, id: &str) {
+    state.sync.abort_task(id);
     if let Some(adapter) = state.sync.remove(id) {
         if let Err(e) = adapter.disconnect().await {
             state
@@ -304,4 +319,50 @@ pub async fn delete_account(state: State<'_, Arc<AppState>>, id: String) -> Resu
 #[tauri::command]
 pub fn get_vault_status(state: State<'_, Arc<AppState>>) -> Result<Option<String>, String> {
     Ok(state.vault.init_error().map(|e| e.to_string()))
+}
+
+/// Search the market catalog by base symbol (exact or prefix) or native
+/// symbol (substring, case insensitive), restricted to the checked
+/// exchanges. A search fetches a checked exchange's bulk endpoint only
+/// when its cache is older than 30s; otherwise the cache is served. An
+/// empty query returns nothing — the Data page never dumps the whole
+/// market over IPC. Public data needs no account and never touches
+/// account credentials. Matched rows then get a short-cycle (2s) live
+/// refresh of mark price + funding, and are enriched with the true
+/// per-symbol BBO (and AsterDEX open interest), which the bulk endpoints
+/// cannot provide.
+#[tauri::command]
+pub async fn search_market_info(
+    state: State<'_, Arc<AppState>>,
+    query: String,
+    exchange_ids: Vec<String>,
+) -> Result<Vec<crate::adapters::market_catalog::MarketInfo>, String> {
+    state.catalog.refresh_exchanges(&exchange_ids, false).await;
+    let mut rows = state.catalog.search(&query, &exchange_ids);
+    state.catalog.refresh_live_rows(&mut rows).await;
+    Ok(state.catalog.enrich_rows(rows).await)
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogRefresh {
+    pub count: usize,
+    pub updated_at: i64,
+}
+
+/// Manually refresh the checked exchanges (ignoring the 30s cache) and
+/// return the cached row count plus the last *successful* refresh
+/// timestamp (unix ms) for the Data page's "缓存更新于" display — a cycle
+/// where every exchange failed leaves the timestamp untouched. Async
+/// commands with a `State` input must return a `Result` (Tauri requirement).
+#[tauri::command]
+pub async fn refresh_market_catalog(
+    state: State<'_, Arc<AppState>>,
+    exchange_ids: Vec<String>,
+) -> Result<CatalogRefresh, String> {
+    state.catalog.refresh_exchanges(&exchange_ids, true).await;
+    Ok(CatalogRefresh {
+        count: state.catalog.len(),
+        updated_at: state.catalog.last_success_at().unwrap_or(0),
+    })
 }

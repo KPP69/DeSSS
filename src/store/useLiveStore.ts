@@ -50,11 +50,9 @@ export const useLiveStore = create<S>((set, get) => {
 });
 
 /** Latency light: green < 200ms, yellow < 1000ms, red otherwise/offline.
- * "rest-only" (WS down, REST ok) is yellow: the numbers are real, the
- * live book is not. */
+ * Status comes from REST health only (no WS on an account anymore). */
 export function latencyTone(latencyMs: number | null, status: string): "online" | "warn" | "danger" | "offline" {
-  if (status === "rest-only") return "warn";
-  if (status !== "connected") return status === "connecting" || status === "reconnecting" ? "warn" : "offline";
+  if (status !== "connected") return status === "connecting" ? "warn" : "offline";
   if (latencyMs === null) return "warn";
   if (latencyMs < 200) return "online";
   if (latencyMs < 1000) return "warn";

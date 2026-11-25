@@ -3,6 +3,7 @@ pub mod asterdex;
 pub mod book;
 pub mod hyperliquid;
 pub mod lighter;
+pub mod market_catalog;
 pub mod sync;
 pub mod types;
 use self::types::*;
@@ -16,16 +17,14 @@ pub enum AdapterError {
     Other(String),
 }
 
-/// Account live status from the two independent health signals, so a dead
-/// market WS never hides a healthy REST account read:
-/// - WS up → "connected" (latency from the WS ping/pong RTT)
-/// - WS down but REST ok → "rest-only" (equity/positions still real)
-/// - both down → "error" when the last failure is known, else "connecting"
-pub fn live_status(ws_up: bool, rest_ok: bool, has_error: bool) -> &'static str {
-    if ws_up {
+/// Account live status from REST health only (there is no market WS on
+/// an account anymore — account sync is REST polling, and public market
+/// data comes from the on-demand catalog):
+/// - REST ok → "connected" (latency from the last REST round-trip)
+/// - REST down → "error" when the last failure is known, else "connecting"
+pub fn live_status(rest_ok: bool, has_error: bool) -> &'static str {
+    if rest_ok {
         "connected"
-    } else if rest_ok {
-        "rest-only"
     } else if has_error {
         "error"
     } else {
@@ -52,12 +51,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn live_status_prefers_ws_then_rest() {
-        assert_eq!(live_status(true, true, false), "connected");
-        assert_eq!(live_status(true, false, true), "connected");
-        assert_eq!(live_status(false, true, true), "rest-only");
-        assert_eq!(live_status(false, false, true), "error");
-        assert_eq!(live_status(false, false, false), "connecting");
+    fn live_status_from_rest_only() {
+        assert_eq!(live_status(true, false), "connected");
+        assert_eq!(live_status(true, true), "connected");
+        assert_eq!(live_status(false, true), "error");
+        assert_eq!(live_status(false, false), "connecting");
     }
 }
 /// Unified exchange contract, implemented by the real read-only adapters

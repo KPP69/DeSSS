@@ -1,6 +1,6 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import AccountModal from "../components/AccountModal";
-import { Badge, Button, ConfirmDialog, DataTable, tdClsCompact, trCls } from "../components/ui";
+import { Badge, Button, ConfirmDialog, DataTable, StatCard, tdClsCompact, trCls } from "../components/ui";
 import { getExchange } from "../lib/exchanges";
 import { api } from "../lib/tauri";
 import { useAccountStore } from "../store/useAccountStore";
@@ -18,8 +18,6 @@ const SYNCABLE = new Set(["hyperliquid", "entropy", "lighter", "lighter_robinhoo
 const STATUS_LABEL: Record<string, string> = {
   connecting: "连接中",
   connected: "已连接",
-  "rest-only": "仅 REST（WS 断线）",
-  reconnecting: "重连中",
   error: "连接异常",
   disconnected: "已断开",
 };
@@ -41,6 +39,34 @@ export default function AccountPage() {
   const closeModal = useAccountUiStore((s) => s.close);
   const [pendingDelete, setPendingDelete] = useState<AccountView | null>(null);
   const connectTried = useRef<Set<string>>(new Set());
+
+  // Top overview: sum live equity / available / PnL across accounts.
+  // Hyperliquid and Entropy share one master-wallet pool (the backend
+  // aggregates perp + io + spot into the same snapshot for both), so
+  // accounts of those two exchanges with the same masked wallet address
+  // count once — never double. Every other exchange counts per account.
+  const summary = useMemo(() => {
+    const seen = new Set<string>();
+    let equity = 0;
+    let available = 0;
+    let pnl = 0;
+    let count = 0;
+    for (const a of accounts) {
+      const lv = live[a.id];
+      if (!lv) continue;
+      const key =
+        a.exchangeId === "hyperliquid" || a.exchangeId === "entropy"
+          ? `wallet:${a.maskedIdentifier}`
+          : `account:${a.id}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      equity += lv.equityUsd;
+      available += lv.availableUsd;
+      pnl += lv.pnlUsd;
+      count++;
+    }
+    return { equity, available, pnl, count };
+  }, [accounts, live]);
 
   useEffect(() => {
     fetchAll();
@@ -72,6 +98,27 @@ export default function AccountPage() {
 
   return (
     <div>
+      <div className="grid grid-cols-3 gap-3 mb-4">
+        <StatCard
+          title="总权益"
+          value={`$${fmt(summary.equity)}`}
+          sub={`已连接 ${summary.count} 个账户（按主钱包去重）`}
+          compact
+        />
+        <StatCard
+          title="可用权益"
+          value={`$${fmt(summary.available)}`}
+          sub="各所可用保证金合计"
+          compact
+        />
+        <StatCard
+          title="总盈亏"
+          value={`${summary.pnl > 0 ? "+" : ""}$${fmt(summary.pnl)}`}
+          tone={summary.pnl > 0 ? "profit" : summary.pnl < 0 ? "loss" : "default"}
+          sub="未实现盈亏合计"
+          compact
+        />
+      </div>
       {/* Account columns, strictly locked by percentage (sum 100%):
           账户名 14% / 账户信息 22% / 交易所 14% / 权益 16% / 盈亏 12% /
           操作 22%. table-fixed + w-full keeps the ratios at any window
@@ -95,7 +142,7 @@ export default function AccountPage() {
                 {lv && (
                   <Badge tone={tone}>
                     {STATUS_LABEL[lv.status] ?? lv.status}
-                    {lv.latencyMs !== null && (lv.status === "connected" || lv.status === "rest-only")
+                    {lv.latencyMs !== null && lv.status === "connected"
                       ? ` · ${lv.latencyMs}ms`
                       : ""}
                   </Badge>

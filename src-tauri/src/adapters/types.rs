@@ -96,10 +96,10 @@ pub struct LivePosition {
 pub struct AccountLive {
     pub account_id: String,
     pub adapter_id: String,
-    /// "connecting" | "connected" | "reconnecting" | "error" | "disconnected"
+    /// "connecting" | "connected" | "error" | "disconnected"
     pub status: String,
-    /// Last measured single round-trip: WS ping -> pong RTT, else the REST
-    /// request time. Never frame staleness.
+    /// Last measured single round-trip: the last REST request time.
+    /// Never frame staleness.
     pub latency_ms: Option<u64>,
     pub equity_usd: f64,
     pub available_usd: f64,

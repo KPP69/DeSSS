@@ -27,6 +27,11 @@ use crate::data_engine::AccountRow;
 pub struct SyncManager {
     live: Arc<RwLock<HashMap<String, AccountLive>>>,
     running: Mutex<HashMap<String, Arc<dyn ExchangeAdapter>>>,
+    /// Join handles of the spawned run loops, one per connected account.
+    /// Aborting the handle is what makes delete/disconnect cleanup
+    /// synchronous: without it the run task would keep its adapter clone
+    /// (and the credentials inside it) alive until the next poll tick.
+    tasks: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
 }
 
 impl SyncManager {
@@ -34,6 +39,7 @@ impl SyncManager {
         Self {
             live: Arc::new(RwLock::new(HashMap::new())),
             running: Mutex::new(HashMap::new()),
+            tasks: Mutex::new(HashMap::new()),
         }
     }
 
@@ -68,6 +74,27 @@ impl SyncManager {
             .and_then(|mut m| m.remove(account_id))
     }
 
+    /// Register the spawned run loop for an account (called right after
+    /// the spawn, so a delete landing at any later point can abort it).
+    pub fn register_task(&self, account_id: String, handle: tokio::task::JoinHandle<()>) {
+        if let Ok(mut m) = self.tasks.lock() {
+            m.insert(account_id, handle);
+        }
+    }
+
+    /// Abort the run loop for an account, if one is registered, and drop
+    /// its handle: after this returns no task holds the adapter anymore.
+    pub fn abort_task(&self, account_id: &str) {
+        let handle = self
+            .tasks
+            .lock()
+            .ok()
+            .and_then(|mut m| m.remove(account_id));
+        if let Some(h) = handle {
+            h.abort();
+        }
+    }
+
     pub fn remove_live(&self, account_id: &str) {
         if let Ok(mut m) = self.live.write() {
             m.remove(account_id);
@@ -90,8 +117,8 @@ fn valid_address(credentials: &Value, key: &str, label: &str) -> Result<String, 
 
 /// Build a read-only adapter for one stored account. Returns an error
 /// when the needed public identifier is missing from the vault record.
-/// AsterDEX never errors on missing credentials: the adapter starts the
-/// public WS book anyway and logs the missing-key reason to the console.
+/// AsterDEX never errors on missing credentials: the adapter logs the
+/// missing-key reason to the console and skips polling.
 pub fn build_adapter(
     row: &AccountRow,
     credentials: &Value,

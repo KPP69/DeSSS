@@ -11,6 +11,7 @@ pub mod vault;
 
 use std::sync::Arc;
 
+use adapters::market_catalog::MarketCatalog;
 use adapters::sync::SyncManager;
 use bus::EventBus;
 use portable::PortablePaths;
@@ -21,6 +22,7 @@ pub struct AppState {
     pub db: data_engine::DataEngine,
     pub vault: Arc<vault::VaultHandle>,
     pub sync: Arc<SyncManager>,
+    pub catalog: Arc<MarketCatalog>,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -43,12 +45,14 @@ pub fn run() {
     // the forwarder, never kill it (see spawn_bus_forwarder).
     let bus = EventBus::new(4096);
     let sync = Arc::new(SyncManager::new());
+    let catalog = Arc::new(MarketCatalog::new(bus.clone()));
     let state = Arc::new(AppState {
         paths,
         bus,
         db,
         vault,
         sync,
+        catalog,
     });
     let s2 = state.clone();
     tauri::Builder::default()
@@ -71,6 +75,9 @@ pub fn run() {
             .build()?;
             let handle = app.handle().clone();
             commands::spawn_bus_forwarder(handle, s2.clone());
+            // Market catalog: on-demand only — no background refresh loop.
+            // A search or manual refresh fetches the checked exchanges
+            // whose cache is older than 30s; otherwise nothing is fetched.
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -85,7 +92,9 @@ pub fn run() {
             commands::list_account_live,
             commands::get_runtime_snapshot,
             commands::get_proxy,
-            commands::set_proxy
+            commands::set_proxy,
+            commands::search_market_info,
+            commands::refresh_market_catalog
         ])
         .run(tauri::generate_context!())
         .expect("error while running DeSSS");
