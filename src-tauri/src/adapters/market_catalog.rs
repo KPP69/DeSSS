@@ -927,6 +927,41 @@ impl MarketCatalog {
             .unwrap_or(false)
     }
 
+    /// True when the exchange has cached catalog rows. The order path
+    /// uses this to detect a cold start: a user who never visited the
+    /// Data page has an empty catalog, and ordering must not fail with
+    /// "不在品种目录中" before even trying to load it.
+    pub fn has_rows_for(&self, exchange_id: &str) -> bool {
+        let data = self.data.read().unwrap_or_else(|e| e.into_inner());
+        data.values().any(|row| row.exchange_id == exchange_id)
+    }
+
+    /// The latest refresh failure for one exchange, if its most recent
+    /// attempt failed (a success clears it). Lets callers — and tests —
+    /// tell "a load was attempted but failed" apart from "never tried".
+    pub fn last_refresh_error(&self, exchange_id: &str) -> Option<String> {
+        self.last_errors
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(exchange_id)
+            .cloned()
+    }
+
+    /// Load this one exchange's catalog when it has no cached rows yet
+    /// (cold start). Other exchanges are never touched. Returns true
+    /// when rows are available afterwards — already loaded, or the fetch
+    /// just succeeded. False means the fetch failed; the caller then
+    /// reports the symbol as missing, with the failure already logged
+    /// to the console by the refresh itself.
+    pub async fn ensure_exchange_loaded(&self, exchange_id: &str) -> bool {
+        if self.has_rows_for(exchange_id) {
+            return true;
+        }
+        self.refresh_exchanges(&[exchange_id.to_string()], false)
+            .await;
+        self.has_rows_for(exchange_id)
+    }
+
     /// Log a refresh failure as a console warning, but only when the
     /// message changed since the last failure for this `key` — a
     /// persistently failing exchange must not spam the console on every
@@ -1937,5 +1972,51 @@ mod tests {
         assert!(catalog.enrich_sem.try_acquire().is_err());
         drop(permits.pop());
         assert!(catalog.enrich_sem.try_acquire().is_ok());
+    }
+
+    /// Cold-start detection (incident 2026-11-26: ordering without
+    /// visiting the Data page failed with "不在品种目录中" because the
+    /// catalog was empty): `has_rows_for` reports a cold exchange, and
+    /// `ensure_exchange_loaded` short-circuits without any fetch once
+    /// rows are present. This test uses injected rows, so it never
+    /// touches the network; the live-fetch half is covered by the
+    /// execution test `place_order_loads_cold_catalog_for_its_exchange`.
+    #[tokio::test]
+    async fn ensure_exchange_loaded_skips_loaded_exchange() {
+        let catalog = MarketCatalog::new(EventBus::new(16));
+        assert!(!catalog.has_rows_for("hyperliquid"));
+        catalog.store(
+            "hyperliquid",
+            vec![MarketInfo {
+                exchange_id: "hyperliquid".into(),
+                symbol: "BTC".into(),
+                base_symbol: "BTC".into(),
+                market_id: None,
+                settlement_currency: "USDC".into(),
+                max_leverage: Some(40.0),
+                tick_size: Some(1.0),
+                step_size: Some(0.00001),
+                min_notional: Some(10.0),
+                bid_px: None,
+                ask_px: None,
+                mid_px: None,
+                mark_px: Some(58033.0),
+                index_px: None,
+                funding_rate_raw: None,
+                funding_interval_hours: Some(1.0),
+                funding_1h: None,
+                funding_apr: None,
+                next_funding_time: None,
+                volume_24h_usd: None,
+                open_interest_usd: None,
+                updated_at: 0,
+            }],
+        );
+        assert!(catalog.has_rows_for("hyperliquid"));
+        assert!(catalog.ensure_exchange_loaded("hyperliquid").await);
+        assert!(catalog.last_refresh_error("hyperliquid").is_none());
+        // No other exchange was touched.
+        assert!(!catalog.has_rows_for("entropy"));
+        assert!(catalog.last_refresh_error("entropy").is_none());
     }
 }

@@ -210,24 +210,44 @@ pub async fn place_order(deps: &ExecDeps, intent: PlaceIntent) -> Result<OrderIn
         .ok_or_else(|| "账户未连接，请先在账户中心连接".to_string())?;
     let exchange_id = adapter.id().to_string();
 
+    // Normalize the symbol first: the Trading page accepts any case
+    // ("btc", "BTC"), the catalog stores the canonical form ("BTC"),
+    // and every comparison below is exact, so lowercase input would
+    // otherwise miss the row even when the catalog is loaded.
+    let symbol = intent.symbol.trim().to_uppercase();
+
+    // Cold start: the user may order without ever visiting the Data
+    // page, so this exchange's catalog can be empty. Load just this
+    // one exchange (never the others) before looking the symbol up.
+    // If the load fails, the lookup below reports the symbol as
+    // missing, with the fetch failure already in the console log.
+    if !deps.catalog.has_rows_for(&exchange_id) {
+        log(
+            deps,
+            "info",
+            format!("{exchange_id} 的品种目录尚未加载，正在按需拉取…"),
+        );
+        deps.catalog.ensure_exchange_loaded(&exchange_id).await;
+    }
+
     // Tick / step from the catalog (exact symbol match). The order
     // cannot be aligned without them.
     let row = deps
         .catalog
-        .search(&intent.symbol, &[exchange_id.clone()])
+        .search(&symbol, &[exchange_id.clone()])
         .into_iter()
-        .find(|r| r.symbol == intent.symbol)
-        .ok_or_else(|| format!("{} 不在 {} 的品种目录中", intent.symbol, exchange_id))?;
+        .find(|r| r.symbol == symbol)
+        .ok_or_else(|| format!("{symbol} 不在 {exchange_id} 的品种目录中"))?;
     let tick = row
         .tick_size
         .map(to_decimal)
         .filter(|t| *t > Decimal::ZERO)
-        .ok_or_else(|| format!("{} 没有可用的 tick 数据，无法对齐价格", intent.symbol))?;
+        .ok_or_else(|| format!("{symbol} 没有可用的 tick 数据，无法对齐价格"))?;
     let step = row
         .step_size
         .map(to_decimal)
         .filter(|s| *s > Decimal::ZERO)
-        .ok_or_else(|| format!("{} 没有可用的 step 数据，无法对齐数量", intent.symbol))?;
+        .ok_or_else(|| format!("{symbol} 没有可用的 step 数据，无法对齐数量"))?;
     let min_notional = row.min_notional.map(to_decimal);
 
     // `to_decimal` maps NaN / infinity to zero, so the > 0 check
@@ -255,7 +275,7 @@ pub async fn place_order(deps: &ExecDeps, intent: PlaceIntent) -> Result<OrderIn
             "info",
             format!(
                 "{} {} 下单价格/数量已按步长对齐：价格 {} → {}，数量 {} → {}",
-                intent.symbol, intent.side, price_dec, aligned_price, qty_dec, aligned_qty
+                symbol, intent.side, price_dec, aligned_price, qty_dec, aligned_qty
             ),
         );
     }
@@ -266,7 +286,7 @@ pub async fn place_order(deps: &ExecDeps, intent: PlaceIntent) -> Result<OrderIn
         client_order_id: cloid.clone(),
         exchange_id: exchange_id.clone(),
         account_id: intent.account_id.clone(),
-        symbol: intent.symbol.clone(),
+        symbol: symbol.clone(),
         side: intent.side.clone(),
         order_type: intent.order_type.clone(),
         status: OrderStatus::Pending,
@@ -285,7 +305,7 @@ pub async fn place_order(deps: &ExecDeps, intent: PlaceIntent) -> Result<OrderIn
     // anything; the Trading page also subscribes on selection, so
     // by the time the user clicks, the book is usually live.
     deps.streams
-        .ensure_wanted((exchange_id.clone(), intent.symbol.clone()));
+        .ensure_wanted((exchange_id.clone(), symbol.clone()));
 
     // Fresh equity sample for the drawdown check (the 10s sampler
     // covers the steady state; the order attempt samples now).
@@ -312,7 +332,7 @@ pub async fn place_order(deps: &ExecDeps, intent: PlaceIntent) -> Result<OrderIn
         account_connected: connected,
         book_stale: deps
             .streams
-            .is_stale(&(exchange_id.clone(), intent.symbol.clone())),
+            .is_stale(&(exchange_id.clone(), symbol.clone())),
         side: intent.side.clone(),
         notional_usd: aligned_price * aligned_qty,
         current_position_notional_usd: current_position_notional,
@@ -334,7 +354,7 @@ pub async fn place_order(deps: &ExecDeps, intent: PlaceIntent) -> Result<OrderIn
 
     if let Some(dup) = deps.orders.has_unresolved_duplicate(
         &intent.account_id,
-        &intent.symbol,
+        &symbol,
         &intent.side,
         aligned_qty.to_f64().unwrap_or(0.0),
         aligned_price.to_f64().unwrap_or(0.0),
@@ -347,7 +367,7 @@ pub async fn place_order(deps: &ExecDeps, intent: PlaceIntent) -> Result<OrderIn
     let req = OrderRequest {
         exchange_id: exchange_id.clone(),
         account_id: intent.account_id.clone(),
-        symbol: intent.symbol.clone(),
+        symbol: symbol.clone(),
         side: intent.side.clone(),
         order_type: intent.order_type.clone(),
         quantity: aligned_qty.to_f64().unwrap_or(0.0),
@@ -714,5 +734,83 @@ mod tests {
         let open = store.list_open();
         assert_eq!(open.len(), 2);
         assert!(open.iter().all(|o| !o.status.is_terminal()));
+    }
+
+    /// Cold-start order (incident 2026-11-26): the user opened the app
+    /// and ordered BTC on Hyperliquid without ever visiting the Data
+    /// page, so the catalog was empty and `place_order` failed with
+    /// "BTC 不在 hyperliquid 的品种目录中". The order path must now
+    /// load just that one exchange's catalog on demand first.
+    ///
+    /// The test does one real Hyperliquid `meta` fetch (the scratch
+    /// crate has network; CI never runs `cargo test`). The intent uses
+    /// lowercase "btc" on purpose: the engine must normalize the symbol
+    /// before matching, or the row is missed even when loaded. The order
+    /// itself is expected to fail later in the pipeline — there is no
+    /// live account state here, so the risk gateway rejects it — but
+    /// never with the catalog-missing error.
+    #[tokio::test]
+    async fn place_order_loads_cold_catalog_for_its_exchange() {
+        use crate::adapters::hyperliquid::HyperliquidAdapter;
+        use crate::adapters::market_catalog::MarketCatalog;
+        use crate::adapters::sync::SyncManager;
+        use crate::bus::EventBus;
+        use crate::data_engine::realtime::RealtimeEngine;
+        use crate::risk::{RiskConfig, RiskGateway};
+
+        let bus = EventBus::new(16);
+        let catalog = Arc::new(MarketCatalog::new(bus.clone()));
+        let sync = Arc::new(SyncManager::new());
+        let adapter = Arc::new(HyperliquidAdapter::new(
+            "hyperliquid",
+            None,
+            "0x0000000000000000000000000000000000000000".to_string(),
+            "acc-1".to_string(),
+            bus.clone(),
+            sync.live_map(),
+            sync.reconcile_state(),
+            None,
+        ));
+        sync.insert("acc-1".to_string(), adapter);
+        let deps = ExecDeps {
+            risk: Arc::new(RiskGateway::new(RiskConfig::default())),
+            orders: Arc::new(OrderStore::new()),
+            sync: sync.clone(),
+            streams: Arc::new(RealtimeEngine::new(bus.clone(), catalog.clone(), None)),
+            catalog: catalog.clone(),
+            bus: bus.clone(),
+        };
+        assert!(!catalog.has_rows_for("hyperliquid"));
+        let err = place_order(
+            &deps,
+            PlaceIntent {
+                account_id: "acc-1".to_string(),
+                symbol: "btc".to_string(),
+                side: "buy".to_string(),
+                order_type: "limit".to_string(),
+                quantity: 0.01,
+                price: 90000.0,
+            },
+        )
+        .await
+        .unwrap_err();
+        // The cold catalog must have triggered a load attempt for
+        // exactly this exchange: either the rows arrived, or the
+        // failure was recorded. Other exchanges are never touched.
+        assert!(
+            catalog.has_rows_for("hyperliquid")
+                || catalog.last_refresh_error("hyperliquid").is_some(),
+            "cold catalog must trigger a load attempt for hyperliquid"
+        );
+        assert!(!catalog.has_rows_for("entropy"));
+        assert!(catalog.last_refresh_error("entropy").is_none());
+        if catalog.has_rows_for("hyperliquid") {
+            // The catalog stage passed; the stored record carries the
+            // normalized symbol even though the intent was lowercase.
+            assert!(!err.contains("品种目录"), "{err}");
+            let records = deps.orders.list();
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].symbol, "BTC");
+        }
     }
 }
