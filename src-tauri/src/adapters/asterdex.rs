@@ -3,10 +3,15 @@
 //! Official endpoints (asterdex/api-docs, V3 recommended):
 //! - Market data: none. The adapter opens no WS connection at all —
 //!   public market data comes from the on-demand catalog.
-//! - Account, API Key / Secret mode (V1 HMAC): `GET /fapi/v2/account` +
-//!   `/fapi/v2/positionRisk`, signed with pure-Rust HMAC-SHA256 over the
-//!   query string (`X-MBX-APIKEY` header, `timestamp` + `recvWindow=5000`,
-//!   `signature` appended last).
+//! - Account, API Key / Secret mode (V1 HMAC): RETIRED. `GET
+//!   /fapi/v2/account` + `/fapi/v2/positionRisk` (HMAC-SHA256 over the
+//!   query string, `X-MBX-APIKEY` header) were retired with all V1
+//!   endpoints on 2026-10-10, and the V3 spec has no HMAC / API-key
+//!   auth at all — USER_DATA requires an EIP-712 signer + signature.
+//!   API-key accounts therefore have no working read path until they
+//!   are re-saved as Agent-wallet accounts; `fetch_account_state_v1`
+//!   and `signed_get` are kept (dead) for the PR-1.4 deletion and the
+//!   dispatch returns a migration error instead of calling them.
 //! - Account, Agent-wallet mode (V3 EIP-712): `GET /fapi/v3/account` +
 //!   `/fapi/v3/positionRisk`, signed by EIP-712 over the URL-encoded
 //!   parameter string (`user` = master wallet, `signer` = agent address,
@@ -468,6 +473,11 @@ impl AsterdexAdapter {
     }
 
     /// One REST read of the account + positions (V1 HMAC path).
+    ///
+    /// Retired with the V1 API on 2026-10-10; the V3 spec has no HMAC
+    /// auth, so nothing calls this anymore. Kept for the PR-1.4
+    /// deletion; do not call it.
+    #[allow(dead_code)]
     async fn fetch_account_state_v1(&self) -> Result<(Snapshot, Balance), String> {
         let v = self.signed_get("/fapi/v2/account", "").await?;
         let (equity, available, pnl, currency) = parse_account(&v)?;
@@ -527,11 +537,20 @@ impl AsterdexAdapter {
     }
 
     /// One REST read of the account + positions. Returns (snapshot, balance).
+    ///
+    /// V3 (EIP-712) is the only live path. API Key / Secret accounts
+    /// have no V3 equivalent — the V3 spec authenticates USER_DATA by
+    /// signer + signature only — so they fail here with a migration
+    /// message instead of calling the retired V1 endpoints.
     async fn fetch_account_state(&self) -> Result<(Snapshot, Balance), String> {
         if self.agent.is_some() {
             self.fetch_account_state_v3().await
         } else {
-            self.fetch_account_state_v1().await
+            Err(
+                "AsterDEX V1 接口已于 2026-10-10 停用，API Key/Secret 账户无法读取账户数据；\
+                请在账户页重新保存为 Agent 钱包凭证（主钱包地址 + Agent 私钥）"
+                    .to_string(),
+            )
         }
     }
 
@@ -546,21 +565,27 @@ impl AsterdexAdapter {
         match self.fetch_account_state().await {
             Ok((snap, balance)) => {
                 *self.snapshot.lock().unwrap() = snap;
+                *self.last_error.lock().unwrap() = None;
                 self.bus.publish(AppEvent::Balance(balance));
                 self.set_rest(true, Some(started.elapsed()));
             }
             Err(e) => {
+                // The failure is also stored on the live state so the
+                // account row shows the reason (e.g. the V1 migration
+                // message), not just the console log.
+                *self.last_error.lock().unwrap() = Some(e.clone());
                 self.log("error", format!("账户轮询失败：{e}"));
                 self.set_rest(false, None);
             }
         }
     }
 
-    /// REST 轮询循环：Agent 钱包（V3）与 API Key（V1）都轮询；两种凭
-    /// 证都没有时记原因后退出。
+    /// REST 轮询循环：Agent 钱包（V3）轮询；API Key 账户（V1 已停用）
+    /// 会在每次轮询里拿到迁移提示；两种凭证都没有时记原因后退出。
     async fn rest_loop(&self) {
-        // Agent-wallet mode (V3) and API Key mode (V1) both poll; with
-        // neither credential the reason is logged once and the loop exits.
+        // Agent-wallet mode (V3) polls; API-key-only accounts reach the
+        // poll and fail with the V1-migration message; with neither
+        // credential the reason is logged once and the loop exits.
         if self.agent.is_none() && (self.api_key.is_none() || self.api_secret.is_none()) {
             self.log(
                 "warn",
@@ -812,9 +837,9 @@ mod tests {
             ],
             "positions": [
                 {"symbol": "BTCUSDT", "positionAmt": "0.5", "entryPrice": "60000.0",
-                 "markPrice": "61000.0", "unrealizedProfit": "500.0", "positionSide": "LONG"},
+                 "unrealizedProfit": "500.0", "positionSide": "LONG"},
                 {"symbol": "ETHUSDT", "positionAmt": "-2.0", "entryPrice": "3000.0",
-                 "markPrice": "2900.0", "unrealizedProfit": "200.0", "positionSide": "BOTH"}
+                 "unrealizedProfit": "200.0", "positionSide": "BOTH"}
             ]
         });
         let (equity, available, pnl, currency) = parse_account_v3(&v).expect("parse");
@@ -828,6 +853,98 @@ mod tests {
         assert!((pos[0].unrealized_pnl - 500.0).abs() < 1e-9);
         assert_eq!(pos[1].side, "short");
         assert!((pos[1].unrealized_pnl - 200.0).abs() < 1e-9);
+        // The V3 account `positions[]` carries no `markPrice` (the doc
+        // example has none); mark prices come from `positionRisk`.
+        assert_eq!(pos[0].mark_price, 0.0);
+        assert_eq!(pos[1].mark_price, 0.0);
+    }
+
+    /// The official V3 doc example for `GET /fapi/v3/account`, verbatim
+    /// numbers: the totals are USDT-only, so the per-asset rows win;
+    /// BUSD has the larger margin balance, so it is the settlement
+    /// currency; the single `positions[]` entry has `positionAmt` 0
+    /// and is skipped.
+    #[test]
+    fn v3_account_parse_matches_the_official_doc_example() {
+        let v = serde_json::json!({
+            "feeTier": 0,
+            "canTrade": true,
+            "canDeposit": true,
+            "canWithdraw": true,
+            "updateTime": 0,
+            "totalInitialMargin": "0.00000000",
+            "totalMaintMargin": "0.00000000",
+            "totalWalletBalance": "23.72469206",
+            "totalUnrealizedProfit": "0.00000000",
+            "totalMarginBalance": "23.72469206",
+            "totalPositionInitialMargin": "0.00000000",
+            "totalOpenOrderInitialMargin": "0.00000000",
+            "totalCrossWalletBalance": "23.72469206",
+            "totalCrossUnPnl": "0.00000000",
+            "availableBalance": "23.72469206",
+            "maxWithdrawAmount": "23.72469206",
+            "assets": [
+                {"asset": "USDT", "walletBalance": "23.72469206",
+                 "unrealizedProfit": "0.00000000", "marginBalance": "23.72469206",
+                 "maintMargin": "0.00000000", "initialMargin": "0.00000000",
+                 "positionInitialMargin": "0.00000000",
+                 "openOrderInitialMargin": "0.00000000",
+                 "crossWalletBalance": "23.72469206", "crossUnPnl": "0.00000000",
+                 "availableBalance": "23.72469206",
+                 "maxWithdrawAmount": "23.72469206", "marginAvailable": true,
+                 "updateTime": 1625474304765i64},
+                {"asset": "BUSD", "walletBalance": "103.12345678",
+                 "unrealizedProfit": "0.00000000", "marginBalance": "103.12345678",
+                 "maintMargin": "0.00000000", "initialMargin": "0.00000000",
+                 "positionInitialMargin": "0.00000000",
+                 "openOrderInitialMargin": "0.00000000",
+                 "crossWalletBalance": "103.12345678", "crossUnPnl": "0.00000000",
+                 "availableBalance": "103.12345678",
+                 "maxWithdrawAmount": "103.12345678", "marginAvailable": true,
+                 "updateTime": 1625474304765i64}
+            ],
+            "positions": [
+                {"symbol": "BTCUSDT", "initialMargin": "0", "maintMargin": "0",
+                 "unrealizedProfit": "0.00000000", "positionInitialMargin": "0",
+                 "openOrderInitialMargin": "0", "leverage": "100", "isolated": true,
+                 "entryPrice": "0.00000", "maxNotional": "250000",
+                 "positionSide": "BOTH", "positionAmt": "0", "notional": "0",
+                 "isolatedWallet": "0", "updateTime": 0}
+            ]
+        });
+        let (equity, available, pnl, currency) = parse_account_v3(&v).expect("parse");
+        assert!((equity - 126.84814884).abs() < 1e-9);
+        assert!((available - 126.84814884).abs() < 1e-9);
+        assert!((pnl - 0.0).abs() < 1e-9);
+        assert_eq!(currency, "BUSD");
+        assert!(parse_positions(&v["positions"]).is_empty());
+    }
+
+    /// PR-0.5: an API Key / Secret account has no V3 read path — the
+    /// V3 spec authenticates USER_DATA by EIP-712 signer + signature
+    /// only — so the dispatch fails fast with the migration message
+    /// instead of calling the retired V1 endpoints. No network is
+    /// touched: the error is returned before any request is built.
+    #[tokio::test]
+    async fn api_key_account_fetch_fails_with_migration_error() {
+        let adapter = AsterdexAdapter::new(
+            "asterdex",
+            "acc-1".to_string(),
+            Some("key".to_string()),
+            Some("secret".to_string()),
+            EventBus::new(16),
+            Arc::new(RwLock::new(HashMap::new())),
+            Arc::new(ReconcileState::new()),
+        );
+        let err = match adapter.fetch_account_state().await {
+            Ok(_) => panic!("API-key fetch must fail"),
+            Err(e) => e,
+        };
+        assert!(err.contains("V1"), "error names V1: {err}");
+        assert!(
+            err.contains("Agent"),
+            "error points at Agent wallets: {err}"
+        );
     }
 
     #[test]

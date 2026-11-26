@@ -33,10 +33,11 @@
 //!   fails or a symbol is missing from it, the interval is **unknown**:
 //!   `funding_interval_hours`, `funding_1h` and `funding_apr` all stay
 //!   `None` (the frontend shows "—") — no 8h default, no invented APR.
-//!   24h volume comes from `ticker/24hr` (`quoteVolume`); open interest
-//!   is filled per search hit via `openInterest?symbol=..` (base units x
-//!   mark price). `max_leverage` has **no public source** (exchangeInfo
-//!   carries no leverage field; `maintMarginPercent` 2.5% /
+//!   24h volume comes from `ticker/24hr` (`quoteVolume`). Open interest
+//!   is always `None`: the V3 spec has **no openInterest endpoint** (the
+//!   string does not appear in it at all), so nothing is fetched and
+//!   nothing is faked — the frontend shows "—". `max_leverage` has **no
+//!   public source** (exchangeInfo carries no leverage field; `maintMarginPercent` 2.5% /
 //!   `requiredMarginPercent` 5% are margin ratios, not max leverage —
 //!   Binance lists identical values for BTCUSDT whose max is 125x), so
 //!   it stays null. The catalog holds no account credentials at all:
@@ -50,7 +51,8 @@
 //! - Liquidity: Hyperliquid `dayNtlVlm` + `openInterest * markPx`,
 //!   Lighter `daily_quote_token_volume` + `open_interest_usd` (direct),
 //!   Arcus `volume24hNotional` + `openInterest * markPrice`,
-//!   AsterDEX `ticker/24hr quoteVolume` + per-symbol `openInterest * markPx`.
+//!   AsterDEX `ticker/24hr quoteVolume` + open interest always `None`
+//!   (no V3 openInterest endpoint exists).
 //! - Search matches `base_symbol` exactly or by prefix, or the native
 //!   `symbol` by substring (case insensitive) — e.g. "BT" finds BTC but a
 //!   mid-string fragment of a base name alone does not.
@@ -584,8 +586,8 @@ fn parse_asterdex(
             funding_1h,
             funding_apr: funding_1h.map(funding_apr_pct),
             next_funding_time: next_funding,
-            // 24h volume from ticker/24hr (quoteVolume, USDT); open
-            // interest is filled per search hit (openInterest is per-symbol).
+            // 24h volume from ticker/24hr (quoteVolume, USDT). V3 has
+            // no openInterest endpoint, so open interest stays None.
             volume_24h_usd: volumes.get(symbol).copied(),
             open_interest_usd: None,
             updated_at: now_ms,
@@ -731,6 +733,10 @@ fn parse_arcus_bbo(v: &serde_json::Value) -> (Option<f64>, Option<f64>) {
 
 /// AsterDEX open interest in USD: `openInterest` is base units, valued
 /// at the mark price (same conversion as the bulk parsers).
+///
+/// V1 path, retired with the V1 API on 2026-10-10: the V3 spec has no
+/// openInterest endpoint at all, so nothing calls this anymore. Kept
+/// (with its test) for the PR-1.4 deletion; do not call it.
 fn parse_asterdex_open_interest(v: &serde_json::Value, mark_px: Option<f64>) -> Option<f64> {
     match (num_field(v, "openInterest"), mark_px) {
         (Some(oi), Some(px)) => Some(oi * px),
@@ -773,6 +779,12 @@ async fn fetch_arcus_bbo(
     Ok(parse_arcus_bbo(&v))
 }
 
+/// V1 per-symbol open-interest fetch (`/fapi/v1/openInterest`).
+///
+/// Retired with the V1 API on 2026-10-10; the V3 spec has no
+/// openInterest endpoint, so nothing calls this anymore. Kept for the
+/// PR-1.4 deletion; do not call it.
+#[allow(dead_code)]
 async fn fetch_asterdex_open_interest(
     http: &reqwest::Client,
     symbol: &str,
@@ -1164,7 +1176,7 @@ impl MarketCatalog {
         if specs_stale {
             match get_json(
                 &self.http,
-                &format!("{ASTER_REST_URL}/fapi/v1/exchangeInfo"),
+                &format!("{ASTER_REST_URL}/fapi/v3/exchangeInfo"),
             )
             .await
             {
@@ -1192,10 +1204,10 @@ impl MarketCatalog {
             let slot = self.aster_specs.read().unwrap_or_else(|e| e.into_inner());
             slot.clone()
         };
-        let premium_url = format!("{ASTER_REST_URL}/fapi/v1/premiumIndex");
-        let book_url = format!("{ASTER_REST_URL}/fapi/v1/ticker/bookTicker");
-        let funding_info_url = format!("{ASTER_REST_URL}/fapi/v1/fundingInfo");
-        let ticker_url = format!("{ASTER_REST_URL}/fapi/v1/ticker/24hr");
+        let premium_url = format!("{ASTER_REST_URL}/fapi/v3/premiumIndex");
+        let book_url = format!("{ASTER_REST_URL}/fapi/v3/ticker/bookTicker");
+        let funding_info_url = format!("{ASTER_REST_URL}/fapi/v3/fundingInfo");
+        let ticker_url = format!("{ASTER_REST_URL}/fapi/v3/ticker/24hr");
         let (premium, book, funding_info, ticker24) = tokio::join!(
             get_json(&self.http, &premium_url),
             get_json(&self.http, &book_url),
@@ -1352,9 +1364,10 @@ impl MarketCatalog {
     /// Fill the per-symbol gaps the bulk endpoints cannot provide, for
     /// exactly the rows a search returned (never for the whole market):
     /// true BBO for Hyperliquid/Entropy (`l2Book`), Lighter/RH
-    /// (`orderBookOrders`) and Arcus (`/v1/bbo/{market}`); AsterDEX open
-    /// interest (`openInterest?symbol=..`, base units x mark price). The
-    /// fills run concurrently but capped at [`ENRICH_CONCURRENCY`]
+    /// (`orderBookOrders`) and Arcus (`/v1/bbo/{market}`). AsterDEX has
+    /// no per-symbol fill: its BBO already comes from the bulk
+    /// `bookTicker` call, and V3 has no openInterest endpoint, so its
+    /// open interest stays `None`. The fills run concurrently but
     /// simultaneous requests, so a wide search cannot trigger 429s. A
     /// failed fill leaves the row as it was (bulk values stay; a missing
     /// BBO stays `None`, never a proxy) and logs one deduped warning per
@@ -1453,23 +1466,6 @@ impl MarketCatalog {
                                 format!("Arcus 真实盘口补拉失败：{e}"),
                             ),
                         },
-                        "asterdex" => {
-                            if row.open_interest_usd.is_none() {
-                                match fetch_asterdex_open_interest(
-                                    &self.http,
-                                    &row.symbol,
-                                    row.mark_px,
-                                )
-                                .await
-                                {
-                                    Ok(oi) => row.open_interest_usd = oi,
-                                    Err(e) => self.log_refresh_error(
-                                        "oi-asterdex",
-                                        format!("AsterDEX 持仓量补拉失败：{e}"),
-                                    ),
-                                }
-                            }
-                        }
                         _ => {}
                     }
                 }
@@ -1779,6 +1775,353 @@ mod tests {
         // No volume row for ETH in this map -> null.
         assert_eq!(eth.max_leverage, None);
         assert_eq!(eth.volume_24h_usd, None);
+    }
+
+    /// PR-0.5: the V3 public responses parse exactly like the V1 ones.
+    /// Fixtures are verbatim excerpts (BTCUSDT + ETHUSDT) of the real
+    /// `/fapi/v3/*` responses fetched 2026-11-27 (no key). Full live
+    /// counts that day: exchangeInfo 647 symbols (586 TRADING
+    /// PERPETUAL), premiumIndex / fundingInfo 801, bookTicker 586,
+    /// ticker/24hr 641.
+    #[test]
+    fn parse_asterdex_v3_live_fixtures() {
+        let ei = json(
+            r#"{
+ "symbols": [
+  {
+   "symbol": "BTCUSDT",
+   "filters": [
+    {
+     "minPrice": "1",
+     "maxPrice": "1000000",
+     "filterType": "PRICE_FILTER",
+     "tickSize": "0.1"
+    },
+    {
+     "stepSize": "0.001",
+     "filterType": "LOT_SIZE",
+     "maxQty": "1000",
+     "minQty": "0.001"
+    },
+    {
+     "stepSize": "0.001",
+     "filterType": "MARKET_LOT_SIZE",
+     "maxQty": "120",
+     "minQty": "0.001"
+    },
+    {
+     "limit": 200,
+     "filterType": "MAX_NUM_ORDERS"
+    },
+    {
+     "limit": 10,
+     "filterType": "MAX_NUM_ALGO_ORDERS"
+    },
+    {
+     "notional": "5",
+     "filterType": "MIN_NOTIONAL"
+    },
+    {
+     "multiplierDown": "0.9800",
+     "multiplierUp": "1.0200",
+     "ltMultiplierDown": "0",
+     "multiplierDecimal": "4",
+     "filterType": "PERCENT_PRICE",
+     "ltMultiplierUp": "0"
+    }
+   ],
+   "orderTypes": [
+    "LIMIT",
+    "MARKET",
+    "STOP",
+    "STOP_MARKET",
+    "TAKE_PROFIT",
+    "TAKE_PROFIT_MARKET",
+    "TRAILING_STOP_MARKET"
+   ],
+   "timeInForce": [
+    "GTC",
+    "IOC",
+    "GTX",
+    "HIDDEN"
+   ],
+   "createTime": 1630045468108,
+   "pair": "BTCUSDT",
+   "contractType": "PERPETUAL",
+   "deliveryDate": 4133404800000,
+   "onboardDate": 1627628400000,
+   "status": "TRADING",
+   "maintMarginPercent": "2.5000",
+   "requiredMarginPercent": "5.0000",
+   "baseAsset": "BTC",
+   "quoteAsset": "USDT",
+   "marginAsset": "USDT",
+   "pricePrecision": 1,
+   "quantityPrecision": 3,
+   "baseAssetPrecision": 8,
+   "quotePrecision": 8,
+   "underlyingType": "COIN",
+   "underlyingSubType": [
+    "Top"
+   ],
+   "symbolType": 0,
+   "tradingMode": 0,
+   "name": "",
+   "channel": "",
+   "sequenceNo": 10,
+   "twapMinNotional": "1000",
+   "imn": "16000.00",
+   "tags": [],
+   "settlePlan": 0,
+   "triggerProtect": "0.0200",
+   "liquidationFee": "0.025000",
+   "marketTakeBound": "0.02"
+  },
+  {
+   "symbol": "ETHUSDT",
+   "filters": [
+    {
+     "minPrice": "0.01",
+     "maxPrice": "1000000",
+     "filterType": "PRICE_FILTER",
+     "tickSize": "0.01"
+    },
+    {
+     "stepSize": "0.001",
+     "filterType": "LOT_SIZE",
+     "maxQty": "10000",
+     "minQty": "0.001"
+    },
+    {
+     "stepSize": "0.001",
+     "filterType": "MARKET_LOT_SIZE",
+     "maxQty": "2000",
+     "minQty": "0.001"
+    },
+    {
+     "limit": 200,
+     "filterType": "MAX_NUM_ORDERS"
+    },
+    {
+     "limit": 10,
+     "filterType": "MAX_NUM_ALGO_ORDERS"
+    },
+    {
+     "notional": "5",
+     "filterType": "MIN_NOTIONAL"
+    },
+    {
+     "multiplierDown": "0.9800",
+     "multiplierUp": "1.0200",
+     "ltMultiplierDown": "0",
+     "multiplierDecimal": "4",
+     "filterType": "PERCENT_PRICE",
+     "ltMultiplierUp": "0"
+    }
+   ],
+   "orderTypes": [
+    "LIMIT",
+    "MARKET",
+    "STOP",
+    "STOP_MARKET",
+    "TAKE_PROFIT",
+    "TAKE_PROFIT_MARKET",
+    "TRAILING_STOP_MARKET"
+   ],
+   "timeInForce": [
+    "GTC",
+    "IOC",
+    "GTX",
+    "HIDDEN"
+   ],
+   "createTime": 1630984677055,
+   "pair": "ETHUSDT",
+   "contractType": "PERPETUAL",
+   "deliveryDate": 4133404800000,
+   "onboardDate": 1630911600000,
+   "status": "TRADING",
+   "maintMarginPercent": "2.5000",
+   "requiredMarginPercent": "5.0000",
+   "baseAsset": "ETH",
+   "quoteAsset": "USDT",
+   "marginAsset": "USDT",
+   "pricePrecision": 2,
+   "quantityPrecision": 3,
+   "baseAssetPrecision": 8,
+   "quotePrecision": 8,
+   "underlyingType": "COIN",
+   "underlyingSubType": [
+    "Top"
+   ],
+   "symbolType": 0,
+   "tradingMode": 0,
+   "name": "",
+   "channel": "",
+   "sequenceNo": 9,
+   "twapMinNotional": "1000",
+   "imn": "8000.00",
+   "tags": [],
+   "settlePlan": 0,
+   "triggerProtect": "0.0200",
+   "liquidationFee": "0.025000",
+   "marketTakeBound": "0.02"
+  }
+ ]
+}"#,
+        );
+        let specs = aster_specs_from(&ei);
+        assert_eq!(specs.len(), 2);
+        let premium = json(
+            r#"[
+ {
+  "symbol": "ETHUSDT",
+  "markPrice": "1692.99165892",
+  "indexPrice": "1693.82162791",
+  "estimatedSettlePrice": "1693.65756537",
+  "lastFundingRate": "0.00004624",
+  "interestRate": "0.00010000",
+  "nextFundingTime": 1795737600000,
+  "time": 1795716270000
+ },
+ {
+  "symbol": "BTCUSDT",
+  "markPrice": "60506.07349638",
+  "indexPrice": "60524.37478261",
+  "estimatedSettlePrice": "60524.94703762",
+  "lastFundingRate": "0.00008069",
+  "interestRate": "0.00010000",
+  "nextFundingTime": 1795737600000,
+  "time": 1795716270000
+ }
+]"#,
+        );
+        let book = json(
+            r#"[
+ {
+  "symbol": "BTCUSDT",
+  "bidPrice": "60510.1",
+  "bidQty": "3.045",
+  "askPrice": "60511.3",
+  "askQty": "0.050",
+  "time": 1795716271300,
+  "lastUpdateId": 677007383825
+ },
+ {
+  "symbol": "ETHUSDT",
+  "bidPrice": "1692.92",
+  "bidQty": "51.936",
+  "askPrice": "1692.93",
+  "askQty": "0.031",
+  "time": 1795716271300,
+  "lastUpdateId": 677007383813
+ }
+]"#,
+        );
+        let funding = json(
+            r#"[
+ {
+  "symbol": "ETHUSDT",
+  "interestRate": "0.00010000",
+  "time": 1795716239000,
+  "fundingIntervalHours": 8,
+  "fundingFeeCap": 0.003,
+  "fundingFeeFloor": -0.003
+ },
+ {
+  "symbol": "BTCUSDT",
+  "interestRate": "0.00010000",
+  "time": 1795716239000,
+  "fundingIntervalHours": 8,
+  "fundingFeeCap": 0.003,
+  "fundingFeeFloor": -0.003
+ }
+]"#,
+        );
+        let mut intervals = HashMap::new();
+        for f in funding.as_array().unwrap() {
+            intervals.insert(
+                str_field(f, "symbol").unwrap().to_string(),
+                num_field(f, "fundingIntervalHours").unwrap(),
+            );
+        }
+        let ticker = json(
+            r#"[
+ {
+  "symbol": "BTCUSDT",
+  "priceChange": "846.0",
+  "priceChangePercent": "1.418",
+  "weightedAvgPrice": "60541.6",
+  "lastPrice": "60504.7",
+  "lastQty": "0.081",
+  "openPrice": "59658.7",
+  "highPrice": "61613.3",
+  "lowPrice": "59460.0",
+  "volume": "9326.913",
+  "quoteVolume": "564666297.99",
+  "openTime": 1795629840000,
+  "closeTime": 1795716260250,
+  "firstId": 150662245,
+  "lastId": 150700705,
+  "count": 38457
+ },
+ {
+  "symbol": "ETHUSDT",
+  "priceChange": "14.17",
+  "priceChangePercent": "0.844",
+  "weightedAvgPrice": "1693.89",
+  "lastPrice": "1692.92",
+  "lastQty": "1.429",
+  "openPrice": "1678.75",
+  "highPrice": "1729.52",
+  "lowPrice": "1667.11",
+  "volume": "183496.907",
+  "quoteVolume": "310823420.03",
+  "openTime": 1795629840000,
+  "closeTime": 1795716269550,
+  "firstId": 88221417,
+  "lastId": 88246202,
+  "count": 24783
+ }
+]"#,
+        );
+        let volumes = parse_asterdex_volumes(&ticker);
+        let rows = parse_asterdex(
+            &specs,
+            &premium,
+            &book,
+            &intervals,
+            &volumes,
+            1_795_716_271_300,
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 2);
+        // The live premiumIndex order is not sorted by symbol.
+        let btc = rows.iter().find(|r| r.symbol == "BTCUSDT").unwrap();
+        assert_eq!(btc.symbol, "BTCUSDT");
+        assert_eq!(btc.base_symbol, "BTC");
+        assert_eq!(btc.settlement_currency, "USDT");
+        assert_eq!(btc.tick_size, Some(0.1));
+        assert_eq!(btc.step_size, Some(0.001));
+        assert_eq!(btc.min_notional, Some(5.0));
+        assert_eq!(btc.mark_px, Some(60506.07349638));
+        assert_eq!(btc.bid_px, Some(60510.1));
+        assert_eq!(btc.ask_px, Some(60511.3));
+        assert!((btc.mid_px.unwrap() - 60510.7).abs() < 1e-9);
+        assert_eq!(btc.funding_interval_hours, Some(8.0));
+        assert!((btc.funding_1h.unwrap() - 0.00008069 / 8.0).abs() < 1e-12);
+        assert_eq!(btc.volume_24h_usd, Some(564666297.99));
+        // V3 has no openInterest endpoint: always None, never faked.
+        assert_eq!(btc.open_interest_usd, None);
+        assert_eq!(btc.max_leverage, None);
+        let eth = rows.iter().find(|r| r.symbol == "ETHUSDT").unwrap();
+        assert_eq!(eth.symbol, "ETHUSDT");
+        assert_eq!(eth.tick_size, Some(0.01));
+        assert_eq!(eth.mark_px, Some(1692.99165892));
+        assert_eq!(eth.bid_px, Some(1692.92));
+        assert_eq!(eth.ask_px, Some(1692.93));
+        assert!((eth.funding_1h.unwrap() - 0.00004624 / 8.0).abs() < 1e-12);
+        assert_eq!(eth.volume_24h_usd, Some(310823420.03));
+        assert_eq!(eth.open_interest_usd, None);
     }
 
     /// Unknown funding interval (symbol missing from fundingInfo): the
