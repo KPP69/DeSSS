@@ -1,10 +1,9 @@
 import React, { useEffect } from "react";
 import AppShell from "./components/AppShell";
 import { Button } from "./components/ui";
+import { useLiveStream } from "./hooks/useLiveStream";
+import { useVenueSchemas } from "./hooks/useVenueSchemas";
 import { useAppStore, type PageKey } from "./store/useAppStore";
-import { api, onBook, onAccountLive, onLog } from "./lib/tauri";
-import { useLiveStore } from "./store/useLiveStore";
-import { useConsoleStore } from "./store/useConsoleStore";
 import { useAccountUiStore } from "./store/useAccountUiStore";
 import { useDataUiStore } from "./store/useDataUiStore";
 import AccountPage from "./pages/AccountPage";
@@ -35,6 +34,11 @@ export default function App() {
   const dataView = useDataUiStore((s) => s.view);
   const setDataView = useDataUiStore((s) => s.setView);
 
+  // The app's only event subscriptions (Phase 2, I11) + the one-time
+  // venue-schema fetch, both at the root; pages only read stores.
+  useLiveStream();
+  useVenueSchemas();
+
   // Current page <-> URL hash (#/account, #/trading, ...).
   useEffect(() => {
     const fromHash = () => {
@@ -48,30 +52,6 @@ export default function App() {
   useEffect(() => {
     window.history.replaceState(null, "", `#/${page}`);
   }, [page]);
-
-  useEffect(() => {
-    let u1: (() => void) | undefined, u2: (() => void) | undefined;
-    let u3: (() => void) | undefined;
-    onBook((b) => useLiveStore.getState().setBook(b)).then((u) => (u1 = u));
-    onAccountLive((a) => useLiveStore.getState().setLive(a)).then((u) => (u2 = u));
-    onLog((l) => useConsoleStore.getState().addLog(l)).then((u) => (u3 = u));
-    // Instant numbers after a refresh: latest account states +
-    // recent console logs the backend already holds in memory, instead
-    // of waiting for the next REST poll.
-    api
-      .getRuntimeSnapshot()
-      .then((snap) => {
-        snap.live.forEach((a) => useLiveStore.getState().setLive(a));
-        snap.books.forEach((b) => useLiveStore.getState().setBook(b));
-        useConsoleStore.getState().addLogs(snap.logs ?? []);
-      })
-      .catch(() => {});
-    return () => {
-      u1?.();
-      u2?.();
-      u3?.();
-    };
-  }, []);
 
   // Secondary toolbar (AppShell slot): the account page gets its add
   // button here, the data page its view toggle (left 自定义信号, right

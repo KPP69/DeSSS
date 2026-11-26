@@ -108,12 +108,17 @@ const ARCUS_FIELDS: &[CredentialField] = &[CredentialField {
     min: None,
     max: None,
     forbidden: &[],
+    hint: None,
 }];
 
 #[async_trait]
 impl Venue for ArcusVenue {
     fn id(&self) -> &'static str {
         "arcus"
+    }
+
+    fn display_name(&self) -> &'static str {
+        "Arcus"
     }
 
     fn credentials(&self) -> &'static [CredentialField] {

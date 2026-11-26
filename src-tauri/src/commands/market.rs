@@ -3,6 +3,16 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tauri::State;
 
+/// The credential-form definition, straight from the registry
+/// (Phase 2, I10): every venue's id, display name, note and fields.
+/// The frontend renders the account form from this alone — no
+/// per-exchange table on the frontend side. Sync command, reads
+/// static data only.
+#[tauri::command]
+pub fn get_venue_schemas() -> Vec<crate::venues::VenueSchema> {
+    crate::venues::venue_schemas()
+}
+
 /// Search the market catalog by base symbol (exact or prefix) or native
 /// symbol (substring, case insensitive), restricted to the checked
 /// exchanges. Zero-network (PR-0.3): it reads only the in-memory

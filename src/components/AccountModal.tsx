@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { EXCHANGES, activeFields, getExchange, validateField } from "../lib/exchanges";
-import type { AccountView, CredentialMap } from "../lib/types";
+import { useVenueSchemas } from "../hooks/useVenueSchemas";
+import type { AccountView, CredentialMap, VenueSchemaField } from "../lib/types";
 import { useAccountStore } from "../store/useAccountStore";
 import { Button, Modal, SelectDropdown } from "./ui";
 
@@ -14,6 +14,14 @@ type Props = {
 /**
  * Add / edit account modal, built on the shared Modal + SelectDropdown.
  *
+ * The form is rendered entirely from the backend venue schemas
+ * (Phase 2, I10): field order, required flag, number bounds,
+ * forbidden values and hints all come from `get_venue_schemas`.
+ * There is no per-exchange table left on the frontend — a field
+ * added in Rust shows up here with no frontend change. Validation
+ * is the frontend's basic intercept only (required + number bounds);
+ * the backend re-checks everything.
+ *
  * Security notes (unchanged from phase 2):
  * - Secret inputs live only in this component's local state and are wiped
  *   on close, cancel and successful submit. They are never written to a
@@ -23,25 +31,45 @@ type Props = {
  * - In edit mode, leaving every credential field empty keeps the stored
  *   credentials; filling any field requires the full set for that exchange.
  */
+function validateField(field: VenueSchemaField, raw: string): string | null {
+  const value = raw.trim();
+  if (field.required && value === "") return `请填写${field.label}`;
+  if (value === "") return null;
+  if (field.kind === "number") {
+    const n = Number(value);
+    if (!Number.isFinite(n) || !Number.isInteger(n)) return `${field.label} 必须是整数`;
+    if (field.min !== undefined && n < field.min) return `${field.label} 不能小于 ${field.min}`;
+    if (field.max !== undefined && n > field.max) return `${field.label} 不能大于 ${field.max}`;
+    if (field.forbidden?.includes(n)) return `${field.label} 的值 ${n} 不可用`;
+  }
+  return null;
+}
+
 export default function AccountModal({ open, editing, onClose }: Props) {
   const create = useAccountStore((s) => s.create);
   const update = useAccountStore((s) => s.update);
   const isEdit = editing !== null;
+  const { schemas, loading: schemasLoading } = useVenueSchemas();
 
   const [label, setLabel] = useState("");
-  const [exchangeId, setExchangeId] = useState(EXCHANGES[0].id);
-  const [mode, setMode] = useState("agent");
+  const [exchangeId, setExchangeId] = useState("");
   const [values, setValues] = useState<Record<string, string>>({});
   const [formError, setFormError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
-  const def = useMemo(() => getExchange(exchangeId), [exchangeId]);
-  const fields = useMemo(() => activeFields(def, mode), [def, mode]);
+  // The selected schema; in add mode an empty selection falls back to
+  // the first schema once they arrive (schemas load once at startup).
+  const def = useMemo(
+    () =>
+      schemas?.find((e) => e.id === exchangeId) ??
+      (!isEdit ? schemas?.[0] : undefined),
+    [schemas, exchangeId, isEdit],
+  );
+  const fields = def?.fields ?? [];
 
   function reset() {
     setLabel("");
-    setExchangeId(EXCHANGES[0].id);
-    setMode("agent");
+    setExchangeId("");
     setValues({});
     setFormError(null);
     setSubmitting(false);
@@ -66,13 +94,16 @@ export default function AccountModal({ open, editing, onClose }: Props) {
     if (isEdit) return; // locked in edit mode (selector is disabled anyway)
     setExchangeId(id);
     setValues({}); // never reuse field values across exchanges
-    setMode("agent");
   }
 
   async function submit() {
     setFormError(null);
     if (label.trim() === "") {
       setFormError("请填写账户名");
+      return;
+    }
+    if (!def) {
+      setFormError("交易所信息加载中，请稍后再试");
       return;
     }
     const filled = fields.filter((f) => (values[f.key] ?? "").trim() !== "");
@@ -90,15 +121,14 @@ export default function AccountModal({ open, editing, onClose }: Props) {
       credentials = {};
       for (const f of fields) {
         const raw = (values[f.key] ?? "").trim();
-        credentials[f.key] = f.type === "number" ? Number(raw) : raw;
+        credentials[f.key] = f.kind === "number" ? Number(raw) : raw;
       }
-      if (def.modes) credentials["mode"] = mode;
     }
 
     setSubmitting(true);
     const ok = isEdit
       ? await update(editing.id, label.trim(), exchangeId, credentials)
-      : await create(label.trim(), exchangeId, credentials ?? {});
+      : await create(label.trim(), def.id, credentials ?? {});
     setSubmitting(false);
     if (ok) {
       close();
@@ -121,7 +151,7 @@ export default function AccountModal({ open, editing, onClose }: Props) {
           <Button variant="secondary" onClick={close}>
             取消
           </Button>
-          <Button onClick={submit} disabled={submitting}>
+          <Button onClick={submit} disabled={submitting || (!def && !isEdit)}>
             {submitting ? "保存中…" : isEdit ? "保存修改" : "添加账户"}
           </Button>
         </>
@@ -142,17 +172,17 @@ export default function AccountModal({ open, editing, onClose }: Props) {
           <div>
             <label className={labelCls}>交易所</label>
             <SelectDropdown
-              options={EXCHANGES.map((e) => ({ value: e.id, label: e.name }))}
-              value={exchangeId}
+              options={(schemas ?? []).map((e) => ({ value: e.id, label: e.name }))}
+              value={exchangeId || def?.id || ""}
               onChange={pickExchange}
-              disabled={isEdit}
+              disabled={isEdit || schemasLoading}
             />
             {isEdit ? (
               <p className="text-xs text-ds-text-3 mt-1">
                 交易所创建后不可修改；如需更换，请删除后重新创建。
               </p>
             ) : (
-              def.note && <p className="text-xs text-ds-text-3 mt-1">{def.note}</p>
+              def?.note && <p className="text-xs text-ds-text-3 mt-1">{def.note}</p>
             )}
           </div>
           {isEdit && (
@@ -171,49 +201,29 @@ export default function AccountModal({ open, editing, onClose }: Props) {
           )}
         </div>
 
-        {/* Right column: per-exchange credential form */}
+        {/* Right column: per-exchange credential form, schema-driven */}
         <div className="space-y-4 min-w-0">
-          {def.modes && (
-            <div>
-              <label className={labelCls}>接入方式</label>
-              <div className="flex gap-2">
-                {def.modes.map((m) => (
-                  <button
-                    key={m.id}
-                    type="button"
-                    onClick={() => {
-                      setMode(m.id);
-                      setValues({});
-                    }}
-                    className={`h-8 px-3 rounded-lg border text-[13px] ${
-                      mode === m.id
-                        ? "border-ds-line text-ds-text-1 bg-ds-panel-2"
-                        : "border-ds-line text-ds-text-2 bg-ds-panel/50"
-                    }`}
-                  >
-                    {m.label}
-                  </button>
-                ))}
+          {!def ? (
+            <p className="text-xs text-ds-text-3">交易所信息加载中…</p>
+          ) : (
+            fields.map((f) => (
+              <div key={f.key}>
+                <label className={labelCls}>
+                  {f.label}
+                  {f.required && <span className="text-ds-text-3"> *</span>}
+                </label>
+                <input
+                  className={inputCls}
+                  type={f.kind === "password" ? "password" : f.kind === "number" ? "number" : "text"}
+                  value={values[f.key] ?? ""}
+                  autoComplete="off"
+                  onChange={(e) => setValues((v) => ({ ...v, [f.key]: e.target.value }))}
+                  placeholder={isEdit ? "留空保留原凭证" : undefined}
+                />
+                {f.hint && <p className="text-xs text-ds-text-3 mt-1">{f.hint}</p>}
               </div>
-            </div>
+            ))
           )}
-          {fields.map((f) => (
-            <div key={f.key}>
-              <label className={labelCls}>
-                {f.label}
-                {f.required && <span className="text-ds-text-3"> *</span>}
-              </label>
-              <input
-                className={inputCls}
-                type={f.type === "password" ? "password" : f.type === "number" ? "number" : "text"}
-                value={values[f.key] ?? ""}
-                autoComplete="off"
-                onChange={(e) => setValues((v) => ({ ...v, [f.key]: e.target.value }))}
-                placeholder={isEdit ? "留空保留原凭证" : undefined}
-              />
-              {f.hint && <p className="text-xs text-ds-text-3 mt-1">{f.hint}</p>}
-            </div>
-          ))}
           <p className="text-xs text-ds-text-3">
             凭证只会加密保存在本机 ./data/vault.enc，不会上传或写入数据库明文。
           </p>

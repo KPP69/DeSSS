@@ -11,7 +11,7 @@
   },
   "app": {
     "security": {
-      "csp": "default-src 'self' customprotocol: asset:; img-src 'self' asset: http://asset.localhost; style-src 'self' 'unsafe-inline'; connect-src 'self' ipc: http://ipc.localhost https://api.hyperliquid.xyz wss://api.hyperliquid.xyz https://mainnet.zklighter.elliot.ai wss://mainnet.zklighter.elliot.ai https://api.rh.lighter.xyz wss://api.rh.lighter.xyz https://fapi.asterdex.com wss://fstream.asterdex.com https://api.arcus.xyz wss://api.arcus.xyz"
+      "csp": "default-src 'self' customprotocol: asset:; img-src 'self' asset: http://asset.localhost; style-src 'self' 'unsafe-inline'; connect-src 'self' ipc: http://ipc.localhost"
     }
   },
   "bundle": {

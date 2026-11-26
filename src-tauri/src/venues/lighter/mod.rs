@@ -157,6 +157,7 @@ const LIGHTER_FIELDS: &[CredentialField] = &[
         min: Some(0),
         max: None,
         forbidden: &[],
+        hint: None,
     },
     CredentialField {
         key: "api_key_index",
@@ -167,6 +168,7 @@ const LIGHTER_FIELDS: &[CredentialField] = &[
         min: Some(4),
         max: Some(254),
         forbidden: &[],
+        hint: Some("允许范围 4–254"),
     },
     CredentialField {
         key: "api_key_private_key",
@@ -177,6 +179,7 @@ const LIGHTER_FIELDS: &[CredentialField] = &[
         min: None,
         max: None,
         forbidden: &[],
+        hint: None,
     },
 ];
 
@@ -190,6 +193,7 @@ const RH_FIELDS: &[CredentialField] = &[
         min: Some(0),
         max: None,
         forbidden: &[],
+        hint: None,
     },
     CredentialField {
         key: "api_key_index",
@@ -200,6 +204,7 @@ const RH_FIELDS: &[CredentialField] = &[
         min: Some(4),
         max: Some(254),
         forbidden: &[157],
+        hint: Some("允许范围 4–156 或 158–254，请避开保留位 157"),
     },
     CredentialField {
         key: "api_key_private_key",
@@ -210,6 +215,7 @@ const RH_FIELDS: &[CredentialField] = &[
         min: None,
         max: None,
         forbidden: &[],
+        hint: None,
     },
 ];
 
@@ -217,6 +223,13 @@ const RH_FIELDS: &[CredentialField] = &[
 impl Venue for LighterVenue {
     fn id(&self) -> &'static str {
         self.id
+    }
+
+    fn display_name(&self) -> &'static str {
+        match self.network {
+            LighterNetwork::Mainnet => "Lighter",
+            LighterNetwork::Robinhood => "Lighter RH",
+        }
     }
 
     fn credentials(&self) -> &'static [CredentialField] {

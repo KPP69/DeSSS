@@ -1,7 +1,9 @@
 import React, { useEffect, useState } from "react";
-import { Button, EmptyState, PageHeader } from "../components/ui";
+import { Button, PageHeader } from "../components/ui";
+import PageState from "../components/PageState";
+import { useInvoke } from "../hooks/useInvoke";
 import { api } from "../lib/tauri";
-import type { DrawdownStatus, RiskConfig } from "../lib/types";
+import type { RiskConfig } from "../lib/types";
 
 /**
  * Risk page (phase 5A §3): the kill switch toggle and the hard limits.
@@ -31,60 +33,46 @@ const inputCls =
   "w-40 bg-ds-panel-2 border border-ds-line rounded-lg px-3 h-8 text-ds-text-1 outline-none focus:border-ds-accent num";
 
 export default function RiskPage() {
-  const [config, setConfig] = useState<RiskConfig | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [loadError, setLoadError] = useState<string | null>(null);
+  // Config + drawdown both come from useInvoke (Phase 2, I11); the
+  // form fields sync from the loaded config below. Save / toggle are
+  // click mutations and refresh the config afterwards.
+  const cfg = useInvoke(() => api.getRiskConfig(), []);
+  const dd = useInvoke(() => api.getDrawdownStatus(), []);
+  const config = cfg.data;
+  const drawdown = dd.data;
+
+  useEffect(() => {
+    const t = setInterval(() => dd.refresh(), 10_000);
+    return () => clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const [maxOrder, setMaxOrder] = useState("");
   const [maxPosition, setMaxPosition] = useState("");
   const [maxDrawdown, setMaxDrawdown] = useState("");
   const [allowedSides, setAllowedSides] = useState<RiskConfig["allowedSides"]>("both");
   const [autoPause, setAutoPause] = useState("");
-  // Drawdown snapshot, refreshed every 10s with the backend sampler.
-  const [drawdown, setDrawdown] = useState<DrawdownStatus | null>(null);
   const [saving, setSaving] = useState(false);
   const [toggling, setToggling] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [savedAt, setSavedAt] = useState<number | null>(null);
 
   useEffect(() => {
-    let cancelled = false;
-    void api
-      .getRiskConfig()
-      .then((c) => {
-        if (cancelled) return;
-        setConfig(c);
-        setMaxOrder(String(c.maxOrderNotionalUsd));
-        setMaxPosition(String(c.maxPositionUsd));
-        setMaxDrawdown(String(c.maxDrawdownPct));
-        setAllowedSides(c.allowedSides);
-        setAutoPause(String(c.autoPauseAfterFailures));
-      })
-      .catch((e) => {
-        if (!cancelled) setLoadError(String(e));
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
-    const refreshDrawdown = () => {
-      void api.getDrawdownStatus().then((d) => {
-        if (!cancelled) setDrawdown(d);
-      });
-    };
-    refreshDrawdown();
-    const t = setInterval(refreshDrawdown, 10_000);
-    return () => {
-      cancelled = true;
-      clearInterval(t);
-    };
-  }, []);
+    if (!config) return;
+    setMaxOrder(String(config.maxOrderNotionalUsd));
+    setMaxPosition(String(config.maxPositionUsd));
+    setMaxDrawdown(String(config.maxDrawdownPct));
+    setAllowedSides(config.allowedSides);
+    setAutoPause(String(config.autoPauseAfterFailures));
+  }, [config]);
 
   const onToggle = async () => {
     if (!config || toggling) return;
     setToggling(true);
     setError(null);
     try {
-      const c = await api.setKillSwitch(!config.killSwitch);
-      setConfig(c);
+      await api.setKillSwitch(!config.killSwitch);
+      cfg.refresh();
     } catch (e) {
       setError(String(e));
     } finally {
@@ -97,7 +85,7 @@ export default function RiskPage() {
     setSaving(true);
     setError(null);
     try {
-      const c = await api.setRiskConfig({
+      await api.setRiskConfig({
         killSwitch: config.killSwitch,
         maxOrderNotionalUsd: Number(maxOrder),
         maxPositionUsd: Number(maxPosition),
@@ -105,12 +93,7 @@ export default function RiskPage() {
         allowedSides,
         autoPauseAfterFailures: Number(autoPause),
       });
-      setConfig(c);
-      setMaxOrder(String(c.maxOrderNotionalUsd));
-      setMaxPosition(String(c.maxPositionUsd));
-      setMaxDrawdown(String(c.maxDrawdownPct));
-      setAllowedSides(c.allowedSides);
-      setAutoPause(String(c.autoPauseAfterFailures));
+      cfg.refresh();
       setSavedAt(Date.now());
     } catch (e) {
       setError(String(e));
@@ -119,9 +102,11 @@ export default function RiskPage() {
     }
   };
 
-  if (loading) return <EmptyState>加载风控配置…</EmptyState>;
-  if (loadError || !config) {
-    return <EmptyState>风控配置加载失败：{loadError ?? "未知错误"}</EmptyState>;
+  if (cfg.loading && !config) {
+    return <PageState loading loadingText="加载风控配置…" />;
+  }
+  if (cfg.error || !config) {
+    return <PageState error={`风控配置加载失败：${cfg.error ?? "未知错误"}`} />;
   }
 
   return (

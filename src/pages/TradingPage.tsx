@@ -1,10 +1,12 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useEffect, useState } from "react";
 import { Badge, Button, DataTable, EmptyState } from "../components/ui";
-import { useLiveStore } from "../store/useLiveStore";
-import { useAccountStore } from "../store/useAccountStore";
-import { getExchange } from "../lib/exchanges";
+import { useInvoke } from "../hooks/useInvoke";
+import { displaySymbol } from "../lib/symbol";
 import { api } from "../lib/tauri";
-import type { OrderInfo, TradeInfo } from "../lib/types";
+import type { OrderInfo } from "../lib/types";
+import { useAccountStore } from "../store/useAccountStore";
+import { useLiveStore } from "../store/useLiveStore";
+import { useVenueStore } from "../store/useVenueStore";
 
 /**
  * Trading page: real positions, live open orders (with cancel) and
@@ -15,6 +17,9 @@ import type { OrderInfo, TradeInfo } from "../lib/types";
  * exchange state and cancels. Open orders are synced with the
  * exchange every 10s (backend poll + this page's refresh), so orders
  * placed or canceled on the website show up here too.
+ *
+ * The three lists come from one `useInvoke` (Phase 2, I11); cancel
+ * is a click mutation and refreshes the lists after it settles.
  */
 
 const STATUS_LABEL: Record<string, string> = {
@@ -66,37 +71,33 @@ export default function TradingPage() {
   const tradeAccounts = accounts.filter(
     (a) => a.exchangeId === "hyperliquid" || a.exchangeId === "entropy"
   );
-  const [openOrders, setOpenOrders] = useState<OrderInfo[]>([]);
-  const [records, setRecords] = useState<OrderInfo[]>([]);
-  const [fills, setFills] = useState<TradeInfo[]>([]);
+  const lists = useInvoke(async () => {
+    const ids = accounts
+      .filter((a) => a.exchangeId === "hyperliquid" || a.exchangeId === "entropy")
+      .map((a) => a.id);
+    const [open, records, fills] = await Promise.all([
+      Promise.all(ids.map((id) => api.listOpenOrders(id))).then((l) => l.flat()),
+      api.listOrderRecords(),
+      api.listOrderFills(),
+    ]);
+    return { open, records, fills };
+  }, [accounts]);
+  const openOrders = lists.data?.open ?? [];
+  const records = lists.data?.records ?? [];
+  const fills = lists.data?.fills ?? [];
+
+  useEffect(() => {
+    const t = setInterval(() => lists.refresh(), 10_000);
+    return () => clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const names = useVenueStore((s) => s.names);
+  const venueName = (id: string) => names[id] ?? id;
+
   const [cancelingId, setCancelingId] = useState<string | null>(null);
   const [cancelResult, setCancelResult] = useState<OrderInfo | null>(null);
   const [cancelError, setCancelError] = useState<string | null>(null);
-
-  const refreshLists = useCallback(async () => {
-    try {
-      const ids = accounts
-        .filter((a) => a.exchangeId === "hyperliquid" || a.exchangeId === "entropy")
-        .map((a) => a.id);
-      const [o, r, f] = await Promise.all([
-        Promise.all(ids.map((id) => api.listOpenOrders(id))).then((lists) => lists.flat()),
-        api.listOrderRecords(),
-        api.listOrderFills(),
-      ]);
-      setOpenOrders(o);
-      setRecords(r);
-      setFills(f);
-    } catch {
-      // Lists are best-effort; a failed refresh never hides the
-      // positions above or the last cancel result.
-    }
-  }, [accounts]);
-
-  useEffect(() => {
-    void refreshLists();
-    const t = setInterval(() => void refreshLists(), 10_000);
-    return () => clearInterval(t);
-  }, [refreshLists]);
 
   const cancel = async (order: OrderInfo) => {
     setCancelingId(order.orderId || order.clientOrderId);
@@ -113,7 +114,7 @@ export default function TradingPage() {
       setCancelError(String(e));
     } finally {
       setCancelingId(null);
-      void refreshLists();
+      lists.refresh();
     }
   };
 
@@ -130,8 +131,8 @@ export default function TradingPage() {
             minWidth={760}
             rows={positions.map((p, i) => [
               <span key="a">{labelOf(p.accountId)}</span>,
-              <span key="e">{getExchange(p.adapterId).name}</span>,
-              <span key="s" className="num">{p.symbol}</span>,
+              <span key="e">{venueName(p.adapterId)}</span>,
+              <span key="s" className="num">{displaySymbol(p.symbol)}</span>,
               <span key="d">
                 <Badge tone={p.side === "long" ? "up" : "down"}>
                   {p.side === "long" ? "多" : "空"}
@@ -165,7 +166,7 @@ export default function TradingPage() {
             minWidth={760}
             rows={openOrders.map((o) => [
               <span key="a">{labelOf(o.accountId)}</span>,
-              <span key="s" className="num">{o.symbol}</span>,
+              <span key="s" className="num">{displaySymbol(o.symbol)}</span>,
               <span key="d">
                 <Badge tone={o.side === "buy" ? "up" : "down"}>{o.side === "buy" ? "买" : "卖"}</Badge>
               </span>,
@@ -196,7 +197,7 @@ export default function TradingPage() {
             {STATUS_LABEL[cancelResult.status] ?? cancelResult.status}
           </Badge>
           <span className="num text-ds-text-1">
-            {cancelResult.symbol} {cancelResult.side === "buy" ? "买入" : "卖出"} {cancelResult.quantity}
+            {displaySymbol(cancelResult.symbol)} {cancelResult.side === "buy" ? "买入" : "卖出"} {cancelResult.quantity}
             {cancelResult.price != null ? ` @ ${cancelResult.price}` : ""}
           </span>
           {cancelResult.orderId && <span className="num text-ds-text-2">oid {cancelResult.orderId}</span>}
@@ -226,7 +227,7 @@ export default function TradingPage() {
               <span key="t" className="num">
                 {new Date(o.createdAt).toLocaleTimeString()}
               </span>,
-              <span key="s" className="num">{o.symbol}</span>,
+              <span key="s" className="num">{displaySymbol(o.symbol)}</span>,
               <span key="d">
                 <Badge tone={o.side === "buy" ? "up" : "down"}>{o.side === "buy" ? "买" : "卖"}</Badge>
               </span>,
@@ -256,7 +257,7 @@ export default function TradingPage() {
           minWidth={640}
           rows={fills.slice(0, 20).map((f) => [
             <span key="t" className="num">{new Date(f.timestamp).toLocaleTimeString()}</span>,
-            <span key="s" className="num">{f.symbol}</span>,
+            <span key="s" className="num">{displaySymbol(f.symbol)}</span>,
             <span key="d">
               <Badge tone={f.side === "buy" ? "up" : "down"}>{f.side === "buy" ? "买" : "卖"}</Badge>
             </span>,

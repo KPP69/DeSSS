@@ -1,6 +1,6 @@
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { AppInfo, AccountView, CredentialMap, OrderBook, AccountLive, LogEntry, RuntimeSnapshot, ProxyState, MarketInfo, CatalogRefresh, CatalogStatus, RiskConfig, DrawdownStatus, OrderInfo, TradeInfo } from "./types";
+import type { AppInfo, AccountView, CredentialMap, OrderBook, AccountLive, LogEntry, RuntimeSnapshot, ProxyState, MarketInfo, CatalogRefresh, CatalogStatus, RiskConfig, DrawdownStatus, OrderInfo, TradeInfo, VenueSchema } from "./types";
 
 // Tauri 框架级英文报错翻译成中文（实机事故 2026-11-26：下单失败只显示
 // "invalid args input for command place_order: missing field account_id"，
@@ -53,6 +53,11 @@ export const api = {
   getRuntimeSnapshot: () => invoke<RuntimeSnapshot>("get_runtime_snapshot"),
   getProxy: () => invoke<ProxyState>("get_proxy"),
   setProxy: (url: string) => invoke<ProxyState>("set_proxy", { url }),
+  // Venue schemas (Phase 2, I10): the credential-form definition,
+  // straight from the backend registry. The account form renders
+  // exactly this; adding a field in Rust shows up with no
+  // frontend change.
+  getVenueSchemas: () => invoke<VenueSchema[]>("get_venue_schemas"),
   // Market catalog (PR-0.3): search is zero-network — it reads the
   // SQLite-backed in-memory catalog only. A miss triggers one
   // background refresh; the page re-searches on `catalog://updated`.

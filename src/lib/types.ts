@@ -14,8 +14,30 @@ export type AccountView = {
   credentialConfigured: boolean;
 };
 
-/** Credential values keyed by the field keys defined in lib/exchanges.ts. */
+/** Credential values keyed by the field keys of the backend venue
+ * schemas (`get_venue_schemas`); the frontend holds no field table. */
 export type CredentialMap = Record<string, string | number>;
+
+/** One credential field as the backend venue schema defines it
+ * (Phase 2, I10). The account form renders exactly this. */
+export type VenueSchemaField = {
+  key: string;
+  label: string;
+  kind: "text" | "password" | "number";
+  required: boolean;
+  min?: number;
+  max?: number;
+  forbidden?: number[];
+  hint?: string;
+};
+
+/** One venue's form definition from `get_venue_schemas`. */
+export type VenueSchema = {
+  id: string;
+  name: string;
+  note?: string;
+  fields: VenueSchemaField[];
+};
 
 /** One price level of an order book: [price, quantity]. */
 export type PriceLevel = [number, number];

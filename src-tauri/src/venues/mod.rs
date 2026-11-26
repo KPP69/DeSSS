@@ -42,6 +42,8 @@ pub struct CredentialField {
     pub max: Option<i64>,
     /// Reserved values inside the range (Lighter RH: 157).
     pub forbidden: &'static [i64],
+    /// Short help the form shows under the field, if any.
+    pub hint: Option<&'static str>,
 }
 
 /// A credential field's input kind: free text or a bounded integer.
@@ -113,6 +115,15 @@ pub trait Venue: Send + Sync {
     /// Stable id: hyperliquid / entropy / lighter / lighter_robinhood
     /// / asterdex / arcus.
     fn id(&self) -> &'static str;
+    /// Display name for the account form and the tables; defaults
+    /// to the id, a venue overrides it when the two differ.
+    fn display_name(&self) -> &'static str {
+        self.id()
+    }
+    /// One-line note shown under the exchange selector, if any.
+    fn note(&self) -> Option<&'static str> {
+        None
+    }
     /// Credential fields (frontend form and backend check share them).
     fn credentials(&self) -> &'static [CredentialField];
     /// Validate a credential set and derive the masked identifier
@@ -227,6 +238,76 @@ pub fn all() -> &'static [&'static dyn Venue] {
     &ALL
 }
 
+/// One credential field as the frontend form sees it (Phase 2, I10):
+/// the wire shape of [`CredentialField`]. The form renders exactly
+/// this — field order, required flag, number bounds, forbidden
+/// values and hints all come from the registry, never from a
+/// frontend table.
+#[derive(serde::Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct VenueSchemaField {
+    pub key: &'static str,
+    pub label: &'static str,
+    /// "text" | "password" | "number": secret fields are passwords,
+    /// numeric fields are numbers, everything else is text.
+    pub kind: &'static str,
+    pub required: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max: Option<i64>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub forbidden: Vec<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hint: Option<&'static str>,
+}
+
+/// One venue as the account form sees it (Phase 2, I10).
+#[derive(serde::Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct VenueSchema {
+    pub id: &'static str,
+    pub name: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<&'static str>,
+    pub fields: Vec<VenueSchemaField>,
+}
+
+/// The whole form definition, straight from the registry: adding a
+/// field to a venue's `credentials()` (or removing one) changes
+/// what the frontend renders with zero frontend edits — the mapping
+/// below is 1:1, there is no other source.
+pub fn venue_schemas() -> Vec<VenueSchema> {
+    all()
+        .iter()
+        .map(|v| VenueSchema {
+            id: v.id(),
+            name: v.display_name(),
+            note: v.note(),
+            fields: v
+                .credentials()
+                .iter()
+                .map(|f| VenueSchemaField {
+                    key: f.key,
+                    label: f.label,
+                    kind: if f.secret {
+                        "password"
+                    } else if f.kind == CredentialKind::Number {
+                        "number"
+                    } else {
+                        "text"
+                    },
+                    required: f.required,
+                    min: f.min,
+                    max: f.max,
+                    forbidden: f.forbidden.to_vec(),
+                    hint: f.hint,
+                })
+                .collect(),
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -255,5 +336,56 @@ mod tests {
             visited += 1;
         }
         assert_eq!(visited, 6);
+    }
+
+    #[test]
+    fn venue_schemas_mirror_the_registry() {
+        // Phase 2, I10: the schema is a 1:1 projection of the
+        // registry — ids in registry order, every field key present
+        // in the same order, nothing invented, nothing dropped. A
+        // field added to (or removed from) a venue's credentials()
+        // flows to the frontend with no other change.
+        let schemas = venue_schemas();
+        assert_eq!(schemas.len(), 6);
+        for (schema, venue) in schemas.iter().zip(all().iter()) {
+            assert_eq!(schema.id, venue.id());
+            assert_eq!(schema.name, venue.display_name());
+            assert_eq!(schema.note, venue.note());
+            let keys: Vec<&str> = schema.fields.iter().map(|f| f.key).collect();
+            let want: Vec<&str> = venue.credentials().iter().map(|f| f.key).collect();
+            assert_eq!(
+                keys, want,
+                "schema fields must equal credentials() for {}",
+                schema.id
+            );
+        }
+        // Spot checks on the values the form depends on.
+        let rh = &schemas[3];
+        assert_eq!(rh.id, "lighter_robinhood");
+        assert_eq!(rh.name, "Lighter RH");
+        let idx = rh.fields.iter().find(|f| f.key == "api_key_index").unwrap();
+        assert_eq!(idx.kind, "number");
+        assert_eq!(idx.min, Some(4));
+        assert_eq!(idx.max, Some(254));
+        assert_eq!(idx.forbidden, vec![157]);
+        assert!(idx.hint.unwrap().contains("157"));
+        let aster = &schemas[4];
+        assert_eq!(aster.note, Some("V3 仅支持 Agent 钱包凭证"));
+        let wallet = aster
+            .fields
+            .iter()
+            .find(|f| f.key == "wallet_address")
+            .unwrap();
+        assert_eq!(wallet.kind, "text");
+        assert!(wallet.hint.is_some());
+        let entropy = &schemas[1];
+        assert_eq!(entropy.note, Some("复用 Hyperliquid HIP-3 接入模式"));
+        // The wire shape is exactly what the frontend types expect.
+        let v = serde_json::to_value(&schemas).unwrap();
+        let first = &v[0];
+        assert_eq!(first["id"], "hyperliquid");
+        assert_eq!(first["name"], "Hyperliquid");
+        assert_eq!(first["fields"][1]["kind"], "password");
+        assert!(first.get("note").is_none() || first["note"].is_null());
     }
 }

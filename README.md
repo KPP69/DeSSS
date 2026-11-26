@@ -2,15 +2,29 @@
 
 便携式桌面量化交易工具 — Tauri v2 (Rust + React + TypeScript + Tailwind + SQLite)
 
-> 当前阶段：项目骨架 + 核心接口契约。**不接任何真实交易所 API**，只有 MockAdapter。
+> 当前阶段：Phase 1 后端收口 + Phase 2 前端收口已完成。六所交易所只读接入已打通，
+> 下单仅 Hyperliquid / Entropy（后端管线在，交易页无手动下单入口，留给策略模块调用）。
 
-## 工作流（分支）
+## 交易所与只读范围
 
-1. 功能在分支上开发（如 `feat/scaffold-v1`），不直接推 `main`
-2. 推分支后到 GitHub Actions 下载 Windows 便携包实机测试：
-   仓库 → Actions → **Build (portable test)** → 最新 run → Artifacts → `DeSSS-windows-portable`
-   也可以在 Actions 页面点 **Run workflow** 手动触发（workflow_dispatch）
-3. 实机验证通过后，再决定是否合并到 `main`；合并后再开新分支做下一阶段
+| 交易所 | 读内容 | 下单 |
+| --- | --- | --- |
+| Hyperliquid | 权益 / 持仓 / 挂单 / 盘口 / 品种目录 | 支持（后端管线） |
+| Entropy（HIP-3，dex=`io`） | 同上（与 Hyperliquid 共用主钱包资金池） | 支持（后端管线） |
+| Lighter（主网） | 权益 / 持仓 / 品种目录 | 不支持 |
+| Lighter（Robinhood Chain） | 同上 | 不支持 |
+| AsterDEX（V3，仅 Agent 钱包） | 权益 / 持仓 / 品种目录 | 不支持 |
+| Arcus | 权益 / 持仓 / 品种目录 | 不支持 |
+
+所有数字都来自真实交易所读取，没有模拟数据。前端从不直连交易所（CSP
+connect-src 只有 `'self'` 与 `ipc:`），全部流量走 Rust 后端。
+
+## 品种目录与刷新
+
+品种目录（交易所 / 合约 / 标记价 / 资金费率 / 杠杆等）落库保存，数据页搜索
+只读本地库、不走网络。后台刷新时机：启动时、每 12 小时、搜索未命中时、
+手动点「刷新」。盘口（买一 / 卖一）走 WebSocket 实时流，5 秒无帧回退到
+目录里的值。
 
 ## 便携式目录
 
@@ -20,48 +34,41 @@
 DeSSS/
   desss.exe
   data/
-    desss.db
+    desss.db        # 账户元数据 + 品种目录（SQLite）
+    vault.key       # 凭证加密密钥
+    vault.enc       # AES-256-GCM 加密后的账户凭证
+    proxy.json      # 自定义代理（可选）
     logs/
+      app.log       # 应用日志，5 MB × 2 滚动（app.log / app.log.1）
+      crash.log     # 崩溃日志（panic 时写）
+    webview/        # WebView 缓存
 ```
 
-不使用 `%APPDATA%` / `~/.config` 等系统全局配置目录。实现：`src-tauri/src/portable.rs` 用 `std::env::current_exe()` 解析。
+不使用 `%APPDATA%` / `~/.config` 等系统全局配置目录。整个 DeSSS 文件夹拷到
+另一台 Windows 电脑仍可恢复凭证（`vault.key` 与 `vault.enc` 须一起拷）。
 
-## 本地启动验证
+## 如何看日志
 
-前置：Node 20+、Rust stable、（Linux 还需 webkit2gtk-4.1 等 Tauri 系统依赖）
+- 应用内：底部控制台抽屉实时显示日志（与 `app.log` 同源）。
+- 文件：打开 `./data/logs/app.log`，最新内容在文件末尾；`app.log.1` 是上一轮。
+- 报错时请贴 `app.log` 末尾 50 行（不要贴整文件），并注明操作步骤。
+- 崩溃（窗口直接消失）时看 `./data/logs/crash.log`。
+
+## 工作流（分支）
+
+1. 功能在分支上开发（如 `feat/realtime-ws-and-order-core`），不直接推 `main`
+2. 推分支后到 GitHub Actions 下载 Windows 便携包实机测试：
+   仓库 → Actions → **Build (portable test)** → 最新 run → Artifacts → `DeSSS-windows-portable`
+3. 实机验证通过后，再决定是否合并；合并后再开新分支做下一阶段
+
+## 本地开发
 
 ```bash
 npm install
-npm run tauri dev    # 开发运行，自动启动 Mock 行情
-# 或仅前端
-npm run build        # tsc + vite build 验证前端编译
-cargo check --manifest-path src-tauri/Cargo.toml
+npm run tauri dev   # 桌面应用（需 Rust 工具链）
+npm run build       # 仅前端构建
+npx tsc --noEmit    # 类型检查
 ```
 
-打开后默认进「交易」页：应看到 BTCUSDT / ETHUSDT 每 500ms 跳动；切到「账户」页看 Mock 余额每 2s 推送。
-
-## 目录规划
-
-```
-src/                        # React + TS
-  components/Sidebar.tsx    # 左侧固定导航
-  pages/                    # 账户 / 策略 / 交易 / 数据 / 风控 / 系统（6 空壳）
-  store/                    # Zustand: useAppStore, useMarketStore
-  lib/                      # Tauri invoke/listen 封装 + 类型
-src-tauri/src/
-  portable.rs               # ./data 解析
-  adapters/                 # ExchangeAdapter trait + types + MockAdapter
-  bus/                      # EventBus (tokio broadcast) + AppEvent
-  data_engine/              # SQLite (rusqlite bundled) 初始化
-  strategy_engine/          # LegBinding / StrategyDefinition / Strategy trait
-  risk/                     # RiskConfig + check_order
-  vault/                    # Vault trait（占位，后续加密存 ./data）
-  commands/                 # Tauri commands + Bus→前端事件转发
-.github/workflows/build.yml # 分支构建 + Windows 便携包 Artifact
-```
-
-## 核心契约
-
-- `ExchangeAdapter`（async trait）：`connect/disconnect`、`subscribe_ticks/unsubscribe_ticks`、`get_balances/get_positions/get_open_orders`、`place_order/cancel_order`
-- 策略腿：`Vec<LegBinding>`，`LegBinding { leg_id, adapter_id, account_id, symbol, ratio, side, enabled }` — 1 条=单腿，N 条=多腿，不写死 A/B
-- `MockAdapter`：随机游走 BTC/ETH 行情 500ms、余额 2s → `EventBus` → Tauri 事件 `market://tick` / `account://balance` → Zustand → 页面
+后端测试用 scratch crate（`rebuild-desss-test.sh`，不含 Tauri 依赖的
+commands / lib.rs / logging / strategy_engine 由 CI 的 `cargo check` 覆盖）。

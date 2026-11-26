@@ -143,6 +143,7 @@ const ASTERDEX_FIELDS: &[CredentialField] = &[
         min: None,
         max: None,
         forbidden: &[],
+        hint: Some("拥有该账户、授权了 Agent 的主钱包地址（V3 签名 user 参数）"),
     },
     CredentialField {
         key: "agent_private_key",
@@ -153,6 +154,7 @@ const ASTERDEX_FIELDS: &[CredentialField] = &[
         min: None,
         max: None,
         forbidden: &[],
+        hint: None,
     },
 ];
 
@@ -160,6 +162,14 @@ const ASTERDEX_FIELDS: &[CredentialField] = &[
 impl Venue for AsterdexVenue {
     fn id(&self) -> &'static str {
         "asterdex"
+    }
+
+    fn display_name(&self) -> &'static str {
+        "AsterDEX"
+    }
+
+    fn note(&self) -> Option<&'static str> {
+        Some("V3 仅支持 Agent 钱包凭证")
     }
 
     fn credentials(&self) -> &'static [CredentialField] {

@@ -1,9 +1,9 @@
 import React, { useEffect, useState } from "react";
 import { Button } from "../components/ui";
 import ThemeSwitcher from "../components/ThemeSwitcher";
-import { getExchange } from "../lib/exchanges";
+import { useInvoke } from "../hooks/useInvoke";
 import { api } from "../lib/tauri";
-import type { CatalogStatus, ProxyState } from "../lib/types";
+import { useVenueStore } from "../store/useVenueStore";
 
 /**
  * System page: local proxy setting. The backend resolves the proxy in
@@ -11,36 +11,35 @@ import type { CatalogStatus, ProxyState } from "../lib/types";
  * Windows system proxy registry — and uses it for both reqwest (REST)
  * and the WS dial (HTTP CONNECT). Applies when an account is
  * (re)connected.
+ *
+ * Proxy + catalog both come from `useInvoke` (Phase 2, I11); saving
+ * the proxy is a click mutation that refreshes the proxy afterwards.
  */
 export default function SystemPage() {
-  const [proxy, setProxy] = useState<ProxyState | null>(null);
+  const proxy = useInvoke(() => api.getProxy(), []);
+  const catalog = useInvoke(() => api.getCatalogStatus(), []);
   const [input, setInput] = useState("");
   const [msg, setMsg] = useState("");
   const [saving, setSaving] = useState(false);
-  const [catalog, setCatalog] = useState<CatalogStatus | null>(null);
+  const names = useVenueStore((s) => s.names);
+  const venueName = (id: string) => names[id] ?? id;
 
   useEffect(() => {
-    api
-      .getProxy()
-      .then((p) => {
-        setProxy(p);
-        setInput(p.custom ?? "");
-      })
-      .catch(() => {});
-    api.getCatalogStatus().then(setCatalog).catch(() => {});
-  }, []);
+    if (proxy.data) setInput(proxy.data.custom ?? "");
+  }, [proxy.data]);
 
-  const save = () => {
+  const save = async () => {
     setSaving(true);
     setMsg("");
-    api
-      .setProxy(input)
-      .then((p) => {
-        setProxy(p);
-        setMsg("已保存，重新连接账户后生效");
-      })
-      .catch((e) => setMsg(`保存失败：${String(e)}`))
-      .finally(() => setSaving(false));
+    try {
+      await api.setProxy(input);
+      proxy.refresh();
+      setMsg("已保存，重新连接账户后生效");
+    } catch (e) {
+      setMsg(`保存失败：${String(e)}`);
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (
@@ -68,9 +67,9 @@ export default function SystemPage() {
             {saving ? "保存中…" : "保存"}
           </Button>
         </div>
-        {proxy && (
+        {proxy.data && (
           <div className="text-xs text-ds-text-3 mt-2 num">
-            当前生效：{proxy.effective ?? "未使用代理（直连）"}
+            当前生效：{proxy.data.effective ?? "未使用代理（直连）"}
           </div>
         )}
         {msg && <div className="text-xs text-ds-text-2 mt-2">{msg}</div>}
@@ -80,12 +79,12 @@ export default function SystemPage() {
         <div className="text-xs text-ds-text-2 mb-3 leading-relaxed">
           品种目录落库保存，搜索不走网络；后台每 12 小时刷新一次。
         </div>
-        {catalog ? (
+        {catalog.data ? (
           <>
             <div className="text-xs text-ds-text-2 leading-relaxed num">
-              {catalog.venues.map((v) => (
+              {catalog.data.venues.map((v) => (
                 <div key={v.exchangeId} className="flex justify-between gap-2">
-                  <span>{getExchange(v.exchangeId).name}</span>
+                  <span>{venueName(v.exchangeId)}</span>
                   <span>
                     {v.rows} 个品种
                     {" · "}
@@ -99,7 +98,7 @@ export default function SystemPage() {
               ))}
             </div>
             <div className="text-xs text-ds-text-3 mt-3 num break-all">
-              日志目录：{catalog.logDir}
+              日志目录：{catalog.data.logDir}
             </div>
           </>
         ) : (

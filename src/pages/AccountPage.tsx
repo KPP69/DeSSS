@@ -1,19 +1,23 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import AccountModal from "../components/AccountModal";
 import { Badge, Button, ConfirmDialog, DataTable, StatCard, tdClsCompact, trCls } from "../components/ui";
-import { getExchange } from "../lib/exchanges";
-import { api } from "../lib/tauri";
+import { useVenueSchemas } from "../hooks/useVenueSchemas";
 import { useAccountStore } from "../store/useAccountStore";
 import type { AccountView } from "../lib/types";
 import { useAccountUiStore } from "../store/useAccountUiStore";
 import { useLiveStore, latencyTone } from "../store/useLiveStore";
+import { useVenueStore } from "../store/useVenueStore";
 
 function fmt(n: number): string {
   return n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
-/** Exchanges with a read-only adapter in phase 3. */
-const SYNCABLE = new Set(["hyperliquid", "entropy", "lighter", "lighter_robinhood", "asterdex", "arcus"]);
+/**
+ * Account page. Live sync lives in the account store (Phase 2, I11):
+ * the list load hydrates live states and auto-connects, so this page
+ * only reads state and fires store actions. The connectable set is
+ * the backend's schema list, not a frontend table (Phase 2, I10).
+ */
 
 const STATUS_LABEL: Record<string, string> = {
   connecting: "连接中",
@@ -29,16 +33,23 @@ export default function AccountPage() {
   const loading = useAccountStore((s) => s.loading);
   const fetchAll = useAccountStore((s) => s.fetchAll);
   const remove = useAccountStore((s) => s.remove);
+  const connect = useAccountStore((s) => s.connect);
+  const disconnect = useAccountStore((s) => s.disconnect);
   const live = useLiveStore((s) => s.live);
-  const setLive = useLiveStore((s) => s.setLive);
-  const removeLive = useLiveStore((s) => s.removeLive);
+  const { schemas } = useVenueSchemas();
+  const names = useVenueStore((s) => s.names);
+  const venueName = (id: string) => names[id] ?? id;
+  // Every venue the backend reports has a read-only adapter.
+  const syncable = useMemo(
+    () => new Set((schemas ?? []).map((s) => s.id)),
+    [schemas],
+  );
 
   const modalOpen = useAccountUiStore((s) => s.modalOpen);
   const editing = useAccountUiStore((s) => s.editing);
   const openEdit = useAccountUiStore((s) => s.openEdit);
   const closeModal = useAccountUiStore((s) => s.close);
   const [pendingDelete, setPendingDelete] = useState<AccountView | null>(null);
-  const connectTried = useRef<Set<string>>(new Set());
 
   // Top overview: sum live equity / available / PnL across accounts.
   // Hyperliquid and Entropy share one master-wallet pool (the backend
@@ -72,30 +83,6 @@ export default function AccountPage() {
     fetchAll();
   }, [fetchAll]);
 
-  // Hydrate live states, then auto-connect every supported account that has
-  // credentials and is not already live. Private keys are never involved:
-  // the backend only reads the public address / account index from the vault.
-  useEffect(() => {
-    api
-      .listAccountLive()
-      .then((list) => list.forEach(setLive))
-      .catch(() => {});
-  }, [setLive]);
-
-  useEffect(() => {
-    for (const a of accounts) {
-      if (!SYNCABLE.has(a.exchangeId) || !a.credentialConfigured) continue;
-      if (live[a.id] || connectTried.current.has(a.id)) continue;
-      connectTried.current.add(a.id);
-      api
-        .connectAccount(a.id)
-        .then(setLive)
-        // Connect failures are logged to the console by the backend;
-        // nothing is shown here so the list never shifts.
-        .catch(() => {});
-    }
-  }, [accounts, live, setLive]);
-
   return (
     <div>
       <div className="grid grid-cols-3 gap-3 mb-4">
@@ -126,7 +113,7 @@ export default function AccountPage() {
       <DataTable headers={HEADERS} minWidth={700} compact colWidths={["14%", "22%", "14%", "16%", "12%", "22%"]}>
         {accounts.map((a) => {
           const lv = live[a.id];
-          const syncable = SYNCABLE.has(a.exchangeId);
+          const isSyncable = syncable.has(a.exchangeId);
           const tone = lv ? latencyTone(lv.latencyMs, lv.status) : "offline";
           return (
           <tr key={a.id} className={trCls}>
@@ -149,7 +136,7 @@ export default function AccountPage() {
                 )}
               </div>
             </td>
-            <td className={`${tdClsCompact} leading-tight`}>{getExchange(a.exchangeId).name}</td>
+            <td className={`${tdClsCompact} leading-tight`}>{venueName(a.exchangeId)}</td>
             {lv ? (
               <>
                 <td className={`${tdClsCompact} num`}>
@@ -162,17 +149,17 @@ export default function AccountPage() {
               </>
             ) : (
               <>
-                <td className={`${tdClsCompact} text-ds-text-3`}>{syncable ? "未连接" : "本阶段不支持"}</td>
+                <td className={`${tdClsCompact} text-ds-text-3`}>{isSyncable ? "未连接" : "本阶段不支持"}</td>
                 <td className={`${tdClsCompact} text-ds-text-3`}>—</td>
               </>
             )}
             <td className="text-center px-2 py-1.5 text-[13px] text-ds-text-1 whitespace-nowrap">
               <div className="flex items-center justify-center gap-1.5">
-                {syncable && a.credentialConfigured && !lv && (
+                {isSyncable && a.credentialConfigured && !lv && (
                   <Button
                     variant="secondary"
                     size="sm"
-                    onClick={() => api.connectAccount(a.id).then(setLive).catch(() => {})}
+                    onClick={() => void connect(a.id)}
                   >
                     连接
                   </Button>
@@ -181,12 +168,7 @@ export default function AccountPage() {
                   <Button
                     variant="ghost"
                     size="sm"
-                    onClick={() =>
-                      api
-                        .disconnectAccount(a.id)
-                        .then(() => removeLive(a.id))
-                        .catch(() => {})
-                    }
+                    onClick={() => void disconnect(a.id)}
                   >
                     断开
                   </Button>
@@ -223,7 +205,7 @@ export default function AccountPage() {
         message={
           pendingDelete && (
             <>
-              确定要删除账户「{pendingDelete.label}」（{getExchange(pendingDelete.exchangeId).name}）吗？
+              确定要删除账户「{pendingDelete.label}」（{venueName(pendingDelete.exchangeId)}）吗？
               该账户保存在本机 Vault 中的凭证将一并删除，此操作不可恢复。
             </>
           )
@@ -231,13 +213,9 @@ export default function AccountPage() {
         onCancel={() => setPendingDelete(null)}
         onConfirm={async () => {
           if (!pendingDelete) return;
-          await api.disconnectAccount(pendingDelete.id).catch(() => {});
-          removeLive(pendingDelete.id);
+          await disconnect(pendingDelete.id);
           const ok = await remove(pendingDelete.id);
           if (ok) {
-            // Clear the frontend pending-connect queue for this account so
-            // the auto-connect effect never retries a deleted account.
-            connectTried.current.delete(pendingDelete.id);
             setPendingDelete(null);
           }
         }}

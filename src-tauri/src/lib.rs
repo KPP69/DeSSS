@@ -202,6 +202,7 @@ pub fn run() {
             commands::market::search_market_info,
             commands::market::refresh_market_catalog,
             commands::market::get_catalog_status,
+            commands::market::get_venue_schemas,
             commands::market::set_stream_symbols,
             commands::risk::get_risk_config,
             commands::risk::set_risk_config,

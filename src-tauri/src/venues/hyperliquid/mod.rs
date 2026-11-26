@@ -169,6 +169,20 @@ impl Venue for HyperliquidVenue {
         self.id
     }
 
+    fn display_name(&self) -> &'static str {
+        match self.id {
+            "entropy" => "Entropy",
+            _ => "Hyperliquid",
+        }
+    }
+
+    fn note(&self) -> Option<&'static str> {
+        match self.id {
+            "entropy" => Some("复用 Hyperliquid HIP-3 接入模式"),
+            _ => None,
+        }
+    }
+
     fn credentials(&self) -> &'static [CredentialField] {
         &[
             CredentialField {
@@ -180,6 +194,7 @@ impl Venue for HyperliquidVenue {
                 min: None,
                 max: None,
                 forbidden: &[],
+                hint: None,
             },
             CredentialField {
                 key: "agent_private_key",
@@ -190,6 +205,7 @@ impl Venue for HyperliquidVenue {
                 min: None,
                 max: None,
                 forbidden: &[],
+                hint: None,
             },
         ]
     }
