@@ -212,7 +212,11 @@ fn tls_roots() -> rustls::RootCertStore {
     let mut store = rustls::RootCertStore::empty();
     store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     #[cfg(test)]
-    for r in TEST_TLS_ROOTS.lock().unwrap().iter() {
+    for r in TEST_TLS_ROOTS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+    {
         let _ = store.add(r.clone());
     }
     store
@@ -229,7 +233,10 @@ static TEST_TLS_ROOTS: std::sync::Mutex<Vec<rustls::pki_types::CertificateDer<'s
 /// mid-handshake (the parallel `cargo test` flake).
 #[cfg(test)]
 pub fn set_test_tls_roots(roots: Vec<rustls::pki_types::CertificateDer<'static>>) {
-    TEST_TLS_ROOTS.lock().unwrap().extend(roots);
+    TEST_TLS_ROOTS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .extend(roots);
 }
 
 async fn tls_wrap<S: AsyncRead + AsyncWrite + Unpin>(

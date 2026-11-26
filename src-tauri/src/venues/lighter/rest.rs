@@ -10,9 +10,11 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use super::{LighterAdapter, LighterNetwork, Snapshot};
-use crate::adapters::{f64_from, now_ms, AdapterResult, ExchangeAdapter};
 use crate::bus::AppEvent;
+use crate::core::error::{VenueError, VenueResult};
 use crate::core::types::{AccountLive, Balance, LivePosition, Order, OrderRequest, Position};
+use crate::core::util::{f64_from, now_ms};
+use crate::venues::ExchangeAdapter;
 
 const POLL_INTERVAL: Duration = Duration::from_secs(10);
 
@@ -84,7 +86,7 @@ impl LighterAdapter {
     fn latency_ms(&self) -> Option<u64> {
         self.last_rest_rtt
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .map(|r| r.as_millis() as u64)
     }
     /// One console log line for the in-app drawer.
@@ -92,13 +94,24 @@ impl LighterAdapter {
         self.bus.log(level, self.name(), message);
     }
     fn publish_live(&self) {
-        let snap = self.snapshot.lock().unwrap().clone();
-        let status = crate::adapters::live_status(
+        let snap = self
+            .snapshot
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let status = crate::core::util::live_status(
             self.rest_ok.load(Ordering::SeqCst),
-            self.last_error.lock().unwrap().is_some(),
+            self.last_error
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_some(),
         )
         .to_string();
-        let error = self.last_error.lock().unwrap().clone();
+        let error = self
+            .last_error
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         let live = AccountLive {
             account_id: self.account_id.clone(),
             adapter_id: self.id.clone(),
@@ -122,14 +135,14 @@ impl LighterAdapter {
     fn set_rest(&self, ok: bool, rtt: Option<Duration>) {
         self.rest_ok.store(ok, Ordering::SeqCst);
         if let Some(r) = rtt {
-            *self.last_rest_rtt.lock().unwrap() = Some(r);
+            *self.last_rest_rtt.lock().unwrap_or_else(|e| e.into_inner()) = Some(r);
         }
         self.publish_live();
     }
     fn symbol_for(&self, market_id: u64) -> String {
         self.symbols
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .get(&market_id)
             .cloned()
             .unwrap_or_else(|| format!("market-{market_id}"))
@@ -177,8 +190,8 @@ impl LighterAdapter {
                 body_snippet(&text, 500)
             ));
         }
-        *self.market_ids.lock().unwrap() = ids;
-        *self.symbols.lock().unwrap() = names;
+        *self.market_ids.lock().unwrap_or_else(|e| e.into_inner()) = ids;
+        *self.symbols.lock().unwrap_or_else(|e| e.into_inner()) = names;
         Ok(())
     }
     /// One REST read of the public account endpoint.
@@ -295,7 +308,7 @@ impl LighterAdapter {
         let started = Instant::now();
         match self.fetch_account().await {
             Ok((snap, balance)) => {
-                *self.snapshot.lock().unwrap() = snap;
+                *self.snapshot.lock().unwrap_or_else(|e| e.into_inner()) = snap;
                 self.bus.publish(AppEvent::Balance(balance));
                 self.set_rest(true, Some(started.elapsed()));
             }
@@ -346,36 +359,36 @@ impl ExchangeAdapter for LighterAdapter {
         }
     }
 
-    async fn connect(&self) -> AdapterResult<()> {
+    async fn connect(&self) -> VenueResult<()> {
         self.running.store(true, Ordering::SeqCst);
         Ok(())
     }
 
-    async fn disconnect(&self) -> AdapterResult<()> {
+    async fn disconnect(&self) -> VenueResult<()> {
         self.running.store(false, Ordering::SeqCst);
         Ok(())
     }
 
-    async fn subscribe_ticks(&self, _symbols: Vec<String>) -> AdapterResult<()> {
+    async fn subscribe_ticks(&self, _symbols: Vec<String>) -> VenueResult<()> {
         Ok(())
     }
-    async fn unsubscribe_ticks(&self, _symbols: Vec<String>) -> AdapterResult<()> {
+    async fn unsubscribe_ticks(&self, _symbols: Vec<String>) -> VenueResult<()> {
         Ok(())
     }
 
-    async fn get_balances(&self, _account_id: &str) -> AdapterResult<Vec<Balance>> {
+    async fn get_balances(&self, _account_id: &str) -> VenueResult<Vec<Balance>> {
         let (_, balance) = self
             .fetch_account()
             .await
-            .map_err(crate::adapters::AdapterError::Other)?;
+            .map_err(crate::core::error::VenueError::transport)?;
         Ok(vec![balance])
     }
 
-    async fn get_positions(&self, _account_id: &str) -> AdapterResult<Vec<Position>> {
+    async fn get_positions(&self, _account_id: &str) -> VenueResult<Vec<Position>> {
         let (snap, _) = self
             .fetch_account()
             .await
-            .map_err(crate::adapters::AdapterError::Other)?;
+            .map_err(crate::core::error::VenueError::transport)?;
         Ok(snap
             .positions
             .iter()
@@ -392,16 +405,12 @@ impl ExchangeAdapter for LighterAdapter {
             .collect())
     }
 
-    async fn get_open_orders(&self, _account_id: &str) -> AdapterResult<Vec<Order>> {
-        Err(crate::adapters::AdapterError::Other(
-            "该交易所下单将在下一阶段接入".to_string(),
-        ))
+    async fn get_open_orders(&self, _account_id: &str) -> VenueResult<Vec<Order>> {
+        Err(VenueError::unsupported("查询持仓单"))
     }
 
-    async fn place_order(&self, _req: OrderRequest) -> AdapterResult<Order> {
-        Err(crate::adapters::AdapterError::Other(
-            "该交易所下单将在下一阶段接入".to_string(),
-        ))
+    async fn place_order(&self, _req: OrderRequest) -> VenueResult<Order> {
+        Err(VenueError::unsupported("下单"))
     }
 
     async fn cancel_order(
@@ -409,10 +418,8 @@ impl ExchangeAdapter for LighterAdapter {
         _account_id: &str,
         _order_id: &str,
         _symbol: &str,
-    ) -> AdapterResult<()> {
-        Err(crate::adapters::AdapterError::Other(
-            "该交易所下单将在下一阶段接入".to_string(),
-        ))
+    ) -> VenueResult<()> {
+        Err(VenueError::unsupported("撤单"))
     }
 
     async fn run(&self) {
@@ -432,8 +439,8 @@ mod tests {
     use super::*;
     use std::sync::{Arc, RwLock};
 
-    use crate::adapters::reconcile::ReconcileState;
     use crate::bus::EventBus;
+    use crate::market::reconcile::ReconcileState;
 
     #[test]
     fn network_endpoints_are_distinct() {

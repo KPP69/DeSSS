@@ -29,13 +29,13 @@ use futures_util::{SinkExt, StreamExt};
 use tauri::async_runtime::JoinHandle;
 use tokio_tungstenite::tungstenite::Message;
 
-use crate::adapters::market_catalog::MarketCatalog;
-use crate::adapters::now_ms;
-use crate::adapters::sync::SyncManager;
 use crate::bus::{AppEvent, EventBus};
 use crate::core::book::BookState;
 use crate::core::stream_kind::StreamKind;
 use crate::core::types::OrderBook;
+use crate::core::util::now_ms;
+use crate::market::catalog::MarketCatalog;
+use crate::market::sync::SyncManager;
 use crate::net::ws::connect_ws;
 
 /// Milliseconds without a frame after which a streamed book counts as

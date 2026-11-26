@@ -12,11 +12,13 @@ use super::sign::{
     cancel_action_json, cancel_action_mp, cancel_by_cloid_action_json, cancel_by_cloid_action_mp,
 };
 use super::{AssetMeta, HyperliquidAdapter, ASSET_META_TTL};
-use crate::adapters::hl_signing::{self, Mp, NonceAllocator};
-use crate::adapters::{f64_from, now_ms, AdapterError, AdapterResult, ExchangeAdapter};
+use crate::core::error::{VenueError, VenueResult};
+use crate::core::signing::{self, Mp, NonceAllocator};
 use crate::core::types::{
     Balance, Order, OrderInfo, OrderRequest, OrderStatus, Position, TradeInfo,
 };
+use crate::core::util::{f64_from, now_ms};
+use crate::venues::ExchangeAdapter;
 
 /// A wire price/size string: Decimal, at most 8 decimals (the SDK's
 /// `float_to_wire` rule), trailing zeros stripped.
@@ -63,14 +65,16 @@ fn parse_order_status_response(
     account_id: &str,
     cloid: &str,
     fills_avg: Option<f64>,
-) -> Result<OrderInfo, String> {
-    if v["status"].as_str() == Some(crate::adapters::UNKNOWN_OID) {
-        return Err(crate::adapters::UNKNOWN_OID.to_string());
+) -> Result<OrderInfo, VenueError> {
+    if v["status"].as_str() == Some(crate::core::error::UNKNOWN_OID) {
+        return Err(VenueError::rejected(
+            crate::core::error::UNKNOWN_OID.to_string(),
+        ));
     }
     let inner = &v["order"];
     let o = &inner["order"];
     if o.is_null() {
-        return Err("订单状态响应无法解析".to_string());
+        return Err(VenueError::transport("订单状态响应无法解析".to_string()));
     }
     let status = map_order_status(inner["status"].as_str().unwrap_or(""));
     let orig_sz = f64_from(&o["origSz"]);
@@ -200,9 +204,9 @@ impl HyperliquidAdapter {
     /// (`io:NVDA` for Entropy — the `io` universe names already
     /// carry the prefix); the asset is `dex_offset + index in that
     /// dex's universe`, with the offset from [`dex_offset_for`].
-    async fn resolve_asset(&self, symbol: &str) -> Result<u32, AdapterError> {
+    async fn resolve_asset(&self, symbol: &str) -> Result<u32, VenueError> {
         {
-            let cache = self.asset_meta.lock().unwrap();
+            let cache = self.asset_meta.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(m) = cache.as_ref() {
                 if m.fetched_at.elapsed() < ASSET_META_TTL {
                     return m
@@ -211,7 +215,7 @@ impl HyperliquidAdapter {
                         .position(|n| n == symbol)
                         .map(|i| m.dex_offset + i as u32)
                         .ok_or_else(|| {
-                            AdapterError::Other(format!("{symbol} 不在该交易所的交易品种中"))
+                            VenueError::rejected(format!("{symbol} 不在该交易所的交易品种中"))
                         });
                 }
             }
@@ -231,7 +235,7 @@ impl HyperliquidAdapter {
             })
             .unwrap_or_default();
         if universe.is_empty() {
-            return Err(AdapterError::Other(
+            return Err(VenueError::rejected(
                 "Hyperliquid 品种列表为空，无法解析交易对".to_string(),
             ));
         }
@@ -249,15 +253,15 @@ impl HyperliquidAdapter {
                 })
                 .unwrap_or_default();
             dex_offset = dex_offset_for(&names, dex).ok_or_else(|| {
-                AdapterError::Other(format!("交易所未返回 {dex} dex，无法解析交易对"))
+                VenueError::rejected(format!("交易所未返回 {dex} dex，无法解析交易对"))
             })?;
         }
         let asset = universe
             .iter()
             .position(|n| n == symbol)
             .map(|i| dex_offset + i as u32)
-            .ok_or_else(|| AdapterError::Other(format!("{symbol} 不在该交易所的交易品种中")))?;
-        *self.asset_meta.lock().unwrap() = Some(AssetMeta {
+            .ok_or_else(|| VenueError::rejected(format!("{symbol} 不在该交易所的交易品种中")))?;
+        *self.asset_meta.lock().unwrap_or_else(|e| e.into_inner()) = Some(AssetMeta {
             fetched_at: Instant::now(),
             universe,
             dex_offset,
@@ -272,11 +276,11 @@ impl HyperliquidAdapter {
     /// 2026-11-26), and the parse below needs the id back as the
     /// fallback `client_order_id` for orders the exchange reports
     /// without one.
-    async fn query_order(&self, id: &str, numeric: bool) -> AdapterResult<OrderInfo> {
+    async fn query_order(&self, id: &str, numeric: bool) -> VenueResult<OrderInfo> {
         let oid_json = if numeric {
             let n: u64 = id
                 .parse()
-                .map_err(|_| AdapterError::Other("订单号无法解析".to_string()))?;
+                .map_err(|_| VenueError::rejected("订单号无法解析".to_string()))?;
             serde_json::json!(n)
         } else {
             Value::String(id.to_string())
@@ -299,7 +303,6 @@ impl HyperliquidAdapter {
             }
         }
         parse_order_status_response(&v, &self.id, &self.account_id, id, fills_avg)
-            .map_err(AdapterError::Other)
     }
 
     /// Volume-weighted average fill price of one order, from
@@ -349,36 +352,36 @@ impl ExchangeAdapter for HyperliquidAdapter {
         }
     }
 
-    async fn connect(&self) -> AdapterResult<()> {
+    async fn connect(&self) -> VenueResult<()> {
         self.running.store(true, Ordering::SeqCst);
         Ok(())
     }
 
-    async fn disconnect(&self) -> AdapterResult<()> {
+    async fn disconnect(&self) -> VenueResult<()> {
         self.running.store(false, Ordering::SeqCst);
         Ok(())
     }
 
-    async fn subscribe_ticks(&self, _symbols: Vec<String>) -> AdapterResult<()> {
+    async fn subscribe_ticks(&self, _symbols: Vec<String>) -> VenueResult<()> {
         Ok(())
     }
-    async fn unsubscribe_ticks(&self, _symbols: Vec<String>) -> AdapterResult<()> {
+    async fn unsubscribe_ticks(&self, _symbols: Vec<String>) -> VenueResult<()> {
         Ok(())
     }
 
-    async fn get_balances(&self, _account_id: &str) -> AdapterResult<Vec<Balance>> {
+    async fn get_balances(&self, _account_id: &str) -> VenueResult<Vec<Balance>> {
         let (_, balance) = self
             .fetch_account_state()
             .await
-            .map_err(AdapterError::Other)?;
+            .map_err(VenueError::transport)?;
         Ok(vec![balance])
     }
 
-    async fn get_positions(&self, _account_id: &str) -> AdapterResult<Vec<Position>> {
+    async fn get_positions(&self, _account_id: &str) -> VenueResult<Vec<Position>> {
         let (snap, _) = self
             .fetch_account_state()
             .await
-            .map_err(AdapterError::Other)?;
+            .map_err(VenueError::transport)?;
         Ok(snap
             .positions
             .iter()
@@ -395,7 +398,7 @@ impl ExchangeAdapter for HyperliquidAdapter {
             .collect())
     }
 
-    async fn get_open_orders(&self, _account_id: &str) -> AdapterResult<Vec<Order>> {
+    async fn get_open_orders(&self, _account_id: &str) -> VenueResult<Vec<Order>> {
         let mut body = serde_json::json!({
             "type": "openOrders",
             "user": self.address,
@@ -405,36 +408,36 @@ impl ExchangeAdapter for HyperliquidAdapter {
             body["dex"] = Value::String(dex.to_string());
         }
         let v = self.post_info(body).await?;
-        parse_open_orders(&v, &self.id, &self.account_id).map_err(AdapterError::Other)
+        parse_open_orders(&v, &self.id, &self.account_id).map_err(VenueError::transport)
     }
 
-    async fn place_order(&self, req: OrderRequest) -> AdapterResult<Order> {
+    async fn place_order(&self, req: OrderRequest) -> VenueResult<Order> {
         let (_secret, agent_addr) = self.signing_key()?;
         let asset = self.resolve_asset(&req.symbol).await?;
         let price = req
             .price
             .filter(|p| *p > 0.0)
-            .ok_or_else(|| AdapterError::Other("限价单必须有大于 0 的价格".to_string()))?;
+            .ok_or_else(|| VenueError::rejected("限价单必须有大于 0 的价格".to_string()))?;
         if req.quantity <= 0.0 {
-            return Err(AdapterError::Other("下单数量必须大于 0".to_string()));
+            return Err(VenueError::rejected("下单数量必须大于 0".to_string()));
         }
         let tif = match req.order_type.as_str() {
             "limit" => "Gtc",
             "post_only" => "Alo",
             "ioc" => "Ioc",
             other => {
-                return Err(AdapterError::Other(format!(
+                return Err(VenueError::rejected(format!(
                     "不支持的订单类型：{other}（仅支持 limit / post_only / ioc）"
                 )))
             }
         };
-        let price_wire = decimal_to_wire(price).map_err(AdapterError::Other)?;
-        let qty_wire = decimal_to_wire(req.quantity).map_err(AdapterError::Other)?;
+        let price_wire = decimal_to_wire(price).map_err(VenueError::rejected)?;
+        let qty_wire = decimal_to_wire(req.quantity).map_err(VenueError::rejected)?;
         let cloid = req
             .client_order_id
             .clone()
             .filter(|c| !c.is_empty())
-            .unwrap_or_else(hl_signing::generate_cloid);
+            .unwrap_or_else(signing::generate_cloid);
         let nonce = NonceAllocator::next(&agent_addr);
         let action_mp = Mp::Map(vec![
             ("type", Mp::Str("order")),
@@ -470,7 +473,7 @@ impl ExchangeAdapter for HyperliquidAdapter {
         });
         let v = self.post_exchange(action_json, &action_mp, nonce).await?;
         if v["status"].as_str() == Some("err") {
-            return Err(AdapterError::Other(format!(
+            return Err(VenueError::rejected(format!(
                 "交易所拒绝下单：{}",
                 v["response"].as_str().unwrap_or("未知原因")
             )));
@@ -478,10 +481,10 @@ impl ExchangeAdapter for HyperliquidAdapter {
         let statuses = v["response"]["data"]["statuses"]
             .as_array()
             .ok_or_else(|| {
-                AdapterError::UnknownOutcome("下单响应中没有订单状态，订单状态未知".to_string())
+                VenueError::UnknownOutcome("下单响应中没有订单状态，订单状态未知".to_string())
             })?;
         let first = statuses.first().ok_or_else(|| {
-            AdapterError::UnknownOutcome("下单响应中没有订单状态，订单状态未知".to_string())
+            VenueError::UnknownOutcome("下单响应中没有订单状态，订单状态未知".to_string())
         })?;
         let (oid, status) = if let Some(resting) = first.get("resting") {
             (
@@ -494,9 +497,9 @@ impl ExchangeAdapter for HyperliquidAdapter {
                 OrderStatus::Filled,
             )
         } else if let Some(err) = first.get("error").and_then(|e| e.as_str()) {
-            return Err(AdapterError::Other(format!("交易所拒绝下单：{err}")));
+            return Err(VenueError::rejected(format!("交易所拒绝下单：{err}")));
         } else {
-            return Err(AdapterError::UnknownOutcome(
+            return Err(VenueError::UnknownOutcome(
                 "下单响应状态无法识别，订单状态未知".to_string(),
             ));
         };
@@ -520,7 +523,7 @@ impl ExchangeAdapter for HyperliquidAdapter {
         _account_id: &str,
         order_id: &str,
         symbol: &str,
-    ) -> AdapterResult<()> {
+    ) -> VenueResult<()> {
         let (_secret, agent_addr) = self.signing_key()?;
         let asset = self.resolve_asset(symbol).await?;
         let (action_mp, action_json) = if order_id.starts_with("0x") {
@@ -531,13 +534,13 @@ impl ExchangeAdapter for HyperliquidAdapter {
         } else {
             let oid: u64 = order_id
                 .parse()
-                .map_err(|_| AdapterError::Other(format!("订单号格式不正确：{order_id}")))?;
+                .map_err(|_| VenueError::rejected(format!("订单号格式不正确：{order_id}")))?;
             (cancel_action_mp(asset, oid), cancel_action_json(asset, oid))
         };
         let nonce = NonceAllocator::next(&agent_addr);
         let v = self.post_exchange(action_json, &action_mp, nonce).await?;
         if v["status"].as_str() == Some("err") {
-            return Err(AdapterError::Other(format!(
+            return Err(VenueError::rejected(format!(
                 "交易所拒绝撤单：{}",
                 v["response"].as_str().unwrap_or("未知原因")
             )));
@@ -545,10 +548,10 @@ impl ExchangeAdapter for HyperliquidAdapter {
         let statuses = v["response"]["data"]["statuses"]
             .as_array()
             .ok_or_else(|| {
-                AdapterError::UnknownOutcome("撤单响应中没有撤单状态，撤单结果未知".to_string())
+                VenueError::UnknownOutcome("撤单响应中没有撤单状态，撤单结果未知".to_string())
             })?;
         let first = statuses.first().ok_or_else(|| {
-            AdapterError::UnknownOutcome("撤单响应中没有撤单状态，撤单结果未知".to_string())
+            VenueError::UnknownOutcome("撤单响应中没有撤单状态，撤单结果未知".to_string())
         })?;
         if first.as_str() == Some("success") {
             Ok(())
@@ -556,19 +559,15 @@ impl ExchangeAdapter for HyperliquidAdapter {
             // "Order was never placed, already canceled, or filled."
             // is a definite answer about the cancel, but NOT about the
             // order: the caller queries the order to find out which.
-            Err(AdapterError::Other(format!("交易所拒绝撤单：{err}")))
+            Err(VenueError::rejected(format!("交易所拒绝撤单：{err}")))
         } else {
-            Err(AdapterError::UnknownOutcome(
+            Err(VenueError::UnknownOutcome(
                 "撤单响应状态无法识别，撤单结果未知".to_string(),
             ))
         }
     }
 
-    async fn query_order_by_cloid(
-        &self,
-        _account_id: &str,
-        cloid: &str,
-    ) -> AdapterResult<OrderInfo> {
+    async fn query_order_by_cloid(&self, _account_id: &str, cloid: &str) -> VenueResult<OrderInfo> {
         // A decimal oid passed as a string is NOT a cloid: the
         // exchange rejects it with "Failed to deserialize the JSON
         // body into the target type" (verified live 2026-11-26), so
@@ -582,16 +581,16 @@ impl ExchangeAdapter for HyperliquidAdapter {
         self.query_order(cloid, false).await
     }
 
-    async fn query_order_by_oid(&self, _account_id: &str, oid: u64) -> AdapterResult<OrderInfo> {
+    async fn query_order_by_oid(&self, _account_id: &str, oid: u64) -> VenueResult<OrderInfo> {
         self.query_order(&oid.to_string(), true).await
     }
 
-    async fn query_fills(&self, _account_id: &str, cloid: &str) -> AdapterResult<Vec<TradeInfo>> {
+    async fn query_fills(&self, _account_id: &str, cloid: &str) -> VenueResult<Vec<TradeInfo>> {
         let info = self.query_order_by_cloid(_account_id, cloid).await?;
         let oid: u64 = info
             .order_id
             .parse()
-            .map_err(|_| AdapterError::Other("订单号无法解析，无法查询成交".to_string()))?;
+            .map_err(|_| VenueError::rejected("订单号无法解析，无法查询成交".to_string()))?;
         let v = self
             .post_info(serde_json::json!({
                 "type": "userFillsByTime",
@@ -720,7 +719,10 @@ mod tests {
         let v = serde_json::json!({"status": "unknownOid"});
         let err =
             parse_order_status_response(&v, "hyperliquid", "acc-1", "0xabc", None).unwrap_err();
-        assert_eq!(err, "unknownOid");
+        assert_eq!(
+            err,
+            VenueError::rejected(crate::core::error::UNKNOWN_OID.to_string())
+        );
     }
 
     #[test]

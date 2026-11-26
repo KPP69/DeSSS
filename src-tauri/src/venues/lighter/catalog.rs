@@ -124,7 +124,7 @@ pub(crate) async fn fetch_lighter(
         &funding,
         exchange_id,
         settlement,
-        crate::adapters::now_ms(),
+        crate::core::util::now_ms(),
     )
 }
 

@@ -10,7 +10,7 @@
 //!   positions and unrealised PnL.
 //! - Orders (phase 5A §4): real limit / post-only / IOC orders via
 //!   `POST /exchange` with pure-Rust EIP-712 L1 signing
-//!   (`adapters/hl_signing.rs`, golden-vector tested against the
+//!   (`core/signing.rs`, golden-vector tested against the
 //!   official Python SDK). The signing key is the account's
 //!   Agent/API wallet private key, decoded at connect time; accounts
 //!   without one stay read-only. Orders are one-shot sends — a
@@ -34,11 +34,11 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 
-use crate::adapters::reconcile::ReconcileState;
-use crate::adapters::ExchangeAdapter;
 use crate::bus::EventBus;
 use crate::core::market::MarketInfo;
 use crate::core::types::{AccountLive, LivePosition};
+use crate::market::reconcile::ReconcileState;
+use crate::venues::ExchangeAdapter;
 use crate::venues::{CredentialField, CredentialKind, StreamPlan, Venue, VenueCtx};
 
 pub const HL_INFO_URL: &str = "https://api.hyperliquid.xyz/info";
@@ -209,7 +209,7 @@ impl Venue for HyperliquidVenue {
         creds: &serde_json::Value,
         ctx: &VenueCtx,
     ) -> Result<Arc<dyn ExchangeAdapter>, String> {
-        let address = crate::adapters::sync::valid_address(creds, "wallet_address", "主钱包地址")?;
+        let address = crate::market::sync::valid_address(creds, "wallet_address", "主钱包地址")?;
         // The Agent/API wallet private key is optional at connect
         // time: accounts saved before it was required (or saved
         // without one) stay read-only; place_order fails with a

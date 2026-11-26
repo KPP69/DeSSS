@@ -11,9 +11,11 @@ use super::{
     sign::{next_nonce_value, sign_v3},
     AsterdexAdapter, Snapshot, ASTER_REST_URL,
 };
-use crate::adapters::{f64_from, now_ms, AdapterResult, ExchangeAdapter};
 use crate::bus::AppEvent;
+use crate::core::error::{VenueError, VenueResult};
 use crate::core::types::{AccountLive, Balance, LivePosition, Order, OrderRequest, Position};
+use crate::core::util::{f64_from, now_ms};
+use crate::venues::ExchangeAdapter;
 
 const POLL_INTERVAL: Duration = Duration::from_secs(10);
 
@@ -113,7 +115,7 @@ impl AsterdexAdapter {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_micros())
             .unwrap_or(0);
-        let mut last = self.last_nonce.lock().unwrap();
+        let mut last = self.last_nonce.lock().unwrap_or_else(|e| e.into_inner());
         let n = next_nonce_value(*last, now);
         *last = n;
         n
@@ -124,20 +126,31 @@ impl AsterdexAdapter {
     fn latency_ms(&self) -> Option<u64> {
         self.last_rest_rtt
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .map(|r| r.as_millis() as u64)
     }
     fn log(&self, level: &str, message: String) {
         self.bus.log(level, self.name(), message);
     }
     fn publish_live(&self) {
-        let snap = self.snapshot.lock().unwrap().clone();
-        let status = crate::adapters::live_status(
+        let snap = self
+            .snapshot
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let status = crate::core::util::live_status(
             self.rest_ok.load(Ordering::SeqCst),
-            self.last_error.lock().unwrap().is_some(),
+            self.last_error
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_some(),
         )
         .to_string();
-        let error = self.last_error.lock().unwrap().clone();
+        let error = self
+            .last_error
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         let live = AccountLive {
             account_id: self.account_id.clone(),
             adapter_id: self.id.clone(),
@@ -160,7 +173,7 @@ impl AsterdexAdapter {
     fn set_rest(&self, ok: bool, rtt: Option<Duration>) {
         self.rest_ok.store(ok, Ordering::SeqCst);
         if let Some(r) = rtt {
-            *self.last_rest_rtt.lock().unwrap() = Some(r);
+            *self.last_rest_rtt.lock().unwrap_or_else(|e| e.into_inner()) = Some(r);
         }
         self.publish_live();
     }
@@ -240,8 +253,8 @@ impl AsterdexAdapter {
         let started = Instant::now();
         match self.fetch_account_state().await {
             Ok((snap, balance)) => {
-                *self.snapshot.lock().unwrap() = snap;
-                *self.last_error.lock().unwrap() = None;
+                *self.snapshot.lock().unwrap_or_else(|e| e.into_inner()) = snap;
+                *self.last_error.lock().unwrap_or_else(|e| e.into_inner()) = None;
                 self.bus.publish(AppEvent::Balance(balance));
                 self.set_rest(true, Some(started.elapsed()));
             }
@@ -249,7 +262,7 @@ impl AsterdexAdapter {
                 // The failure is also stored on the live state so the
                 // account row shows the reason (e.g. the V1 migration
                 // message), not just the console log.
-                *self.last_error.lock().unwrap() = Some(e.clone());
+                *self.last_error.lock().unwrap_or_else(|e| e.into_inner()) = Some(e.clone());
                 self.log("error", format!("账户轮询失败：{e}"));
                 self.set_rest(false, None);
             }
@@ -284,36 +297,36 @@ impl ExchangeAdapter for AsterdexAdapter {
         "AsterDEX"
     }
 
-    async fn connect(&self) -> AdapterResult<()> {
+    async fn connect(&self) -> VenueResult<()> {
         self.running.store(true, Ordering::SeqCst);
         Ok(())
     }
 
-    async fn disconnect(&self) -> AdapterResult<()> {
+    async fn disconnect(&self) -> VenueResult<()> {
         self.running.store(false, Ordering::SeqCst);
         Ok(())
     }
 
-    async fn subscribe_ticks(&self, _symbols: Vec<String>) -> AdapterResult<()> {
+    async fn subscribe_ticks(&self, _symbols: Vec<String>) -> VenueResult<()> {
         Ok(())
     }
-    async fn unsubscribe_ticks(&self, _symbols: Vec<String>) -> AdapterResult<()> {
+    async fn unsubscribe_ticks(&self, _symbols: Vec<String>) -> VenueResult<()> {
         Ok(())
     }
 
-    async fn get_balances(&self, _account_id: &str) -> AdapterResult<Vec<Balance>> {
+    async fn get_balances(&self, _account_id: &str) -> VenueResult<Vec<Balance>> {
         let (_, balance) = self
             .fetch_account_state()
             .await
-            .map_err(crate::adapters::AdapterError::Other)?;
+            .map_err(crate::core::error::VenueError::transport)?;
         Ok(vec![balance])
     }
 
-    async fn get_positions(&self, _account_id: &str) -> AdapterResult<Vec<Position>> {
+    async fn get_positions(&self, _account_id: &str) -> VenueResult<Vec<Position>> {
         let (snap, _) = self
             .fetch_account_state()
             .await
-            .map_err(crate::adapters::AdapterError::Other)?;
+            .map_err(crate::core::error::VenueError::transport)?;
         Ok(snap
             .positions
             .iter()
@@ -330,16 +343,12 @@ impl ExchangeAdapter for AsterdexAdapter {
             .collect())
     }
 
-    async fn get_open_orders(&self, _account_id: &str) -> AdapterResult<Vec<Order>> {
-        Err(crate::adapters::AdapterError::Other(
-            "该交易所下单将在下一阶段接入".to_string(),
-        ))
+    async fn get_open_orders(&self, _account_id: &str) -> VenueResult<Vec<Order>> {
+        Err(VenueError::unsupported("查询持仓单"))
     }
 
-    async fn place_order(&self, _req: OrderRequest) -> AdapterResult<Order> {
-        Err(crate::adapters::AdapterError::Other(
-            "该交易所下单将在下一阶段接入".to_string(),
-        ))
+    async fn place_order(&self, _req: OrderRequest) -> VenueResult<Order> {
+        Err(VenueError::unsupported("下单"))
     }
 
     async fn cancel_order(
@@ -347,10 +356,8 @@ impl ExchangeAdapter for AsterdexAdapter {
         _account_id: &str,
         _order_id: &str,
         _symbol: &str,
-    ) -> AdapterResult<()> {
-        Err(crate::adapters::AdapterError::Other(
-            "该交易所下单将在下一阶段接入".to_string(),
-        ))
+    ) -> VenueResult<()> {
+        Err(VenueError::unsupported("撤单"))
     }
 
     async fn run(&self) {

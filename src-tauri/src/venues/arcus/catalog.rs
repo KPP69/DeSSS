@@ -99,7 +99,7 @@ pub(crate) async fn fetch_arcus_bbo(
 
 pub(crate) async fn fetch_arcus(http: &reqwest::Client) -> Result<Vec<MarketInfo>, String> {
     let v = get_json(http, &format!("{ARCUS_REST_URL}/v1/markets")).await?;
-    parse_arcus(&v, crate::adapters::now_ms())
+    parse_arcus(&v, crate::core::util::now_ms())
 }
 
 #[cfg(test)]

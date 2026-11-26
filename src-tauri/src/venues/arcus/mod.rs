@@ -28,11 +28,11 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 
-use crate::adapters::reconcile::ReconcileState;
-use crate::adapters::ExchangeAdapter;
 use crate::bus::EventBus;
 use crate::core::market::MarketInfo;
 use crate::core::types::{AccountLive, LivePosition};
+use crate::market::reconcile::ReconcileState;
+use crate::venues::ExchangeAdapter;
 use crate::venues::{CredentialField, CredentialKind, StreamPlan, Venue, VenueCtx};
 
 /// V3 REST base (v1). Also used by the catalog (/v1/markets, /v1/bbo).
@@ -133,7 +133,7 @@ impl Venue for ArcusVenue {
         creds: &serde_json::Value,
         ctx: &VenueCtx,
     ) -> Result<Arc<dyn ExchangeAdapter>, String> {
-        let address = crate::adapters::sync::valid_address(creds, "wallet_address", "钱包地址")?;
+        let address = crate::market::sync::valid_address(creds, "wallet_address", "钱包地址")?;
         Ok(Arc::new(ArcusAdapter::new(
             self.id(),
             address,

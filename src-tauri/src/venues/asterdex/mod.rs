@@ -36,11 +36,11 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 
-use crate::adapters::reconcile::ReconcileState;
-use crate::adapters::ExchangeAdapter;
 use crate::bus::EventBus;
 use crate::core::market::MarketInfo;
 use crate::core::types::{AccountLive, LivePosition};
+use crate::market::reconcile::ReconcileState;
+use crate::venues::ExchangeAdapter;
 use crate::venues::{CredentialField, CredentialKind, StreamPlan, Venue, VenueCtx};
 
 /// V3 REST base (fapi). Also used by the catalog (exchangeInfo and
@@ -180,7 +180,7 @@ impl Venue for AsterdexVenue {
         creds: &serde_json::Value,
         ctx: &VenueCtx,
     ) -> Result<Arc<dyn ExchangeAdapter>, String> {
-        let user = crate::adapters::sync::valid_address(creds, "wallet_address", "主钱包地址")?;
+        let user = crate::market::sync::valid_address(creds, "wallet_address", "主钱包地址")?;
         let secret_hex = creds
             .get("agent_private_key")
             .and_then(|v| v.as_str())

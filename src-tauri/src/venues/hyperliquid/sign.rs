@@ -6,16 +6,16 @@
 use serde_json::Value;
 
 use super::{HyperliquidAdapter, HL_EXCHANGE_URL, WRITE_TIMEOUT};
-use crate::adapters::hl_signing::{self, Mp};
-use crate::adapters::AdapterError;
+use crate::core::error::VenueError;
+use crate::core::signing::{self, Mp};
 
 impl HyperliquidAdapter {
     /// The agent key, or a clear error when the account never saved
     /// one (read-only account).
-    pub(crate) fn signing_key(&self) -> Result<([u8; 32], String), AdapterError> {
+    pub(crate) fn signing_key(&self) -> Result<([u8; 32], String), VenueError> {
         match (&self.agent_secret, &self.agent_address) {
             (Some(secret), Some(addr)) => Ok((*secret, addr.clone())),
-            _ => Err(AdapterError::Other(
+            _ => Err(VenueError::rejected(
                 "该账户未保存 Agent 钱包私钥，无法下单".to_string(),
             )),
         }
@@ -30,10 +30,10 @@ impl HyperliquidAdapter {
         action_json: Value,
         action_mp: &Mp<'_>,
         nonce: u64,
-    ) -> Result<Value, AdapterError> {
+    ) -> Result<Value, VenueError> {
         let (secret, _) = self.signing_key()?;
         let sig =
-            hl_signing::sign_l1_action(&secret, action_mp, nonce).map_err(AdapterError::Other)?;
+            signing::sign_l1_action(&secret, action_mp, nonce).map_err(VenueError::rejected)?;
         let body = serde_json::json!({
             "action": action_json,
             "nonce": nonce,
@@ -48,15 +48,15 @@ impl HyperliquidAdapter {
             .timeout(WRITE_TIMEOUT)
             .send()
             .await
-            .map_err(|e| AdapterError::UnknownOutcome(format!("下单请求未收到交易所响应：{e}")))?;
+            .map_err(|e| VenueError::UnknownOutcome(format!("下单请求未收到交易所响应：{e}")))?;
         if !resp.status().is_success() {
-            return Err(AdapterError::UnknownOutcome(format!(
+            return Err(VenueError::UnknownOutcome(format!(
                 "交易所返回 HTTP {}，订单状态未知",
                 resp.status()
             )));
         }
         resp.json().await.map_err(|e| {
-            AdapterError::UnknownOutcome(format!("交易所响应无法解析，订单状态未知：{e}"))
+            VenueError::UnknownOutcome(format!("交易所响应无法解析，订单状态未知：{e}"))
         })
     }
 }
@@ -118,20 +118,20 @@ mod tests {
     /// The adapter's cancel actions, pinned to the official SDK's
     /// vectors (re-generated from the freshly installed SDK on
     /// 2026-11-26, test key 0x11…11, nonce 1700000000000 — same
-    /// fixtures as `hl_signing`'s golden-vector tests). This is the
+    /// fixtures as `signing`'s golden-vector tests). This is the
     /// link the old tests missed: the signing was verified, but
     /// nothing checked that the adapter builds the same action the
     /// signer was tested with.
     #[test]
     fn cancel_actions_match_the_official_sdk() {
         let mut out = Vec::new();
-        hl_signing::encode_msgpack(&cancel_action_mp(0, 77_738_308), &mut out);
+        signing::encode_msgpack(&cancel_action_mp(0, 77_738_308), &mut out);
         assert_eq!(
             hex::encode(&out),
             "82a474797065a663616e63656ca763616e63656c739182a16100a16fce04a23144"
         );
         let mut out = Vec::new();
-        hl_signing::encode_msgpack(
+        signing::encode_msgpack(
             &cancel_by_cloid_action_mp(0, "0x1234567890abcdef1234567890abcdef"),
             &mut out,
         );

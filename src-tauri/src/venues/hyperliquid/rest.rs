@@ -8,9 +8,11 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 
 use super::{HyperliquidAdapter, Snapshot, HL_INFO_URL, POLL_INTERVAL};
-use crate::adapters::{f64_from, live_status, now_ms, AdapterError, ExchangeAdapter};
 use crate::bus::AppEvent;
+use crate::core::error::VenueError;
 use crate::core::types::{AccountLive, Balance, LivePosition};
+use crate::core::util::{f64_from, live_status, now_ms};
+use crate::venues::ExchangeAdapter;
 
 /// One spot balance row from `spotClearinghouseState`.
 #[derive(Clone, Debug)]
@@ -103,7 +105,7 @@ impl HyperliquidAdapter {
     fn latency_ms(&self) -> Option<u64> {
         self.last_rest_rtt
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .map(|r| r.as_millis() as u64)
     }
 
@@ -113,13 +115,24 @@ impl HyperliquidAdapter {
     }
 
     fn publish_live(&self) {
-        let snap = self.snapshot.lock().unwrap().clone();
+        let snap = self
+            .snapshot
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         let status = live_status(
             self.rest_ok.load(Ordering::SeqCst),
-            self.last_error.lock().unwrap().is_some(),
+            self.last_error
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_some(),
         )
         .to_string();
-        let error = self.last_error.lock().unwrap().clone();
+        let error = self
+            .last_error
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         let live = AccountLive {
             account_id: self.account_id.clone(),
             adapter_id: self.id.clone(),
@@ -144,7 +157,7 @@ impl HyperliquidAdapter {
     fn set_rest(&self, ok: bool, rtt: Option<Duration>) {
         self.rest_ok.store(ok, Ordering::SeqCst);
         if let Some(r) = rtt {
-            *self.last_rest_rtt.lock().unwrap() = Some(r);
+            *self.last_rest_rtt.lock().unwrap_or_else(|e| e.into_inner()) = Some(r);
         }
         self.publish_live();
     }
@@ -290,7 +303,7 @@ impl HyperliquidAdapter {
         let started = Instant::now();
         match self.fetch_account_state().await {
             Ok((snap, balance)) => {
-                *self.snapshot.lock().unwrap() = snap;
+                *self.snapshot.lock().unwrap_or_else(|e| e.into_inner()) = snap;
                 self.bus.publish(AppEvent::Balance(balance));
                 self.set_rest(true, Some(started.elapsed()));
             }
@@ -323,27 +336,27 @@ impl HyperliquidAdapter {
     }
 
     /// One `/info` read (read-only: retry-once via `send_read`).
-    pub(crate) async fn post_info(&self, body: Value) -> Result<Value, AdapterError> {
+    pub(crate) async fn post_info(&self, body: Value) -> Result<Value, VenueError> {
         let resp = crate::net::send_read(|| self.http.post(HL_INFO_URL).json(&body))
             .await
-            .map_err(|e| AdapterError::Other(format!("Hyperliquid 查询失败：{e}")))?;
+            .map_err(|e| VenueError::transport(format!("Hyperliquid 查询失败：{e}")))?;
         if !resp.status().is_success() {
-            return Err(AdapterError::Other(format!(
+            return Err(VenueError::transport(format!(
                 "Hyperliquid 查询返回 HTTP {}",
                 resp.status()
             )));
         }
         resp.json()
             .await
-            .map_err(|e| AdapterError::Other(format!("Hyperliquid 响应解析失败：{e}")))
+            .map_err(|e| VenueError::transport(format!("Hyperliquid 响应解析失败：{e}")))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapters::reconcile::ReconcileState;
     use crate::bus::EventBus;
+    use crate::market::reconcile::ReconcileState;
     use std::collections::HashMap;
     use std::sync::{Arc, RwLock};
 

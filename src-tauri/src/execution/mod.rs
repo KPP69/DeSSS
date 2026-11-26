@@ -12,7 +12,7 @@
 //!   sell rounds up); the gateway re-verifies alignment.
 //! - While an order is Unresolved, a duplicate submission of the
 //!   same intent is rejected — the user must reconcile first.
-//! - A write whose outcome is unknown (`AdapterError::UnknownOutcome`)
+//! - A write whose outcome is unknown (`VenueError::UnknownOutcome`)
 //!   becomes Unresolved and is reconciled by cloid immediately;
 //!   a timeout is never treated as a fill.
 //! - Cancels wait for their result: the cancel is submitted, then
@@ -25,21 +25,23 @@
 //!   a rejection is the gateway working, not an anomaly. Exchange
 //!   failures (UnknownOutcome, definite rejections) do.
 
-use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, RwLock};
+use std::collections::HashSet;
+use std::sync::Arc;
 
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 
-use crate::adapters::hl_signing;
-use crate::adapters::market_catalog::MarketCatalog;
-use crate::adapters::sync::SyncManager;
-use crate::adapters::{AdapterError, ExchangeAdapter, UNKNOWN_OID};
 use crate::bus::EventBus;
+use crate::core::error::{VenueError, UNKNOWN_OID};
 use crate::core::precision::{align_down, align_price_for_side, to_decimal};
-use crate::core::types::{Order, OrderInfo, OrderRequest, OrderStatus, TradeInfo};
+use crate::core::signing;
+use crate::core::types::{Order, OrderInfo, OrderRequest, OrderStatus};
 use crate::data_engine::realtime::RealtimeEngine;
+use crate::market::catalog::MarketCatalog;
+use crate::market::sync::SyncManager;
 use crate::risk::{RiskCheckContext, RiskGateway};
+use crate::store::orders::OrderStore;
+use crate::venues::ExchangeAdapter;
 
 /// Everything the engine needs, passed explicitly so the pipeline
 /// stays testable without the whole app state.
@@ -50,168 +52,6 @@ pub struct ExecDeps {
     pub streams: Arc<RealtimeEngine>,
     pub catalog: Arc<MarketCatalog>,
     pub bus: EventBus,
-}
-
-/// In-memory order store: the execution engine owns it. Orders are
-/// keyed by client order id (cloid); fills are kept per cloid.
-/// Nothing here is persisted — the exchange is the source of truth,
-/// and the store is rebuilt from it on demand.
-pub struct OrderStore {
-    orders: RwLock<HashMap<String, OrderInfo>>,
-    fills: RwLock<HashMap<String, Vec<TradeInfo>>>,
-    /// `unknownOid` strikes per cloid (F4): (count, last strike ms).
-    /// In-memory, cumulative, reset on restart.
-    unresolved_attempts: std::sync::Mutex<HashMap<String, (u32, i64)>>,
-}
-
-impl OrderStore {
-    pub fn new() -> Self {
-        Self {
-            orders: RwLock::new(HashMap::new()),
-            fills: RwLock::new(HashMap::new()),
-            unresolved_attempts: std::sync::Mutex::new(HashMap::new()),
-        }
-    }
-
-    pub fn insert(&self, info: OrderInfo) {
-        if let Ok(mut m) = self.orders.write() {
-            m.insert(info.client_order_id.clone(), info);
-        }
-    }
-
-    pub fn get(&self, cloid: &str) -> Option<OrderInfo> {
-        self.orders.read().ok().and_then(|m| m.get(cloid).cloned())
-    }
-
-    pub fn get_by_oid(&self, oid: &str) -> Option<OrderInfo> {
-        self.orders
-            .read()
-            .ok()?
-            .values()
-            .find(|o| !o.order_id.is_empty() && o.order_id == oid)
-            .cloned()
-    }
-
-    /// All records, newest first.
-    pub fn list(&self) -> Vec<OrderInfo> {
-        let mut out: Vec<OrderInfo> = self
-            .orders
-            .read()
-            .map(|m| m.values().cloned().collect())
-            .unwrap_or_default();
-        out.sort_by_key(|o| -o.created_at);
-        out
-    }
-
-    /// Non-terminal records (Open / PartiallyFilled / Submitted /
-    /// Unresolved), newest first.
-    pub fn list_open(&self) -> Vec<OrderInfo> {
-        self.list()
-            .into_iter()
-            .filter(|o| !o.status.is_terminal())
-            .collect()
-    }
-
-    /// All recorded fills, newest first.
-    pub fn list_fills(&self) -> Vec<TradeInfo> {
-        let mut out: Vec<TradeInfo> = self
-            .fills
-            .read()
-            .map(|m| m.values().flatten().cloned().collect())
-            .unwrap_or_default();
-        out.sort_by_key(|f| -f.timestamp);
-        out
-    }
-
-    pub fn record_fills(&self, cloid: &str, fills: Vec<TradeInfo>) {
-        if fills.is_empty() {
-            return;
-        }
-        if let Ok(mut m) = self.fills.write() {
-            m.insert(cloid.to_string(), fills);
-        }
-    }
-
-    /// True when an order with the same account + symbol + side +
-    /// quantity + price is Unresolved — resubmitting it would be a
-    /// duplicate while its outcome is unknown.
-    pub fn has_unresolved_duplicate(
-        &self,
-        account_id: &str,
-        symbol: &str,
-        side: &str,
-        qty: f64,
-        price: f64,
-    ) -> Option<String> {
-        self.orders
-            .read()
-            .ok()?
-            .values()
-            .find(|o| {
-                o.status == OrderStatus::Unresolved
-                    && o.account_id == account_id
-                    && o.symbol == symbol
-                    && o.side == side
-                    && (o.quantity - qty).abs() < 1e-12
-                    && o.price.map(|p| (p - price).abs() < 1e-12).unwrap_or(false)
-            })
-            .map(|o| o.client_order_id.clone())
-    }
-
-    /// Count one `unknownOid` for an Unresolved order (F4); returns
-    /// the running total. Only an explicit `unknownOid` reaches
-    /// here — transport / HTTP / parse failures never call it.
-    pub fn unknown_oid_strike(&self, cloid: &str, now_ms: i64) -> u32 {
-        if let Ok(mut m) = self.unresolved_attempts.lock() {
-            let e = m.entry(cloid.to_string()).or_insert((0, 0));
-            e.0 += 1;
-            e.1 = now_ms;
-            e.0
-        } else {
-            0
-        }
-    }
-
-    /// Forget the strike entry when an order leaves Unresolved (F4).
-    pub fn clear_unknown_oid(&self, cloid: &str) {
-        if let Ok(mut m) = self.unresolved_attempts.lock() {
-            m.remove(cloid);
-        }
-    }
-
-    /// Drop strike entries not updated for over 10 minutes (F4):
-    /// the table must not grow with runtime.
-    pub fn prune_unknown_oid_strikes(&self, now_ms: i64) {
-        if let Ok(mut m) = self.unresolved_attempts.lock() {
-            m.retain(|_, (_, ts)| now_ms - *ts <= 600_000);
-        }
-    }
-
-    /// Apply an authoritative query result to the stored record
-    /// (status + fills + quantities). The queried record wins; when
-    /// the store has no such order (placed outside this app) it is
-    /// inserted as-is. Returns the merged record.
-    pub fn apply_query(&self, queried: &OrderInfo) -> OrderInfo {
-        if let Ok(mut m) = self.orders.write() {
-            if let Some(stored) = m.get_mut(&queried.client_order_id) {
-                // Keep the original intent's price/qty when the query
-                // cannot see them (unknownOid never reaches here).
-                let mut merged = queried.clone();
-                if merged.quantity == 0.0 {
-                    merged.quantity = stored.quantity;
-                }
-                // F4: leaving Unresolved for a terminal state clears
-                // the strike entry, whatever path applied the update.
-                if stored.status == OrderStatus::Unresolved && merged.status.is_terminal() {
-                    self.clear_unknown_oid(&queried.client_order_id);
-                }
-                *stored = merged.clone();
-                return merged;
-            }
-            m.insert(queried.client_order_id.clone(), queried.clone());
-        }
-        queried.clone()
-    }
 }
 
 /// A manual order intent from the Trading page.
@@ -246,7 +86,7 @@ pub async fn place_order(deps: &ExecDeps, intent: PlaceIntent) -> Result<OrderIn
     if intent.side != "buy" && intent.side != "sell" {
         return Err("下单方向只能是 buy 或 sell".to_string());
     }
-    let now = crate::adapters::now_ms();
+    let now = crate::core::util::now_ms();
     let adapter = deps
         .sync
         .adapter(&intent.account_id)
@@ -325,7 +165,7 @@ pub async fn place_order(deps: &ExecDeps, intent: PlaceIntent) -> Result<OrderIn
         );
     }
 
-    let cloid = hl_signing::generate_cloid();
+    let cloid = signing::generate_cloid();
     let mut info = OrderInfo {
         order_id: String::new(),
         client_order_id: cloid.clone(),
@@ -418,7 +258,7 @@ pub async fn place_order(deps: &ExecDeps, intent: PlaceIntent) -> Result<OrderIn
     // A gateway rejection is the gateway working — it does not count
     // toward auto-pause, and the record is Rejected, not Failed.
     if let Err(e) = deps.risk.check_order(&ctx) {
-        info.transition(OrderStatus::Rejected, crate::adapters::now_ms())
+        info.transition(OrderStatus::Rejected, crate::core::util::now_ms())
             .ok();
         info.error = Some(e.clone());
         deps.orders.insert(info.clone());
@@ -447,7 +287,7 @@ pub async fn place_order(deps: &ExecDeps, intent: PlaceIntent) -> Result<OrderIn
         price: Some(aligned_price.to_f64().unwrap_or(0.0)),
         client_order_id: Some(cloid.clone()),
     };
-    info.transition(OrderStatus::Submitted, crate::adapters::now_ms())
+    info.transition(OrderStatus::Submitted, crate::core::util::now_ms())
         .ok();
     deps.orders.insert(info.clone());
 
@@ -456,7 +296,7 @@ pub async fn place_order(deps: &ExecDeps, intent: PlaceIntent) -> Result<OrderIn
             info.order_id = order.order_id.clone();
             match order.status {
                 OrderStatus::Open => {
-                    info.transition(OrderStatus::Open, crate::adapters::now_ms())
+                    info.transition(OrderStatus::Open, crate::core::util::now_ms())
                         .ok();
                     deps.orders.insert(info.clone());
                     deps.risk.record_order_outcome(true);
@@ -486,16 +326,16 @@ pub async fn place_order(deps: &ExecDeps, intent: PlaceIntent) -> Result<OrderIn
                     Ok(reconcile_order(deps, &adapter, &info).await)
                 }
                 other => {
-                    info.transition(other, crate::adapters::now_ms()).ok();
+                    info.transition(other, crate::core::util::now_ms()).ok();
                     deps.orders.insert(info.clone());
                     Ok(info)
                 }
             }
         }
-        Err(AdapterError::UnknownOutcome(msg)) | Err(AdapterError::Transport(msg)) => {
+        Err(VenueError::UnknownOutcome(msg)) | Err(VenueError::Transport(msg)) => {
             // The order may have landed: Unresolved, then reconcile
             // by cloid right away.
-            info.transition(OrderStatus::Unresolved, crate::adapters::now_ms())
+            info.transition(OrderStatus::Unresolved, crate::core::util::now_ms())
                 .ok();
             info.error = Some(msg.clone());
             deps.orders.insert(info.clone());
@@ -510,39 +350,27 @@ pub async fn place_order(deps: &ExecDeps, intent: PlaceIntent) -> Result<OrderIn
             deps.risk.record_order_outcome(false);
             Ok(reconcile_order(deps, &adapter, &info).await)
         }
-        Err(AdapterError::Other(msg)) => {
+        Err(VenueError::Rejected { msg, .. }) => {
             // A definite exchange rejection.
-            info.transition(OrderStatus::Rejected, crate::adapters::now_ms())
+            info.transition(OrderStatus::Rejected, crate::core::util::now_ms())
                 .ok();
             info.error = Some(msg.clone());
             deps.orders.insert(info.clone());
             deps.risk.record_order_outcome(false);
             Err(msg)
         }
-        Err(AdapterError::Rejected { msg, .. }) => {
-            // A definite exchange rejection, typed (no producer
-            // emits this yet; the arm exists so the new variant
-            // compiles). Same treatment as the Other arm above.
-            info.transition(OrderStatus::Rejected, crate::adapters::now_ms())
-                .ok();
-            info.error = Some(msg.clone());
-            deps.orders.insert(info.clone());
-            deps.risk.record_order_outcome(false);
-            Err(msg)
-        }
-        Err(e @ AdapterError::Unsupported(_)) => {
-            // The venue does not implement ordering (no producer
-            // emits this yet): definitely not sent, same treatment
-            // as a rejection.
-            info.transition(OrderStatus::Rejected, crate::adapters::now_ms())
+        Err(e @ VenueError::Unsupported(_)) => {
+            // The venue does not implement ordering: definitely not
+            // sent, same treatment as a rejection.
+            info.transition(OrderStatus::Rejected, crate::core::util::now_ms())
                 .ok();
             info.error = Some(e.to_string());
             deps.orders.insert(info.clone());
             deps.risk.record_order_outcome(false);
             Err(e.to_string())
         }
-        Err(AdapterError::NotConnected) => {
-            info.transition(OrderStatus::Failed, crate::adapters::now_ms())
+        Err(VenueError::NotConnected) => {
+            info.transition(OrderStatus::Failed, crate::core::util::now_ms())
                 .ok();
             info.error = Some("账户未连接".to_string());
             deps.orders.insert(info.clone());
@@ -560,7 +388,7 @@ pub async fn place_order(deps: &ExecDeps, intent: PlaceIntent) -> Result<OrderIn
 async fn query_order_latest(
     adapter: &Arc<dyn ExchangeAdapter>,
     info: &OrderInfo,
-) -> Result<OrderInfo, AdapterError> {
+) -> Result<OrderInfo, VenueError> {
     if !info.client_order_id.is_empty() && info.client_order_id.starts_with("0x") {
         adapter
             .query_order_by_cloid(&info.account_id, &info.client_order_id)
@@ -570,7 +398,7 @@ async fn query_order_latest(
     } else if let Ok(oid) = info.client_order_id.parse::<u64>() {
         adapter.query_order_by_oid(&info.account_id, oid).await
     } else {
-        Err(AdapterError::Other(
+        Err(VenueError::rejected(
             "该订单没有可用的订单号，无法查询最新状态".to_string(),
         ))
     }
@@ -628,7 +456,7 @@ async fn reconcile_order(
             }
             merged
         }
-        Err(AdapterError::Other(msg)) if msg == UNKNOWN_OID => {
+        Err(VenueError::Rejected { msg, .. }) if msg == UNKNOWN_OID => {
             log(
                 deps,
                 "warn",
@@ -702,46 +530,27 @@ pub async fn cancel_order(
                 remaining_quantity: 0.0,
                 average_fill_price: None,
                 error: None,
-                created_at: crate::adapters::now_ms(),
-                updated_at: crate::adapters::now_ms(),
+                created_at: crate::core::util::now_ms(),
+                updated_at: crate::core::util::now_ms(),
             },
         ),
     };
 
     let submit = adapter.cancel_order(account_id, &cancel_id, symbol).await;
     match submit {
-        Ok(()) | Err(AdapterError::UnknownOutcome(_)) | Err(AdapterError::Transport(_)) => {
+        Ok(()) | Err(VenueError::UnknownOutcome(_)) | Err(VenueError::Transport(_)) => {
             // The cancel was accepted, or its outcome is unknown:
             // either way the order's fate is decided by the query.
             Ok(reconcile_order(deps, &adapter, &info).await)
         }
-        Err(AdapterError::Other(msg)) => {
-            // A cancel that was never attempted (no key, bad symbol,
-            // bad oid, or an exchange whose ordering lands in a later
-            // phase) has nothing to query for.
-            if msg.contains("未保存 Agent")
-                || msg.contains("不在该交易所")
-                || msg.contains("订单号格式不正确")
-                || msg.contains("下一阶段")
-            {
-                return Err(msg);
-            }
-            // "already canceled, or filled" and friends: query to
-            // find out which it was.
-            Ok(reconcile_order(deps, &adapter, &info).await)
-        }
-        Err(AdapterError::Rejected { .. }) => {
-            // Definite refusal (no producer emits this yet): the
-            // order's fate is decided by the query, same as the
-            // Other arm's fall-through above.
-            Ok(reconcile_order(deps, &adapter, &info).await)
-        }
-        Err(AdapterError::Unsupported(_)) => {
-            // Ordering lands in a later phase: the cancel was never
-            // attempted, nothing to query for.
-            Err("该交易所撤单将在下一阶段接入".to_string())
-        }
-        Err(AdapterError::NotConnected) => Err("账户未连接，无法撤单".to_string()),
+        // The pre_send() set (v3 §2.1): definitely not sent — no
+        // key, bad symbol, bad oid, ordering not implemented, or
+        // the exchange refused before acting. There is nothing on
+        // the exchange to query for, so report the reason; the
+        // record refreshes on the next open-orders poll.
+        Err(VenueError::Rejected { msg, .. }) => Err(msg),
+        Err(VenueError::Unsupported(_)) => Err("该交易所撤单将在下一阶段接入".to_string()),
+        Err(VenueError::NotConnected) => Err("账户未连接，无法撤单".to_string()),
     }
 }
 
@@ -775,9 +584,9 @@ fn merge_open_orders(
             // The exchange says it is open; our record may be stale
             // (e.g. a cancel that raced). Trust the exchange.
             stored
-                .transition(OrderStatus::Open, crate::adapters::now_ms())
+                .transition(OrderStatus::Open, crate::core::util::now_ms())
                 .ok();
-            stored.updated_at = crate::adapters::now_ms();
+            stored.updated_at = crate::core::util::now_ms();
             stored
         } else {
             OrderInfo {
@@ -833,7 +642,7 @@ async fn reconcile_unresolved(
     adapter: &Arc<dyn ExchangeAdapter>,
     account_id: &str,
 ) {
-    let now = crate::adapters::now_ms();
+    let now = crate::core::util::now_ms();
     deps.orders.prune_unknown_oid_strikes(now);
     let stale: Vec<OrderInfo> = deps
         .orders
@@ -852,7 +661,7 @@ async fn reconcile_unresolved(
                 deps.orders.clear_unknown_oid(&record.client_order_id);
             }
             Ok(_) => {}
-            Err(AdapterError::Other(msg)) if msg == UNKNOWN_OID => {
+            Err(VenueError::Rejected { msg, .. }) if msg == UNKNOWN_OID => {
                 if deps.orders.unknown_oid_strike(&record.client_order_id, now) >= 5 {
                     let mut failed = record.clone();
                     failed.transition(OrderStatus::Failed, now).ok();
@@ -926,14 +735,15 @@ pub async fn list_open_orders(deps: &ExecDeps, account_id: &str) -> Result<Vec<O
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapters::market_catalog::MarketCatalog;
-    use crate::adapters::sync::SyncManager;
-    use crate::adapters::AdapterResult;
     use crate::bus::EventBus;
+    use crate::core::error::VenueResult;
     use crate::core::types::{Balance, Position};
     use crate::data_engine::realtime::RealtimeEngine;
+    use crate::market::catalog::MarketCatalog;
+    use crate::market::sync::SyncManager;
     use crate::risk::{RiskConfig, RiskGateway};
     use async_trait::async_trait;
+    use std::collections::HashMap;
 
     fn deps_with(store: Arc<OrderStore>, sync: Arc<SyncManager>) -> ExecDeps {
         let bus = EventBus::new(16);
@@ -1033,10 +843,10 @@ mod tests {
     /// never with the catalog-missing error.
     #[tokio::test]
     async fn place_order_loads_cold_catalog_for_its_exchange() {
-        use crate::adapters::market_catalog::MarketCatalog;
-        use crate::adapters::sync::SyncManager;
         use crate::bus::EventBus;
         use crate::data_engine::realtime::RealtimeEngine;
+        use crate::market::catalog::MarketCatalog;
+        use crate::market::sync::SyncManager;
         use crate::risk::{RiskConfig, RiskGateway};
         use crate::venues::hyperliquid::HyperliquidAdapter;
 
@@ -1151,69 +961,65 @@ mod tests {
         fn name(&self) -> &str {
             "Fake Hyperliquid"
         }
-        async fn connect(&self) -> AdapterResult<()> {
+        async fn connect(&self) -> VenueResult<()> {
             Ok(())
         }
-        async fn disconnect(&self) -> AdapterResult<()> {
+        async fn disconnect(&self) -> VenueResult<()> {
             Ok(())
         }
-        async fn subscribe_ticks(&self, _symbols: Vec<String>) -> AdapterResult<()> {
+        async fn subscribe_ticks(&self, _symbols: Vec<String>) -> VenueResult<()> {
             Ok(())
         }
-        async fn unsubscribe_ticks(&self, _symbols: Vec<String>) -> AdapterResult<()> {
+        async fn unsubscribe_ticks(&self, _symbols: Vec<String>) -> VenueResult<()> {
             Ok(())
         }
-        async fn get_balances(&self, _account_id: &str) -> AdapterResult<Vec<Balance>> {
+        async fn get_balances(&self, _account_id: &str) -> VenueResult<Vec<Balance>> {
             Ok(vec![])
         }
-        async fn get_positions(&self, _account_id: &str) -> AdapterResult<Vec<Position>> {
+        async fn get_positions(&self, _account_id: &str) -> VenueResult<Vec<Position>> {
             Ok(vec![])
         }
-        async fn get_open_orders(&self, _account_id: &str) -> AdapterResult<Vec<Order>> {
-            Ok(self.open.lock().unwrap().clone())
+        async fn get_open_orders(&self, _account_id: &str) -> VenueResult<Vec<Order>> {
+            Ok(self.open.lock().unwrap_or_else(|e| e.into_inner()).clone())
         }
-        async fn place_order(&self, _req: OrderRequest) -> AdapterResult<Order> {
-            Err(AdapterError::Other("fake adapter cannot place".to_string()))
+        async fn place_order(&self, _req: OrderRequest) -> VenueResult<Order> {
+            Err(VenueError::unsupported("下单"))
         }
         async fn cancel_order(
             &self,
             _account_id: &str,
             _order_id: &str,
             _symbol: &str,
-        ) -> AdapterResult<()> {
+        ) -> VenueResult<()> {
             Ok(())
         }
         async fn query_order_by_cloid(
             &self,
             _account_id: &str,
             cloid: &str,
-        ) -> AdapterResult<OrderInfo> {
+        ) -> VenueResult<OrderInfo> {
             if cloid == "0xerr" {
-                // A read-path transport failure: realistic `Other`,
+                // A read-path transport failure: realistic `Transport`,
                 // deliberately NOT "unknownOid" — it must never
                 // strike (F4a).
-                return Err(AdapterError::Other(
+                return Err(VenueError::transport(
                     "Hyperliquid 查询失败：connection reset".to_string(),
                 ));
             }
             self.by_cloid
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|e| e.into_inner())
                 .get(cloid)
                 .cloned()
-                .ok_or_else(|| AdapterError::Other(UNKNOWN_OID.to_string()))
+                .ok_or_else(|| VenueError::rejected(UNKNOWN_OID.to_string()))
         }
-        async fn query_order_by_oid(
-            &self,
-            _account_id: &str,
-            oid: u64,
-        ) -> AdapterResult<OrderInfo> {
+        async fn query_order_by_oid(&self, _account_id: &str, oid: u64) -> VenueResult<OrderInfo> {
             self.by_oid
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|e| e.into_inner())
                 .get(&oid)
                 .cloned()
-                .ok_or_else(|| AdapterError::Other(UNKNOWN_OID.to_string()))
+                .ok_or_else(|| VenueError::rejected(UNKNOWN_OID.to_string()))
         }
     }
 
@@ -1256,10 +1062,10 @@ mod tests {
     /// website-placed order must appear and be cancellable.
     #[tokio::test]
     async fn sync_open_orders_imports_external_and_cleans_up_missing() {
-        use crate::adapters::market_catalog::MarketCatalog;
-        use crate::adapters::sync::SyncManager;
         use crate::bus::EventBus;
         use crate::data_engine::realtime::RealtimeEngine;
+        use crate::market::catalog::MarketCatalog;
+        use crate::market::sync::SyncManager;
         use crate::risk::{RiskConfig, RiskGateway};
 
         // Local records: A (oid "1", Open) will be missing from the
@@ -1331,16 +1137,16 @@ mod tests {
     async fn unresolved_requery_five_strikes_turns_failed() {
         let store = Arc::new(OrderStore::new());
         let mut old = record("0xaaa", OrderStatus::Unresolved);
-        old.updated_at = crate::adapters::now_ms() - 31_000;
+        old.updated_at = crate::core::util::now_ms() - 31_000;
         store.insert(old);
         let mut fresh = record("0xbbb", OrderStatus::Unresolved);
         fresh.side = "sell".to_string();
-        fresh.updated_at = crate::adapters::now_ms();
+        fresh.updated_at = crate::core::util::now_ms();
         store.insert(fresh);
         // A transport failure (not unknownOid) must never strike.
         let mut err = record("0xerr", OrderStatus::Unresolved);
         err.side = "sell".to_string();
-        err.updated_at = crate::adapters::now_ms() - 31_000;
+        err.updated_at = crate::core::util::now_ms() - 31_000;
         store.insert(err);
         let fake = Arc::new(FakeOrdersAdapter {
             open: std::sync::Mutex::new(vec![]),
@@ -1371,11 +1177,11 @@ mod tests {
             .is_none());
         // A terminal answer updates the record instead of striking.
         let mut old2 = record("0xccc", OrderStatus::Unresolved);
-        old2.updated_at = crate::adapters::now_ms() - 31_000;
+        old2.updated_at = crate::core::util::now_ms() - 31_000;
         store.insert(old2);
         fake.by_cloid
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .insert("0xccc".to_string(), record("0xccc", OrderStatus::Canceled));
         sync_open_orders(&deps, "acc-1").await.expect("sync");
         assert_eq!(store.get("0xccc").unwrap().status, OrderStatus::Canceled);

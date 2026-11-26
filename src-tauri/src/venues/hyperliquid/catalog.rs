@@ -19,7 +19,7 @@ pub async fn fetch_hyperliquid(
         _ => "hyperliquid",
     };
     let v = crate::net::read_json(|| http.post(HL_INFO_URL).json(&body)).await?;
-    parse_hyperliquid(&v, exchange_id, crate::adapters::now_ms())
+    parse_hyperliquid(&v, exchange_id, crate::core::util::now_ms())
 }
 
 /// Parse one Hyperliquid/Entropy `metaAndAssetCtxs` response (`[meta, ctxs]`,

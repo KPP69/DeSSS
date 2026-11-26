@@ -4,8 +4,11 @@
 //! particular.
 
 pub mod book;
+pub mod error;
 pub mod market;
 pub mod precision;
+pub mod signing;
 pub mod stream_kind;
 pub mod symbol;
 pub mod types;
+pub mod util;

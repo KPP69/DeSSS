@@ -12,7 +12,8 @@
 use serde::Serialize;
 use serde_json::{Map, Value};
 
-use crate::data_engine::{AccountRow, DataEngine};
+use crate::data_engine::DataEngine;
+use crate::store::accounts::AccountRow;
 use crate::vault::{VaultError, VaultStore};
 
 #[derive(Clone, Debug, Serialize)]

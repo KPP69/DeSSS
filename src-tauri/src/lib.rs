@@ -1,14 +1,15 @@
 pub mod accounts;
-pub mod adapters;
 pub mod bus;
 pub mod commands;
 pub mod core;
 pub mod data_engine;
 pub mod execution;
 pub mod logging;
+pub mod market;
 pub mod net;
 pub mod portable;
 pub mod risk;
+pub mod store;
 pub mod strategy_engine;
 pub mod vault;
 pub mod venues;
@@ -16,12 +17,12 @@ pub mod venues;
 use std::sync::Arc;
 use std::time::Duration;
 
-use adapters::market_catalog::MarketCatalog;
-use adapters::sync::SyncManager;
 use bus::EventBus;
-use execution::OrderStore;
+use market::catalog::MarketCatalog;
+use market::sync::SyncManager;
 use portable::PortablePaths;
 use risk::{RiskConfig, RiskGateway};
+use store::orders::OrderStore;
 
 pub struct AppState {
     pub paths: PortablePaths,

@@ -10,11 +10,11 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use super::ASTER_REST_URL;
-use crate::adapters::now_ms;
 use crate::core::market::{
     funding_1h_from, funding_apr_pct, get_json, num_field, str_field, MarketInfo,
 };
 use crate::core::symbol::normalize_base_symbol;
+use crate::core::util::now_ms;
 
 const ASTER_SPECS_TTL: Duration = Duration::from_secs(3600);
 
