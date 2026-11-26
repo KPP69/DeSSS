@@ -130,7 +130,7 @@ impl RealtimeEngine {
             let this = Arc::clone(self);
             tasks.insert(
                 key.clone(),
-                tokio::spawn(async move { this.run_stream(key).await }),
+                tauri::async_runtime::spawn(async move { this.run_stream(key).await }),
             );
         }
     }
@@ -153,7 +153,7 @@ impl RealtimeEngine {
         let this = Arc::clone(self);
         tasks.insert(
             key.clone(),
-            tokio::spawn(async move { this.run_stream(key).await }),
+            tauri::async_runtime::spawn(async move { this.run_stream(key).await }),
         );
     }
 

@@ -199,7 +199,7 @@ async fn connect_account_inner(
         return Err("该账户已被移除".to_string());
     }
     let a = adapter.clone();
-    let handle = tokio::spawn(async move {
+    let handle = tauri::async_runtime::spawn(async move {
         a.run().await;
     });
     state.sync.register_task(id.clone(), handle);

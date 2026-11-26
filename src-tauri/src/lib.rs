@@ -76,28 +76,36 @@ pub fn run() {
         risk,
         orders,
     });
-    // Drawdown sampler (spec §3 §4): every 10s, record total equity
-    // across connected accounts so the session high-water mark tracks
-    // the live state, not just order attempts. The order path also
-    // records a fresh sample right before each risk check.
-    {
-        let state = state.clone();
-        tokio::spawn(async move {
-            let mut tick = tokio::time::interval(Duration::from_secs(10));
-            loop {
-                tick.tick().await;
-                let total: f64 = state.sync.live_states().iter().map(|s| s.equity_usd).sum();
-                if total > 0.0 {
-                    state.risk.record_equity(total);
-                }
-            }
-        });
-    }
     let s2 = state.clone();
+    let sampler_state = state.clone();
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(state)
         .setup(move |app| {
+            // Drawdown sampler (spec §3 §4): every 10s, record total equity
+            // across connected accounts so the session high-water mark tracks
+            // the live state, not just order attempts. The order path also
+            // records a fresh sample right before each risk check.
+            // Spawned here — NOT in `run()` — via `tauri::async_runtime::spawn`:
+            // `run()` executes on a plain sync thread with no Tokio context,
+            // so `tokio::spawn` there panics ("there is no reactor running",
+            // real-machine crash 2026-11-26, lib.rs:85). `setup` runs with the
+            // app runtime up, and `tauri::async_runtime::spawn` works from
+            // any thread. Same rule everywhere: no production `tokio::spawn`.
+            {
+                let state = sampler_state.clone();
+                tauri::async_runtime::spawn(async move {
+                    let mut tick = tokio::time::interval(Duration::from_secs(10));
+                    loop {
+                        tick.tick().await;
+                        let total: f64 =
+                            state.sync.live_states().iter().map(|s| s.equity_usd).sum();
+                        if total > 0.0 {
+                            state.risk.record_equity(total);
+                        }
+                    }
+                });
+            }
             // Portable WebView2 cache: the main window is created here (not
             // from the static `windows` array in tauri.conf.json) so its
             // user-data directory can be forced to exe-adjacent

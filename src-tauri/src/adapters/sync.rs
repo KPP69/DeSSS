@@ -149,7 +149,10 @@ impl SyncManager {
     pub fn reconcile_account(self: &Arc<Self>, account_id: &str) {
         let account_id = account_id.to_string();
         let this = Arc::clone(self);
-        tokio::spawn(async move {
+        // `reconcile_account` is a sync fn callable from any thread, so the
+        // task must go through `tauri::async_runtime::spawn` — `tokio::spawn`
+        // panics outside a Tokio context (real-machine crash 2026-11-26).
+        tauri::async_runtime::spawn(async move {
             let wait = this.reconcile.grace_remaining_ms(&account_id);
             if wait > 0 {
                 tokio::time::sleep(std::time::Duration::from_millis(wait as u64)).await;
