@@ -46,7 +46,7 @@ pub type StreamKey = (String, String);
 
 /// Which exchange protocol a stream speaks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum StreamKind {
+pub enum StreamKind {
     Hyperliquid,
     Lighter,
     Asterdex,

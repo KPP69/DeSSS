@@ -492,7 +492,7 @@ pub async fn place_order(deps: &ExecDeps, intent: PlaceIntent) -> Result<OrderIn
                 }
             }
         }
-        Err(AdapterError::UnknownOutcome(msg)) => {
+        Err(AdapterError::UnknownOutcome(msg)) | Err(AdapterError::Transport(msg)) => {
             // The order may have landed: Unresolved, then reconcile
             // by cloid right away.
             info.transition(OrderStatus::Unresolved, crate::adapters::now_ms())
@@ -518,6 +518,28 @@ pub async fn place_order(deps: &ExecDeps, intent: PlaceIntent) -> Result<OrderIn
             deps.orders.insert(info.clone());
             deps.risk.record_order_outcome(false);
             Err(msg)
+        }
+        Err(AdapterError::Rejected { msg, .. }) => {
+            // A definite exchange rejection, typed (no producer
+            // emits this yet; the arm exists so the new variant
+            // compiles). Same treatment as the Other arm above.
+            info.transition(OrderStatus::Rejected, crate::adapters::now_ms())
+                .ok();
+            info.error = Some(msg.clone());
+            deps.orders.insert(info.clone());
+            deps.risk.record_order_outcome(false);
+            Err(msg)
+        }
+        Err(e @ AdapterError::Unsupported(_)) => {
+            // The venue does not implement ordering (no producer
+            // emits this yet): definitely not sent, same treatment
+            // as a rejection.
+            info.transition(OrderStatus::Rejected, crate::adapters::now_ms())
+                .ok();
+            info.error = Some(e.to_string());
+            deps.orders.insert(info.clone());
+            deps.risk.record_order_outcome(false);
+            Err(e.to_string())
         }
         Err(AdapterError::NotConnected) => {
             info.transition(OrderStatus::Failed, crate::adapters::now_ms())
@@ -688,7 +710,7 @@ pub async fn cancel_order(
 
     let submit = adapter.cancel_order(account_id, &cancel_id, symbol).await;
     match submit {
-        Ok(()) | Err(AdapterError::UnknownOutcome(_)) => {
+        Ok(()) | Err(AdapterError::UnknownOutcome(_)) | Err(AdapterError::Transport(_)) => {
             // The cancel was accepted, or its outcome is unknown:
             // either way the order's fate is decided by the query.
             Ok(reconcile_order(deps, &adapter, &info).await)
@@ -707,6 +729,17 @@ pub async fn cancel_order(
             // "already canceled, or filled" and friends: query to
             // find out which it was.
             Ok(reconcile_order(deps, &adapter, &info).await)
+        }
+        Err(AdapterError::Rejected { .. }) => {
+            // Definite refusal (no producer emits this yet): the
+            // order's fate is decided by the query, same as the
+            // Other arm's fall-through above.
+            Ok(reconcile_order(deps, &adapter, &info).await)
+        }
+        Err(AdapterError::Unsupported(_)) => {
+            // Ordering lands in a later phase: the cancel was never
+            // attempted, nothing to query for.
+            Err("该交易所撤单将在下一阶段接入".to_string())
         }
         Err(AdapterError::NotConnected) => Err("账户未连接，无法撤单".to_string()),
     }

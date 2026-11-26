@@ -11,19 +11,63 @@ pub mod types;
 use self::types::*;
 use async_trait::async_trait;
 pub type AdapterResult<T> = Result<T, AdapterError>;
+
+/// One error type for every venue, with a kind (v3 §2.1). Callers
+/// decide "was it sent?" with [`VenueError::pre_send`], never by
+/// matching error text.
 #[derive(Debug, thiserror::Error)]
-pub enum AdapterError {
+pub enum VenueError {
+    /// No live connection to the exchange.
     #[error("未连接")]
     NotConnected,
+    /// The exchange explicitly refused the request before acting on
+    /// it (bad params, insufficient margin, unknown order for a
+    /// cancel): definitely NOT sent.
+    #[error("交易所拒绝：{msg}")]
+    Rejected {
+        /// Exchange error code, when the exchange gave one.
+        code: Option<i64>,
+        msg: String,
+    },
     /// The request was sent (or may have been sent) but no usable
     /// answer came back — timeout, transport failure, unreadable
     /// response. The outcome on the exchange is UNKNOWN: the caller
     /// must reconcile by querying the order, never guess filled or
-    /// failed. Only write paths produce this; reads use `Other`.
+    /// failed. Only write paths produce this; reads use `Other`
+    /// until they migrate (PR-1.4).
     #[error("结果未知，需对账：{0}")]
     UnknownOutcome(String),
+    /// The venue does not implement this capability yet.
+    #[error("该交易所暂不支持：{0}")]
+    Unsupported(&'static str),
+    /// Transport failure talking to the exchange (connect, DNS, TLS,
+    /// non-2xx, unreadable body). The outcome is unknown.
+    #[error("传输失败：{0}")]
+    Transport(String),
+    /// Transitional: the old catch-all. Kept ONLY so the existing
+    /// `AdapterError::Other(..)` call sites keep compiling in this
+    /// move-only round — no new code may use it, and it is deleted
+    /// in PR-1.4 when those sites migrate to `Rejected` /
+    /// `Unsupported` / `Transport` (v3 §2.1).
     #[error("{0}")]
     Other(String),
+}
+
+/// `AdapterError` is the same type as `VenueError` (v3 §2.1); the old
+/// name stays until the call sites migrate in PR-1.4.
+pub type AdapterError = VenueError;
+
+impl VenueError {
+    /// True only when the error proves the request was NOT sent (or
+    /// was rejected before acting): the caller must NOT reconcile.
+    /// Every other variant means the outcome is unknown — the caller
+    /// must query the exchange.
+    pub fn pre_send(&self) -> bool {
+        matches!(
+            self,
+            VenueError::NotConnected | VenueError::Rejected { .. } | VenueError::Unsupported(_)
+        )
+    }
 }
 
 /// The exchange's exact "no such order" signal (orderStatus
@@ -71,6 +115,22 @@ mod tests {
         assert_eq!(live_status(true, true), "connected");
         assert_eq!(live_status(false, true), "error");
         assert_eq!(live_status(false, false), "connecting");
+    }
+
+    #[test]
+    fn pre_send_only_for_definite_not_sent() {
+        assert!(VenueError::NotConnected.pre_send());
+        assert!(VenueError::Rejected {
+            code: Some(1001),
+            msg: "bad params".to_string()
+        }
+        .pre_send());
+        assert!(VenueError::Unsupported("order").pre_send());
+        assert!(!VenueError::UnknownOutcome("timeout".to_string()).pre_send());
+        assert!(!VenueError::Transport("reset".to_string()).pre_send());
+        // The transitional catch-all is ambiguous by construction:
+        // treat it as unknown, never as proof of not-sent.
+        assert!(!VenueError::Other("?".to_string()).pre_send());
     }
 }
 /// Unified exchange contract, implemented by the real read-only adapters

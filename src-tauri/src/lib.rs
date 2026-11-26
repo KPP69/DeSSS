@@ -2,6 +2,7 @@ pub mod accounts;
 pub mod adapters;
 pub mod bus;
 pub mod commands;
+pub mod core;
 pub mod data_engine;
 pub mod execution;
 pub mod net;
@@ -9,6 +10,7 @@ pub mod portable;
 pub mod risk;
 pub mod strategy_engine;
 pub mod vault;
+pub mod venues;
 
 use std::sync::Arc;
 use std::time::Duration;
