@@ -490,7 +490,9 @@ impl RealtimeEngine {
                 }
             }
             StreamKind::Asterdex => {
-                let Some((bid_px, bid_sz, ask_px, ask_sz)) = parse_asterdex_book_ticker(&v) else {
+                let Some((bid_px, bid_sz, ask_px, ask_sz)) =
+                    crate::venues::asterdex::stream::parse_asterdex_book_ticker(&v)
+                else {
                     return FrameAction::None;
                 };
                 FrameAction::Publish(OrderBook {
@@ -522,7 +524,7 @@ impl RealtimeEngine {
                 if v.get("channel").and_then(|c| c.as_str()) != Some("l2Orderbook") {
                     return FrameAction::None;
                 }
-                let Some((bids, asks)) = parse_arcus_l2(&v) else {
+                let Some((bids, asks)) = crate::venues::arcus::stream::parse_arcus_l2(&v) else {
                     return FrameAction::None;
                 };
                 // l2Orderbook sends a full snapshot every ~200ms.
@@ -531,37 +533,6 @@ impl RealtimeEngine {
             }
         }
     }
-}
-
-/// AsterDEX `bookTicker` frame: top of book only.
-fn parse_asterdex_book_ticker(v: &serde_json::Value) -> Option<(f64, f64, f64, f64)> {
-    if v.get("e").and_then(|e| e.as_str()) != Some("bookTicker") {
-        return None;
-    }
-    let f = |k: &str| v.get(k).and_then(|x| x.as_str())?.parse::<f64>().ok();
-    Some((f("b")?, f("B")?, f("a")?, f("A")?))
-}
-
-/// Arcus `l2Orderbook` frame: `contents.bids/asks` are `[price, size]`
-/// string pairs; every frame is a full snapshot.
-fn parse_arcus_l2(v: &serde_json::Value) -> Option<(Vec<(f64, f64)>, Vec<(f64, f64)>)> {
-    let contents = v.get("contents")?;
-    let parse_side = |side: &serde_json::Value| -> Option<Vec<(f64, f64)>> {
-        side.as_array().map(|rows| {
-            rows.iter()
-                .filter_map(|r| {
-                    let pair = r.as_array()?;
-                    let px = pair.first().and_then(|p| p.as_str())?.parse::<f64>().ok()?;
-                    let sz = pair.get(1).and_then(|s| s.as_str())?.parse::<f64>().ok()?;
-                    Some((px, sz))
-                })
-                .collect()
-        })
-    };
-    Some((
-        parse_side(contents.get("bids")?)?,
-        parse_side(contents.get("asks")?)?,
-    ))
 }
 
 #[cfg(test)]
@@ -614,29 +585,6 @@ mod tests {
             engine.handle_frame(&key, StreamKind::Lighter, &mut book, ok),
             FrameAction::Publish(_)
         ));
-    }
-
-    #[test]
-    fn asterdex_book_ticker_is_top_of_book() {
-        let v = val(
-            r#"{"e":"bookTicker","E":1,"u":1,"s":"BTCUSDT","b":"90000","B":"1.5","a":"90010","A":"0.5"}"#,
-        );
-        assert_eq!(
-            parse_asterdex_book_ticker(&v),
-            Some((90000.0, 1.5, 90010.0, 0.5))
-        );
-        let other = val(r#"{"e":"depthUpdate","s":"BTCUSDT"}"#);
-        assert!(parse_asterdex_book_ticker(&other).is_none());
-    }
-
-    #[test]
-    fn arcus_l2_snapshot_parses() {
-        let v = val(
-            r#"{"type":"channel_data","channel":"l2Orderbook","id":"BTC-USD","contents":{"bids":[["64822.9","0.85"]],"asks":[["64826.9","0.85"]],"lastSequenceId":1,"globalSequenceId":2,"timestamp":1783750906942677}}"#,
-        );
-        let (bids, asks) = parse_arcus_l2(&v).expect("book");
-        assert_eq!(bids, vec![(64822.9, 0.85)]);
-        assert_eq!(asks, vec![(64826.9, 0.85)]);
     }
 
     #[test]

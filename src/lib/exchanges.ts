@@ -91,16 +91,9 @@ export const EXCHANGES: ExchangeDef[] = [
     id: "asterdex",
     name: "AsterDEX",
     note: "V3 仅支持 Agent 钱包凭证",
-    modes: [
-      {
-        id: "agent",
-        label: "Agent 钱包",
-        fields: [
-          { key: "master_wallet_address", label: "主钱包地址", type: "text", required: true, hint: "拥有该账户、授权了 Agent 的主钱包地址（V3 签名 user 参数）" },
-          { key: "agent_wallet_address", label: "Agent 钱包地址", type: "text", required: true },
-          { key: "agent_private_key", label: "Agent 钱包私钥", type: "password", required: true },
-        ],
-      },
+    fields: [
+      { key: "wallet_address", label: "主钱包地址", type: "text", required: true, hint: "拥有该账户、授权了 Agent 的主钱包地址（V3 签名 user 参数）" },
+      { key: "agent_private_key", label: "Agent 钱包私钥", type: "password", required: true },
     ],
   },
   {
@@ -108,7 +101,6 @@ export const EXCHANGES: ExchangeDef[] = [
     name: "Arcus",
     fields: [
       { key: "wallet_address", label: "钱包地址", type: "text", required: true },
-      { key: "signing_private_key", label: "交易签名私钥/凭证", type: "password", required: true },
     ],
   },
 ];

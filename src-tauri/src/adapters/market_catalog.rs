@@ -85,8 +85,6 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-use super::arcus::ARCUS_REST_URL;
-use super::asterdex::ASTER_REST_URL;
 use crate::bus::EventBus;
 use crate::net::shared_http_client;
 use crate::venues::lighter::LighterNetwork;
@@ -106,10 +104,6 @@ pub const ERROR_BACKOFF: Duration = Duration::from_secs(60);
 /// The WS-staleness fallback covers at most this many of a search's
 /// top rows, once, in the background.
 pub const FALLBACK_TOP_N: usize = 5;
-/// The WS-staleness fallback covers at most this many of a search's
-/// top rows, once, in the background.
-/// AsterDEX specs change slowly (890 KB payload) — refetch at most hourly.
-const ASTER_SPECS_TTL: Duration = Duration::from_secs(3600);
 /// Max concurrent per-market enrichment requests (BBO / OI fills): wide
 /// searches fan out over many symbols, and the venues rate-limit (429)
 /// above roughly a dozen parallel calls.
@@ -360,223 +354,6 @@ pub(crate) fn num_field(v: &serde_json::Value, key: &str) -> Option<f64> {
     v.get(key).and_then(opt_f64)
 }
 
-/// AsterDEX contract specs (from exchangeInfo, refreshed at most hourly).
-#[derive(Clone, Debug)]
-struct AsterSpec {
-    base_symbol: String,
-    settlement_currency: String,
-    tick_size: Option<f64>,
-    step_size: Option<f64>,
-    min_notional: Option<f64>,
-}
-
-fn aster_specs_from(v: &serde_json::Value) -> HashMap<String, AsterSpec> {
-    let mut out = HashMap::new();
-    let Some(list) = v.get("symbols").and_then(|s| s.as_array()) else {
-        return out;
-    };
-    for s in list {
-        if str_field(s, "status") != Some("TRADING") {
-            continue;
-        }
-        if str_field(s, "contractType") != Some("PERPETUAL") {
-            continue;
-        }
-        let Some(symbol) = str_field(s, "symbol") else {
-            continue;
-        };
-        let mut tick = None;
-        let mut step = None;
-        let mut min_notional = None;
-        if let Some(filters) = s.get("filters").and_then(|f| f.as_array()) {
-            for f in filters {
-                match str_field(f, "filterType") {
-                    Some("PRICE_FILTER") => tick = num_field(f, "tickSize"),
-                    Some("LOT_SIZE") => step = num_field(f, "stepSize"),
-                    Some("MIN_NOTIONAL") => min_notional = num_field(f, "notional"),
-                    _ => {}
-                }
-            }
-        }
-        out.insert(
-            symbol.to_string(),
-            AsterSpec {
-                base_symbol: str_field(s, "baseAsset")
-                    .map(normalize_base_symbol)
-                    .unwrap_or_else(|| normalize_base_symbol(symbol)),
-                settlement_currency: str_field(s, "marginAsset").unwrap_or("USDT").to_string(),
-                tick_size: tick,
-                step_size: step,
-                min_notional,
-            },
-        );
-    }
-    out
-}
-
-/// Parse AsterDEX `premiumIndex` + `bookTicker`, joined on the specs map
-/// (TRADING PERPETUAL symbols only; premiumIndex carries ~156 stale entries
-/// that are not in exchangeInfo and are ignored). `intervals` maps symbol
-/// to its funding settlement period in hours (from `fundingInfo`); a symbol
-/// missing from it has an **unknown** interval — `funding_interval_hours`,
-/// `funding_1h` and `funding_apr` all stay `None`, never a defaulted 8h.
-/// `volumes` maps symbol to 24h volume in USD (from `ticker/24hr`
-/// quoteVolume). `max_leverage` is always `None`: no public source exists.
-fn parse_asterdex(
-    specs: &HashMap<String, AsterSpec>,
-    premium: &serde_json::Value,
-    book: &serde_json::Value,
-    intervals: &HashMap<String, f64>,
-    volumes: &HashMap<String, f64>,
-    now_ms: i64,
-) -> Result<Vec<MarketInfo>, String> {
-    let Some(premium_list) = premium.as_array() else {
-        return Err("premiumIndex 返回结构异常（应为数组）".into());
-    };
-    let mut book_by_symbol: HashMap<&str, &serde_json::Value> = HashMap::new();
-    if let Some(book_list) = book.as_array() {
-        for b in book_list {
-            if let Some(s) = str_field(b, "symbol") {
-                book_by_symbol.insert(s, b);
-            }
-        }
-    }
-    let mut out = Vec::new();
-    for p in premium_list {
-        let Some(symbol) = str_field(p, "symbol") else {
-            continue;
-        };
-        let Some(spec) = specs.get(symbol) else {
-            continue; // stale/delisted entry not in exchangeInfo
-        };
-        let funding_raw = num_field(p, "lastFundingRate");
-        // Funding interval is per-symbol (fundingInfo: 1h/2h/4h/8h).
-        // Unknown interval -> no 1h rate and no APR: a fabricated number
-        // is worse than an honest "—".
-        let interval = intervals.get(symbol).copied().filter(|h| *h > 0.0);
-        let funding_1h = match (funding_raw, interval) {
-            (Some(raw), Some(h)) => Some(funding_1h_from(raw, h)),
-            _ => None,
-        };
-        let next_funding = p
-            .get("nextFundingTime")
-            .and_then(|n| n.as_i64())
-            .filter(|t| *t > 0);
-        let (bid_px, ask_px) = match book_by_symbol.get(symbol) {
-            Some(b) => (num_field(b, "bidPrice"), num_field(b, "askPrice")),
-            None => (None, None),
-        };
-        let mark_px = num_field(p, "markPrice");
-        out.push(MarketInfo {
-            exchange_id: "asterdex".to_string(),
-            symbol: symbol.to_string(),
-            base_symbol: spec.base_symbol.clone(),
-            market_id: None,
-            settlement_currency: spec.settlement_currency.clone(),
-            // No public source for max leverage (exchangeInfo has no
-            // leverage field; maint/required margin percents are not max
-            // leverage). The catalog never signs requests with account
-            // credentials, so this stays null.
-            max_leverage: None,
-            tick_size: spec.tick_size,
-            step_size: spec.step_size,
-            min_notional: spec.min_notional,
-            bid_px,
-            ask_px,
-            mid_px: match (bid_px, ask_px) {
-                (Some(b), Some(a)) => Some((b + a) / 2.0),
-                _ => None,
-            },
-            mark_px,
-            index_px: num_field(p, "indexPrice"),
-            funding_rate_raw: funding_raw,
-            funding_interval_hours: interval,
-            funding_1h,
-            funding_apr: funding_1h.map(funding_apr_pct),
-            next_funding_time: next_funding,
-            // 24h volume from ticker/24hr (quoteVolume, USDT). V3 has
-            // no openInterest endpoint, so open interest stays None.
-            volume_24h_usd: volumes.get(symbol).copied(),
-            open_interest_usd: None,
-            updated_at: now_ms,
-        });
-    }
-    Ok(out)
-}
-
-/// Parse Arcus `GET /v1/markets` (covers specs, prices and funding in one
-/// call). `nextFundingAt` is in **seconds**, not ms. Max leverage is
-/// 1 / initialMarginFraction; RWA markets use the off-hours fraction when
-/// outside regular trading hours.
-fn parse_arcus(v: &serde_json::Value, now_ms: i64) -> Result<Vec<MarketInfo>, String> {
-    let Some(list) = v.get("markets").and_then(|m| m.as_array()) else {
-        return Err("/v1/markets 缺少 markets 数组".into());
-    };
-    let mut out = Vec::new();
-    for m in list {
-        if str_field(m, "status") != Some("ONLINE") {
-            continue;
-        }
-        if let Some(t) = str_field(m, "type") {
-            if t != "PERPETUAL" {
-                continue;
-            }
-        }
-        let Some(symbol) = str_field(m, "marketDisplayName") else {
-            continue;
-        };
-        let outside_rth = m
-            .get("isOutsideRth")
-            .and_then(|b| b.as_bool())
-            .unwrap_or(false);
-        let imf = if outside_rth {
-            num_field(m, "offHoursInitialMarginFraction")
-                .or_else(|| num_field(m, "initialMarginFraction"))
-        } else {
-            num_field(m, "initialMarginFraction")
-        };
-        let max_leverage = imf.filter(|f| *f > 0.0).map(|f| 1.0 / f);
-        let funding_raw = num_field(m, "fundingRate");
-        let next_funding = m
-            .get("nextFundingAt")
-            .and_then(|n| n.as_i64())
-            .map(|s| s * 1000);
-        let mark_px = num_field(m, "markPrice");
-        // Open interest is quoted in base units; convert with the mark price.
-        let open_interest_usd = match (num_field(m, "openInterest"), mark_px) {
-            (Some(oi), Some(px)) => Some(oi * px),
-            _ => None,
-        };
-        out.push(MarketInfo {
-            exchange_id: "arcus".to_string(),
-            symbol: symbol.to_string(),
-            base_symbol: str_field(m, "baseAsset")
-                .map(normalize_base_symbol)
-                .unwrap_or_else(|| normalize_base_symbol(symbol)),
-            market_id: None,
-            settlement_currency: "USDG".to_string(),
-            max_leverage,
-            tick_size: num_field(m, "tickSize"),
-            step_size: num_field(m, "stepSize"),
-            min_notional: num_field(m, "minOrderNotional"),
-            bid_px: None,
-            ask_px: None,
-            mid_px: None,
-            mark_px: num_field(m, "markPrice"),
-            index_px: num_field(m, "oraclePrice"),
-            funding_rate_raw: funding_raw,
-            funding_interval_hours: Some(1.0),
-            funding_1h: funding_raw,
-            funding_apr: funding_raw.map(funding_apr_pct),
-            next_funding_time: next_funding,
-            volume_24h_usd: num_field(m, "volume24hNotional"),
-            open_interest_usd,
-            updated_at: now_ms,
-        });
-    }
-    Ok(out)
-}
-
 pub(crate) async fn get_json(
     http: &reqwest::Client,
     url: &str,
@@ -584,41 +361,6 @@ pub(crate) async fn get_json(
     // One retry on a stale pooled connection (SendRequest /
     // UnexpectedEof); error text is redacted (no URL query params).
     crate::net::read_json(|| http.get(url)).await
-}
-
-/// Best bid/ask from an Arcus `GET /v1/bbo/{market}` response.
-fn parse_arcus_bbo(v: &serde_json::Value) -> (Option<f64>, Option<f64>) {
-    (
-        v.get("bestBid").and_then(|b| num_field(b, "price")),
-        v.get("bestAsk").and_then(|a| num_field(a, "price")),
-    )
-}
-
-/// AsterDEX `ticker/24hr` (all symbols, one call) -> symbol -> 24h volume
-/// in USD (`quoteVolume` is already quote-currency notional).
-fn parse_asterdex_volumes(v: &serde_json::Value) -> HashMap<String, f64> {
-    let mut out = HashMap::new();
-    if let Some(list) = v.as_array() {
-        for t in list {
-            if let (Some(s), Some(q)) = (str_field(t, "symbol"), num_field(t, "quoteVolume")) {
-                out.insert(s.to_string(), q);
-            }
-        }
-    }
-    out
-}
-
-async fn fetch_arcus_bbo(
-    http: &reqwest::Client,
-    symbol: &str,
-) -> Result<(Option<f64>, Option<f64>), String> {
-    let v = get_json(http, &format!("{ARCUS_REST_URL}/v1/bbo/{symbol}")).await?;
-    Ok(parse_arcus_bbo(&v))
-}
-
-async fn fetch_arcus(http: &reqwest::Client) -> Result<Vec<MarketInfo>, String> {
-    let v = get_json(http, &format!("{ARCUS_REST_URL}/v1/markets")).await?;
-    parse_arcus(&v, crate::adapters::now_ms())
 }
 
 pub struct MarketCatalog {
@@ -636,8 +378,6 @@ pub struct MarketCatalog {
     /// Last time the 5s-staleness fallback was claimed, to keep the
     /// 2s search tick from spawning one fallback task per tick.
     last_fallback: Mutex<Option<Instant>>,
-    aster_specs: RwLock<HashMap<String, AsterSpec>>,
-    aster_specs_at: Mutex<Option<Instant>>,
     /// When each exchange's rows were last fetched successfully.
     fetched_at: Mutex<HashMap<String, Instant>>,
     /// Last time any exchange actually succeeded in a refresh cycle
@@ -652,11 +392,6 @@ pub struct MarketCatalog {
     refresh_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// Caps concurrent per-market enrichment requests (BBO / OI fills).
     enrich_sem: tokio::sync::Semaphore,
-    /// Last-known AsterDEX funding intervals from `fundingInfo`
-    /// (per-symbol hours). The live funding math reads this; on a
-    /// fundingInfo failure the previous map is kept, and a symbol never
-    /// seen in it has an unknown interval (no default).
-    aster_intervals: RwLock<HashMap<String, f64>>,
 }
 
 impl MarketCatalog {
@@ -669,13 +404,10 @@ impl MarketCatalog {
             last_errors: Mutex::new(HashMap::new()),
             error_at: Mutex::new(HashMap::new()),
             last_fallback: Mutex::new(None),
-            aster_specs: RwLock::new(HashMap::new()),
-            aster_specs_at: Mutex::new(None),
             fetched_at: Mutex::new(HashMap::new()),
             last_success_at: Mutex::new(None),
             refresh_locks: Mutex::new(HashMap::new()),
             enrich_sem: tokio::sync::Semaphore::new(ENRICH_CONCURRENCY),
-            aster_intervals: RwLock::new(HashMap::new()),
         }
     }
 
@@ -957,8 +689,14 @@ impl MarketCatalog {
                     )
                     .await,
                 ),
-                "arcus" => self.apply(exchange_id, fetch_arcus(&self.http).await),
-                "asterdex" => self.refresh_asterdex().await,
+                "arcus" => self.apply(
+                    exchange_id,
+                    crate::venues::arcus::catalog::fetch_arcus(&self.http).await,
+                ),
+                "asterdex" => self.apply(
+                    exchange_id,
+                    crate::venues::asterdex::catalog::fetch_asterdex(&self.http).await,
+                ),
                 _ => false,
             }
         };
@@ -980,126 +718,6 @@ impl MarketCatalog {
         } else {
             RefreshOutcome::Failed
         }
-    }
-
-    /// AsterDEX bulk refresh (runs under the asterdex refresh lock):
-    /// specs (at most hourly) + premiumIndex + bookTicker + fundingInfo +
-    /// ticker/24hr. fundingInfo is optional: on failure the last-known
-    /// intervals are kept and symbols never seen stay unknown (no
-    /// defaulted 8h); ticker/24hr is optional the same way. Only the
-    /// premiumIndex/bookTicker pair is required to build rows.
-    async fn refresh_asterdex(&self) -> bool {
-        let specs_stale = {
-            let at = self
-                .aster_specs_at
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            match *at {
-                None => true,
-                Some(t) => t.elapsed() > ASTER_SPECS_TTL,
-            }
-        };
-        if specs_stale {
-            match get_json(
-                &self.http,
-                &format!("{ASTER_REST_URL}/fapi/v3/exchangeInfo"),
-            )
-            .await
-            {
-                Ok(v) => {
-                    let specs = aster_specs_from(&v);
-                    {
-                        let mut slot = self.aster_specs.write().unwrap_or_else(|e| e.into_inner());
-                        *slot = specs;
-                    }
-                    {
-                        let mut at = self
-                            .aster_specs_at
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner());
-                        *at = Some(Instant::now());
-                    }
-                }
-                Err(e) => {
-                    self.log_refresh_error("asterdex", format!("asterdex 全量行情刷新失败：{e}"));
-                    return false;
-                }
-            }
-        }
-        let specs = {
-            let slot = self.aster_specs.read().unwrap_or_else(|e| e.into_inner());
-            slot.clone()
-        };
-        let premium_url = format!("{ASTER_REST_URL}/fapi/v3/premiumIndex");
-        let book_url = format!("{ASTER_REST_URL}/fapi/v3/ticker/bookTicker");
-        let funding_info_url = format!("{ASTER_REST_URL}/fapi/v3/fundingInfo");
-        let ticker_url = format!("{ASTER_REST_URL}/fapi/v3/ticker/24hr");
-        let (premium, book, funding_info, ticker24) = tokio::join!(
-            get_json(&self.http, &premium_url),
-            get_json(&self.http, &book_url),
-            get_json(&self.http, &funding_info_url),
-            get_json(&self.http, &ticker_url),
-        );
-        // fundingInfo refreshes the cached interval map; on failure the
-        // previous map is kept (intervals change rarely), and a symbol
-        // never seen in it stays unknown.
-        match funding_info {
-            Ok(v) => {
-                self.log_refresh_ok("asterdex-fundingInfo");
-                if let Some(list) = v.as_array() {
-                    let mut intervals: HashMap<String, f64> = HashMap::new();
-                    for f in list {
-                        if let (Some(s), Some(h)) = (
-                            str_field(f, "symbol"),
-                            num_field(f, "fundingIntervalHours"),
-                        ) {
-                            intervals.insert(s.to_string(), h);
-                        }
-                    }
-                    let mut slot = self
-                        .aster_intervals
-                        .write()
-                        .unwrap_or_else(|e| e.into_inner());
-                    *slot = intervals;
-                }
-            }
-            Err(e) => self.log_refresh_error(
-                "asterdex-fundingInfo",
-                format!("AsterDEX fundingInfo 刷新失败，费率周期沿用上次结果，未知标的年化暂不计算：{e}"),
-            ),
-        }
-        let volumes = match ticker24 {
-            Ok(v) => {
-                self.log_refresh_ok("asterdex-ticker24hr");
-                parse_asterdex_volumes(&v)
-            }
-            Err(e) => {
-                self.log_refresh_error(
-                    "asterdex-ticker24hr",
-                    format!("AsterDEX ticker/24hr 刷新失败，24h成交额暂无：{e}"),
-                );
-                HashMap::new()
-            }
-        };
-        let intervals = {
-            let slot = self
-                .aster_intervals
-                .read()
-                .unwrap_or_else(|e| e.into_inner());
-            slot.clone()
-        };
-        let parsed = match (premium, book) {
-            (Ok(p), Ok(b)) => parse_asterdex(
-                &specs,
-                &p,
-                &b,
-                &intervals,
-                &volumes,
-                crate::adapters::now_ms(),
-            ),
-            (Err(e), _) | (_, Err(e)) => Err(format!("asterdex 全量行情刷新失败：{e}")),
-        };
-        self.apply("asterdex", parsed)
     }
 
     /// Fetch (concurrently) the requested exchanges whose cache is stale
@@ -1279,7 +897,12 @@ impl MarketCatalog {
                                 }
                             }
                         }
-                        "arcus" => match fetch_arcus_bbo(&self.http, &row.symbol).await {
+                        "arcus" => match crate::venues::arcus::catalog::fetch_arcus_bbo(
+                            &self.http,
+                            &row.symbol,
+                        )
+                        .await
+                        {
                             Ok((bid, ask)) => {
                                 if bid.is_some() {
                                     row.bid_px = bid;
@@ -1379,10 +1002,6 @@ impl MarketCatalog {
 mod tests {
     use super::*;
 
-    fn json(s: &str) -> serde_json::Value {
-        serde_json::from_str(s).unwrap()
-    }
-
     #[test]
     fn funding_conversions() {
         // AsterDEX 8h raw 0.0008 -> 1h 0.0001, APR 87.6%.
@@ -1420,33 +1039,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_arcus_bbo_cases() {
-        let v = json(
-            r#"{"bestBid":{"price":"59809","size":"0.05251135"},
-                "bestAsk":{"price":"59809.1","size":"3.23288548"},
-                "lastSequenceId":972906112}"#,
-        );
-        assert_eq!(parse_arcus_bbo(&v), (Some(59809.0), Some(59809.1)));
-        assert_eq!(
-            parse_arcus_bbo(&json(r#"{"bestBid":null,"bestAsk":null}"#)),
-            (None, None)
-        );
-    }
-
-    #[test]
-    fn parse_asterdex_volumes_cases() {
-        let v = json(
-            r#"[{"symbol":"BTCUSDT","quoteVolume":"587866473.21"},
-                {"symbol":"ETHUSDT","quoteVolume":"123456.0"},
-                {"symbol":"NOPEUSDT"}]"#,
-        );
-        let map = parse_asterdex_volumes(&v);
-        assert_eq!(map.get("BTCUSDT"), Some(&587866473.21));
-        assert_eq!(map.get("ETHUSDT"), Some(&123456.0));
-        assert!(!map.contains_key("NOPEUSDT"));
-    }
-
-    #[test]
     fn hyperliquid_tick_size_cases() {
         // Live-verified: BTC ~$58k -> $1.00, ETH ~$1641 -> $0.10.
         assert!((hyperliquid_tick_size(58_000.0, 5) - 1.0).abs() < 1e-12);
@@ -1464,494 +1056,6 @@ mod tests {
         assert_eq!(next_hour_utc_ms(now), 1_795_622_400_000i64);
         // Exactly on the hour -> the *next* hour.
         assert_eq!(next_hour_utc_ms(1_795_622_400_000), 1_795_626_000_000);
-    }
-
-    #[test]
-    fn parse_asterdex_fixture() {
-        let ei = json(
-            r#"{"symbols":[
-                {"symbol":"BTCUSDT","status":"TRADING","contractType":"PERPETUAL","baseAsset":"BTC","marginAsset":"USDT",
-                 "filters":[{"filterType":"PRICE_FILTER","tickSize":"0.1"},{"filterType":"LOT_SIZE","stepSize":"0.001"},{"filterType":"MIN_NOTIONAL","notional":"5"}]},
-                {"symbol":"ETHUSDT","status":"TRADING","contractType":"PERPETUAL","baseAsset":"ETH","marginAsset":"USDT",
-                 "filters":[{"filterType":"PRICE_FILTER","tickSize":"0.01"},{"filterType":"LOT_SIZE","stepSize":"0.001"},{"filterType":"MIN_NOTIONAL","notional":"5"}]},
-                {"symbol":"OLDUSDT","status":"TRADING","contractType":"PERPETUAL","baseAsset":"OLD","marginAsset":"USDT","filters":[]}
-            ]}"#,
-        );
-        let specs = aster_specs_from(&ei);
-        assert_eq!(specs.len(), 3);
-        let premium = json(
-            r#"[{"symbol":"BTCUSDT","markPrice":"58038.2","indexPrice":"58059.68","lastFundingRate":"0.00009616","nextFundingTime":1795622400000,"time":1795621662000},
-                {"symbol":"ETHUSDT","markPrice":"1641.0","indexPrice":"1641.5","lastFundingRate":"0.00008","nextFundingTime":1795622400000,"time":1795621662000},
-                {"symbol":"STALEUSDT","markPrice":"1.0","indexPrice":"1.0","lastFundingRate":"0.0","nextFundingTime":1795622400000,"time":1795621662000}]"#,
-        );
-        let book = json(
-            r#"[{"symbol":"BTCUSDT","bidPrice":"58093.3","askPrice":"58093.4"},
-               {"symbol":"ETHUSDT","bidPrice":"1640.9","askPrice":"1641.1"}]"#,
-        );
-        // fundingInfo is per-symbol: BTC settles every 8h, ETH every 1h.
-        let mut intervals = HashMap::new();
-        intervals.insert("BTCUSDT".to_string(), 8.0);
-        intervals.insert("ETHUSDT".to_string(), 1.0);
-        // ticker/24hr volumes (quoteVolume).
-        let mut volumes = HashMap::new();
-        volumes.insert("BTCUSDT".to_string(), 587866473.21);
-        let rows = parse_asterdex(
-            &specs,
-            &premium,
-            &book,
-            &intervals,
-            &volumes,
-            1_795_622_400_000,
-        )
-        .unwrap();
-        // Stale premium entry (not in exchangeInfo) is ignored.
-        assert_eq!(rows.len(), 2);
-        let btc = &rows[0];
-        assert_eq!(btc.exchange_id, "asterdex");
-        assert_eq!(btc.base_symbol, "BTC");
-        assert_eq!(btc.settlement_currency, "USDT");
-        // No public source for max leverage — always null now that the
-        // signed leverageBracket read (account credentials) is gone.
-        assert_eq!(btc.max_leverage, None);
-        assert_eq!(btc.volume_24h_usd, Some(587866473.21));
-        assert_eq!(btc.tick_size, Some(0.1));
-        assert_eq!(btc.step_size, Some(0.001));
-        assert_eq!(btc.min_notional, Some(5.0));
-        assert_eq!(btc.bid_px, Some(58093.3));
-        assert_eq!(btc.ask_px, Some(58093.4));
-        assert!((btc.mid_px.unwrap() - 58093.35).abs() < 1e-9);
-        assert_eq!(btc.funding_interval_hours, Some(8.0));
-        assert!((btc.funding_1h.unwrap() - 0.00009616 / 8.0).abs() < 1e-12);
-        assert_eq!(btc.next_funding_time, Some(1795622400000));
-        // Open interest is filled per search hit, not in the bulk parse.
-        assert_eq!(btc.open_interest_usd, None);
-        // ETH settles hourly: raw rate is already the 1h rate.
-        let eth = &rows[1];
-        assert_eq!(eth.funding_interval_hours, Some(1.0));
-        assert_eq!(eth.funding_1h, Some(0.00008));
-        // No volume row for ETH in this map -> null.
-        assert_eq!(eth.max_leverage, None);
-        assert_eq!(eth.volume_24h_usd, None);
-    }
-
-    /// PR-0.5: the V3 public responses parse exactly like the V1 ones.
-    /// Fixtures are verbatim excerpts (BTCUSDT + ETHUSDT) of the real
-    /// `/fapi/v3/*` responses fetched 2026-11-27 (no key). Full live
-    /// counts that day: exchangeInfo 647 symbols (586 TRADING
-    /// PERPETUAL), premiumIndex / fundingInfo 801, bookTicker 586,
-    /// ticker/24hr 641.
-    #[test]
-    fn parse_asterdex_v3_live_fixtures() {
-        let ei = json(
-            r#"{
- "symbols": [
-  {
-   "symbol": "BTCUSDT",
-   "filters": [
-    {
-     "minPrice": "1",
-     "maxPrice": "1000000",
-     "filterType": "PRICE_FILTER",
-     "tickSize": "0.1"
-    },
-    {
-     "stepSize": "0.001",
-     "filterType": "LOT_SIZE",
-     "maxQty": "1000",
-     "minQty": "0.001"
-    },
-    {
-     "stepSize": "0.001",
-     "filterType": "MARKET_LOT_SIZE",
-     "maxQty": "120",
-     "minQty": "0.001"
-    },
-    {
-     "limit": 200,
-     "filterType": "MAX_NUM_ORDERS"
-    },
-    {
-     "limit": 10,
-     "filterType": "MAX_NUM_ALGO_ORDERS"
-    },
-    {
-     "notional": "5",
-     "filterType": "MIN_NOTIONAL"
-    },
-    {
-     "multiplierDown": "0.9800",
-     "multiplierUp": "1.0200",
-     "ltMultiplierDown": "0",
-     "multiplierDecimal": "4",
-     "filterType": "PERCENT_PRICE",
-     "ltMultiplierUp": "0"
-    }
-   ],
-   "orderTypes": [
-    "LIMIT",
-    "MARKET",
-    "STOP",
-    "STOP_MARKET",
-    "TAKE_PROFIT",
-    "TAKE_PROFIT_MARKET",
-    "TRAILING_STOP_MARKET"
-   ],
-   "timeInForce": [
-    "GTC",
-    "IOC",
-    "GTX",
-    "HIDDEN"
-   ],
-   "createTime": 1630045468108,
-   "pair": "BTCUSDT",
-   "contractType": "PERPETUAL",
-   "deliveryDate": 4133404800000,
-   "onboardDate": 1627628400000,
-   "status": "TRADING",
-   "maintMarginPercent": "2.5000",
-   "requiredMarginPercent": "5.0000",
-   "baseAsset": "BTC",
-   "quoteAsset": "USDT",
-   "marginAsset": "USDT",
-   "pricePrecision": 1,
-   "quantityPrecision": 3,
-   "baseAssetPrecision": 8,
-   "quotePrecision": 8,
-   "underlyingType": "COIN",
-   "underlyingSubType": [
-    "Top"
-   ],
-   "symbolType": 0,
-   "tradingMode": 0,
-   "name": "",
-   "channel": "",
-   "sequenceNo": 10,
-   "twapMinNotional": "1000",
-   "imn": "16000.00",
-   "tags": [],
-   "settlePlan": 0,
-   "triggerProtect": "0.0200",
-   "liquidationFee": "0.025000",
-   "marketTakeBound": "0.02"
-  },
-  {
-   "symbol": "ETHUSDT",
-   "filters": [
-    {
-     "minPrice": "0.01",
-     "maxPrice": "1000000",
-     "filterType": "PRICE_FILTER",
-     "tickSize": "0.01"
-    },
-    {
-     "stepSize": "0.001",
-     "filterType": "LOT_SIZE",
-     "maxQty": "10000",
-     "minQty": "0.001"
-    },
-    {
-     "stepSize": "0.001",
-     "filterType": "MARKET_LOT_SIZE",
-     "maxQty": "2000",
-     "minQty": "0.001"
-    },
-    {
-     "limit": 200,
-     "filterType": "MAX_NUM_ORDERS"
-    },
-    {
-     "limit": 10,
-     "filterType": "MAX_NUM_ALGO_ORDERS"
-    },
-    {
-     "notional": "5",
-     "filterType": "MIN_NOTIONAL"
-    },
-    {
-     "multiplierDown": "0.9800",
-     "multiplierUp": "1.0200",
-     "ltMultiplierDown": "0",
-     "multiplierDecimal": "4",
-     "filterType": "PERCENT_PRICE",
-     "ltMultiplierUp": "0"
-    }
-   ],
-   "orderTypes": [
-    "LIMIT",
-    "MARKET",
-    "STOP",
-    "STOP_MARKET",
-    "TAKE_PROFIT",
-    "TAKE_PROFIT_MARKET",
-    "TRAILING_STOP_MARKET"
-   ],
-   "timeInForce": [
-    "GTC",
-    "IOC",
-    "GTX",
-    "HIDDEN"
-   ],
-   "createTime": 1630984677055,
-   "pair": "ETHUSDT",
-   "contractType": "PERPETUAL",
-   "deliveryDate": 4133404800000,
-   "onboardDate": 1630911600000,
-   "status": "TRADING",
-   "maintMarginPercent": "2.5000",
-   "requiredMarginPercent": "5.0000",
-   "baseAsset": "ETH",
-   "quoteAsset": "USDT",
-   "marginAsset": "USDT",
-   "pricePrecision": 2,
-   "quantityPrecision": 3,
-   "baseAssetPrecision": 8,
-   "quotePrecision": 8,
-   "underlyingType": "COIN",
-   "underlyingSubType": [
-    "Top"
-   ],
-   "symbolType": 0,
-   "tradingMode": 0,
-   "name": "",
-   "channel": "",
-   "sequenceNo": 9,
-   "twapMinNotional": "1000",
-   "imn": "8000.00",
-   "tags": [],
-   "settlePlan": 0,
-   "triggerProtect": "0.0200",
-   "liquidationFee": "0.025000",
-   "marketTakeBound": "0.02"
-  }
- ]
-}"#,
-        );
-        let specs = aster_specs_from(&ei);
-        assert_eq!(specs.len(), 2);
-        let premium = json(
-            r#"[
- {
-  "symbol": "ETHUSDT",
-  "markPrice": "1692.99165892",
-  "indexPrice": "1693.82162791",
-  "estimatedSettlePrice": "1693.65756537",
-  "lastFundingRate": "0.00004624",
-  "interestRate": "0.00010000",
-  "nextFundingTime": 1795737600000,
-  "time": 1795716270000
- },
- {
-  "symbol": "BTCUSDT",
-  "markPrice": "60506.07349638",
-  "indexPrice": "60524.37478261",
-  "estimatedSettlePrice": "60524.94703762",
-  "lastFundingRate": "0.00008069",
-  "interestRate": "0.00010000",
-  "nextFundingTime": 1795737600000,
-  "time": 1795716270000
- }
-]"#,
-        );
-        let book = json(
-            r#"[
- {
-  "symbol": "BTCUSDT",
-  "bidPrice": "60510.1",
-  "bidQty": "3.045",
-  "askPrice": "60511.3",
-  "askQty": "0.050",
-  "time": 1795716271300,
-  "lastUpdateId": 677007383825
- },
- {
-  "symbol": "ETHUSDT",
-  "bidPrice": "1692.92",
-  "bidQty": "51.936",
-  "askPrice": "1692.93",
-  "askQty": "0.031",
-  "time": 1795716271300,
-  "lastUpdateId": 677007383813
- }
-]"#,
-        );
-        let funding = json(
-            r#"[
- {
-  "symbol": "ETHUSDT",
-  "interestRate": "0.00010000",
-  "time": 1795716239000,
-  "fundingIntervalHours": 8,
-  "fundingFeeCap": 0.003,
-  "fundingFeeFloor": -0.003
- },
- {
-  "symbol": "BTCUSDT",
-  "interestRate": "0.00010000",
-  "time": 1795716239000,
-  "fundingIntervalHours": 8,
-  "fundingFeeCap": 0.003,
-  "fundingFeeFloor": -0.003
- }
-]"#,
-        );
-        let mut intervals = HashMap::new();
-        for f in funding.as_array().unwrap() {
-            intervals.insert(
-                str_field(f, "symbol").unwrap().to_string(),
-                num_field(f, "fundingIntervalHours").unwrap(),
-            );
-        }
-        let ticker = json(
-            r#"[
- {
-  "symbol": "BTCUSDT",
-  "priceChange": "846.0",
-  "priceChangePercent": "1.418",
-  "weightedAvgPrice": "60541.6",
-  "lastPrice": "60504.7",
-  "lastQty": "0.081",
-  "openPrice": "59658.7",
-  "highPrice": "61613.3",
-  "lowPrice": "59460.0",
-  "volume": "9326.913",
-  "quoteVolume": "564666297.99",
-  "openTime": 1795629840000,
-  "closeTime": 1795716260250,
-  "firstId": 150662245,
-  "lastId": 150700705,
-  "count": 38457
- },
- {
-  "symbol": "ETHUSDT",
-  "priceChange": "14.17",
-  "priceChangePercent": "0.844",
-  "weightedAvgPrice": "1693.89",
-  "lastPrice": "1692.92",
-  "lastQty": "1.429",
-  "openPrice": "1678.75",
-  "highPrice": "1729.52",
-  "lowPrice": "1667.11",
-  "volume": "183496.907",
-  "quoteVolume": "310823420.03",
-  "openTime": 1795629840000,
-  "closeTime": 1795716269550,
-  "firstId": 88221417,
-  "lastId": 88246202,
-  "count": 24783
- }
-]"#,
-        );
-        let volumes = parse_asterdex_volumes(&ticker);
-        let rows = parse_asterdex(
-            &specs,
-            &premium,
-            &book,
-            &intervals,
-            &volumes,
-            1_795_716_271_300,
-        )
-        .unwrap();
-        assert_eq!(rows.len(), 2);
-        // The live premiumIndex order is not sorted by symbol.
-        let btc = rows.iter().find(|r| r.symbol == "BTCUSDT").unwrap();
-        assert_eq!(btc.symbol, "BTCUSDT");
-        assert_eq!(btc.base_symbol, "BTC");
-        assert_eq!(btc.settlement_currency, "USDT");
-        assert_eq!(btc.tick_size, Some(0.1));
-        assert_eq!(btc.step_size, Some(0.001));
-        assert_eq!(btc.min_notional, Some(5.0));
-        assert_eq!(btc.mark_px, Some(60506.07349638));
-        assert_eq!(btc.bid_px, Some(60510.1));
-        assert_eq!(btc.ask_px, Some(60511.3));
-        assert!((btc.mid_px.unwrap() - 60510.7).abs() < 1e-9);
-        assert_eq!(btc.funding_interval_hours, Some(8.0));
-        assert!((btc.funding_1h.unwrap() - 0.00008069 / 8.0).abs() < 1e-12);
-        assert_eq!(btc.volume_24h_usd, Some(564666297.99));
-        // V3 has no openInterest endpoint: always None, never faked.
-        assert_eq!(btc.open_interest_usd, None);
-        assert_eq!(btc.max_leverage, None);
-        let eth = rows.iter().find(|r| r.symbol == "ETHUSDT").unwrap();
-        assert_eq!(eth.symbol, "ETHUSDT");
-        assert_eq!(eth.tick_size, Some(0.01));
-        assert_eq!(eth.mark_px, Some(1692.99165892));
-        assert_eq!(eth.bid_px, Some(1692.92));
-        assert_eq!(eth.ask_px, Some(1692.93));
-        assert!((eth.funding_1h.unwrap() - 0.00004624 / 8.0).abs() < 1e-12);
-        assert_eq!(eth.volume_24h_usd, Some(310823420.03));
-        assert_eq!(eth.open_interest_usd, None);
-    }
-
-    /// Unknown funding interval (symbol missing from fundingInfo): the
-    /// raw rate is kept, but the interval, the 1h rate and the APR are
-    /// all None — no 8h default, no invented annualized number.
-    #[test]
-    fn parse_asterdex_unknown_interval_has_no_apr() {
-        let ei = json(
-            r#"{"symbols":[
-                {"symbol":"BTCUSDT","status":"TRADING","contractType":"PERPETUAL","baseAsset":"BTC","marginAsset":"USDT",
-                 "filters":[{"filterType":"PRICE_FILTER","tickSize":"0.1"},{"filterType":"LOT_SIZE","stepSize":"0.001"},{"filterType":"MIN_NOTIONAL","notional":"5"}]}
-            ]}"#,
-        );
-        let specs = aster_specs_from(&ei);
-        let premium = json(
-            r#"[{"symbol":"BTCUSDT","markPrice":"58038.2","indexPrice":"58059.68","lastFundingRate":"0.00009616","nextFundingTime":1795622400000,"time":1795621662000}]"#,
-        );
-        let book = json(r#"[{"symbol":"BTCUSDT","bidPrice":"58093.3","askPrice":"58093.4"}]"#);
-        // No intervals at all: fundingInfo failed or never arrived.
-        let rows = parse_asterdex(
-            &specs,
-            &premium,
-            &book,
-            &HashMap::new(),
-            &HashMap::new(),
-            1_795_622_400_000,
-        )
-        .unwrap();
-        assert_eq!(rows.len(), 1);
-        let btc = &rows[0];
-        assert_eq!(btc.funding_rate_raw, Some(0.00009616));
-        assert_eq!(btc.funding_interval_hours, None);
-        assert_eq!(btc.funding_1h, None);
-        assert_eq!(btc.funding_apr, None);
-    }
-
-    #[test]
-    fn parse_arcus_fixture() {
-        let v = json(
-            r#"{"markets":[
-                {"marketDisplayName":"BTC-USD","status":"ONLINE","type":"PERPETUAL","baseAsset":"BTC",
-                 "tickSize":"0.1","stepSize":"0.00000001","minOrderNotional":"5",
-                 "oraclePrice":"58032.7","markPrice":"58004.7","fundingRate":"0.0000125","nextFundingAt":1795622400,
-                 "initialMarginFraction":"0.025","offHoursInitialMarginFraction":"0.025","isOutsideRth":false,
-                 "volume24hNotional":"35622895.88","openInterest":"130.87365841"},
-                {"marketDisplayName":"AMD-USD","status":"ONLINE","type":"PERPETUAL","baseAsset":"AMD",
-                 "tickSize":"0.01","stepSize":"0.001","minOrderNotional":"5",
-                 "oraclePrice":"100.0","markPrice":"100.0","fundingRate":"0.00001","nextFundingAt":1795622400,
-                 "initialMarginFraction":"0.1","offHoursInitialMarginFraction":"0.15","isOutsideRth":true},
-                {"marketDisplayName":"DEAD-USD","status":"OFFLINE","type":"PERPETUAL","baseAsset":"DEAD",
-                 "tickSize":"0.1","stepSize":"0.001","minOrderNotional":"5",
-                 "oraclePrice":"1.0","markPrice":"1.0","fundingRate":"0.0","nextFundingAt":1795622400,
-                 "initialMarginFraction":"0.1","isOutsideRth":false}
-            ]}"#,
-        );
-        let rows = parse_arcus(&v, 1_795_622_400_000).unwrap();
-        assert_eq!(rows.len(), 2);
-        let btc = &rows[0];
-        assert_eq!(btc.base_symbol, "BTC");
-        assert_eq!(btc.settlement_currency, "USDG");
-        assert_eq!(btc.max_leverage, Some(40.0));
-        assert_eq!(btc.tick_size, Some(0.1));
-        assert_eq!(btc.funding_1h, Some(0.0000125));
-        assert_eq!(btc.funding_interval_hours, Some(1.0));
-        // nextFundingAt is seconds -> ms.
-        assert_eq!(btc.next_funding_time, Some(1795622400000));
-        assert_eq!(btc.bid_px, None);
-        assert_eq!(btc.volume_24h_usd, Some(35622895.88));
-        // OI is base units; OI USD = 130.87365841 * 58004.7.
-        assert!((btc.open_interest_usd.unwrap() - 130.87365841 * 58004.7).abs() < 1.0);
-        // Off-hours RWA uses offHoursInitialMarginFraction: 1/0.15.
-        let amd = &rows[1];
-        assert!((amd.max_leverage.unwrap() - 1.0 / 0.15).abs() < 1e-9);
     }
 
     #[test]

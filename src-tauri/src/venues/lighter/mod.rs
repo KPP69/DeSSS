@@ -309,3 +309,43 @@ impl Venue for LighterVenue {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::venues::Venue;
+
+    fn creds(v: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
+        v.as_object().expect("object").clone()
+    }
+
+    #[test]
+    fn validate_enforces_numeric_bounds() {
+        let base = |idx: i64| {
+            creds(serde_json::json!({
+                "account_index": 0,
+                "api_key_index": idx,
+                "api_key_private_key": "0xkey"
+            }))
+        };
+        // Mainnet: 4-254.
+        assert!(LIGHTER.validate_credentials(&base(3)).is_err());
+        assert!(LIGHTER.validate_credentials(&base(255)).is_err());
+        assert!(LIGHTER.validate_credentials(&base(4)).is_ok());
+        assert!(LIGHTER.validate_credentials(&base(254)).is_ok());
+        // Robinhood: 157 is reserved inside the range; 156/158 pass.
+        let err = LIGHTER_ROBINHOOD
+            .validate_credentials(&base(157))
+            .expect_err("157 reserved");
+        assert!(err.contains("157"), "{err}");
+        assert!(LIGHTER_ROBINHOOD.validate_credentials(&base(156)).is_ok());
+        assert!(LIGHTER_ROBINHOOD.validate_credentials(&base(158)).is_ok());
+        // A negative account index fails early.
+        let neg = creds(serde_json::json!({
+            "account_index": -1,
+            "api_key_index": 4,
+            "api_key_private_key": "0xkey"
+        }));
+        assert!(LIGHTER.validate_credentials(&neg).is_err());
+    }
+}

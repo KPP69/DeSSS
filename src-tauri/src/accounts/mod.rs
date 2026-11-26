@@ -104,72 +104,16 @@ pub(crate) fn mask_address(addr: &str) -> String {
 
 /// Validate a full credential set for `exchange_id` and derive the masked
 /// identifier stored in SQLite. Error messages name fields, never values.
+/// Every venue validates its own credentials (PR-1.3 commit 2: the
+/// per-exchange match is gone); an unregistered id is unsupported.
 pub fn validate_credentials(
     exchange_id: &str,
     creds: &Map<String, Value>,
 ) -> Result<String, String> {
-    // Transition rule (PR-1.2): a registered venue validates its own
-    // credentials; unregistered exchanges fall through to the old
-    // match, which PR-1.4 deletes.
-    if let Some(v) = crate::venues::all().iter().find(|v| v.id() == exchange_id) {
-        return v.validate_credentials(creds);
-    }
-    match exchange_id {
-        // Entropy reuses the Hyperliquid HIP-3 access pattern: same fields.
-        "hyperliquid" | "entropy" => {
-            let wallet = require_str(creds, "wallet_address", "主钱包地址")?;
-            require_str(creds, "agent_private_key", "Agent/API 钱包私钥")?;
-            Ok(mask_address(&wallet))
-        }
-        "lighter" => {
-            let account_index = require_index(creds, "account_index", "Account Index")?;
-            let api_key_index = require_index(creds, "api_key_index", "API Key Index")?;
-            if !(4..=254).contains(&api_key_index) {
-                return Err("Lighter API Key Index 须在 4–254 之间".to_string());
-            }
-            require_str(creds, "api_key_private_key", "API Key 私钥")?;
-            Ok(format!(
-                "Account #{account_index} · API key #{api_key_index}"
-            ))
-        }
-        "lighter_robinhood" => {
-            let account_index = require_index(creds, "account_index", "Account Index")?;
-            let api_key_index = require_index(creds, "api_key_index", "API Key Index")?;
-            if api_key_index == 157 {
-                return Err("Lighter RH 的 API Key Index 157 已保留，不可用".to_string());
-            }
-            if !(4..=156).contains(&api_key_index) && !(158..=254).contains(&api_key_index) {
-                return Err("Lighter RH API Key Index 须为 4–156 或 158–254".to_string());
-            }
-            require_str(creds, "api_key_private_key", "API Key 私钥")?;
-            Ok(format!(
-                "Account #{account_index} · API key #{api_key_index}"
-            ))
-        }
-        "asterdex" => {
-            // V3 only: Agent-wallet credentials. Stored api-mode
-            // credentials fail fast here with the migration error
-            // instead of passing validation and failing at connect.
-            let mode = field_str(creds, "mode").unwrap_or("agent");
-            match mode {
-                "agent" => {
-                    // V3 signing needs the master wallet (user) as well as
-                    // the agent address (signer) and the agent private key.
-                    let master = require_str(creds, "master_wallet_address", "主钱包地址")?;
-                    require_str(creds, "agent_wallet_address", "Agent 钱包地址")?;
-                    require_str(creds, "agent_private_key", "Agent 钱包私钥")?;
-                    Ok(mask_address(&master))
-                }
-                _ => Err("AsterDEX 已停用 API Key 模式，请用 Agent 钱包重新保存凭证".to_string()),
-            }
-        }
-        "arcus" => {
-            let wallet = require_str(creds, "wallet_address", "钱包地址")?;
-            require_str(creds, "signing_private_key", "交易签名私钥/凭证")?;
-            Ok(mask_address(&wallet))
-        }
-        other => Err(format!("不支持的交易所：{other}")),
-    }
+    let Some(v) = crate::venues::all().iter().find(|v| v.id() == exchange_id) else {
+        return Err(format!("不支持的交易所：{exchange_id}"));
+    };
+    v.validate_credentials(creds)
 }
 
 fn validate_label(label: &str) -> Result<String, String> {
@@ -458,8 +402,7 @@ mod tests {
         assert!(err.contains("已停用 API Key 模式"), "{err}");
         let agent = serde_json::json!({
             "mode": "agent",
-            "master_wallet_address": "0x1111111111111111111111111111111111111111",
-            "agent_wallet_address": "0x2222222222222222222222222222222222222222",
+            "wallet_address": "0x1111111111111111111111111111111111111111",
             "agent_private_key": "0xkey"
         })
         .as_object()

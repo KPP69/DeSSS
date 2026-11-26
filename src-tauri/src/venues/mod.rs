@@ -16,6 +16,8 @@ use crate::bus::EventBus;
 use crate::core::stream_kind::StreamKind;
 use crate::core::types::AccountLive;
 
+pub mod arcus;
+pub mod asterdex;
 pub mod hyperliquid;
 pub mod lighter;
 
@@ -144,13 +146,16 @@ pub trait Venue: Send + Sync {
 
 /// The registry: adding a venue is one directory + one line here.
 /// Hyperliquid / Entropy moved in PR-1.2, Lighter in PR-1.3
-/// commit 1; AsterDEX / Arcus follow in commit 2.
+/// commit 1, AsterDEX / Arcus in commit 2. All six venues are
+/// registered; the old match arms are deleted in commit 3.
 pub fn all() -> &'static [&'static dyn Venue] {
-    static ALL: [&'static dyn Venue; 4] = [
+    static ALL: [&'static dyn Venue; 6] = [
         &hyperliquid::HYPERLIQUID,
         &hyperliquid::ENTROPY,
         &lighter::LIGHTER,
         &lighter::LIGHTER_ROBINHOOD,
+        &asterdex::ASTERDEX,
+        &arcus::ARCUS,
     ];
     &ALL
 }
@@ -168,13 +173,20 @@ mod tests {
         let ids: Vec<&str> = all().iter().map(|v| v.id()).collect();
         assert_eq!(
             ids,
-            ["hyperliquid", "entropy", "lighter", "lighter_robinhood"]
+            [
+                "hyperliquid",
+                "entropy",
+                "lighter",
+                "lighter_robinhood",
+                "asterdex",
+                "arcus"
+            ]
         );
         let mut visited = 0;
         for venue in all() {
             let _ = venue.credentials();
             visited += 1;
         }
-        assert_eq!(visited, 4);
+        assert_eq!(visited, 6);
     }
 }
