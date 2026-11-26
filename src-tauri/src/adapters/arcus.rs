@@ -168,7 +168,7 @@ impl ArcusAdapter {
             latency_ms: self.latency_ms(),
             equity_usd: snap.equity_usd,
             available_usd: snap.available_usd,
-            pnl_usd: snap.pnl_usd,
+            pnl_usd: Some(snap.pnl_usd),
             currency: "USDG".to_string(),
             positions: snap.positions,
             error,

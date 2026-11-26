@@ -59,7 +59,7 @@ mod tests {
             (&HYPERLIQUID, "BTC", "BTC"),
             (&ENTROPY, "io:NVDA", "io:NVDA"),
         ] {
-            let plan = venue.stream(symbol, None);
+            let plan = venue.stream(symbol, None).expect("plan");
             assert_eq!(plan.kind, StreamKind::Hyperliquid);
             let sub: serde_json::Value =
                 serde_json::from_str(plan.subscribe.as_ref().expect("subscribe")).expect("json");

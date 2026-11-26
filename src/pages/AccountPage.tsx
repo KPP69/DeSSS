@@ -62,7 +62,7 @@ export default function AccountPage() {
       seen.add(key);
       equity += lv.equityUsd;
       available += lv.availableUsd;
-      pnl += lv.pnlUsd;
+      if (lv.pnlUsd != null) pnl += lv.pnlUsd;
       count++;
     }
     return { equity, available, pnl, count };
@@ -156,8 +156,8 @@ export default function AccountPage() {
                   <div>${fmt(lv.equityUsd)} <span className="text-ds-text-3 text-xs">{lv.currency}</span></div>
                   <div className="text-ds-text-3 text-xs">可用 ${fmt(lv.availableUsd)}</div>
                 </td>
-                <td className={`${tdClsCompact} num ${lv.pnlUsd > 0 ? "text-ds-up" : lv.pnlUsd < 0 ? "text-ds-down" : ""}`}>
-                  {lv.pnlUsd > 0 ? "+" : ""}${fmt(lv.pnlUsd)}
+                <td className={`${tdClsCompact} num ${lv.pnlUsd != null && lv.pnlUsd > 0 ? "text-ds-up" : lv.pnlUsd != null && lv.pnlUsd < 0 ? "text-ds-down" : ""}`}>
+                  {lv.pnlUsd == null ? "—" : `${lv.pnlUsd > 0 ? "+" : ""}$${fmt(lv.pnlUsd)}`}
                 </td>
               </>
             ) : (

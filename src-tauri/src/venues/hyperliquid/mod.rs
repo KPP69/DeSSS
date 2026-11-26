@@ -39,7 +39,7 @@ use crate::adapters::reconcile::ReconcileState;
 use crate::adapters::ExchangeAdapter;
 use crate::bus::EventBus;
 use crate::core::types::{AccountLive, LivePosition};
-use crate::venues::{CredentialField, StreamPlan, Venue, VenueCtx};
+use crate::venues::{CredentialField, CredentialKind, StreamPlan, Venue, VenueCtx};
 
 pub const HL_INFO_URL: &str = "https://api.hyperliquid.xyz/info";
 pub const HL_EXCHANGE_URL: &str = "https://api.hyperliquid.xyz/exchange";
@@ -176,12 +176,20 @@ impl Venue for HyperliquidVenue {
                 label: "主钱包地址",
                 secret: false,
                 required: true,
+                kind: CredentialKind::Text,
+                min: None,
+                max: None,
+                forbidden: &[],
             },
             CredentialField {
                 key: "agent_private_key",
                 label: "Agent/API 钱包私钥",
                 secret: true,
                 required: true,
+                kind: CredentialKind::Text,
+                min: None,
+                max: None,
+                forbidden: &[],
             },
         ]
     }
@@ -230,8 +238,8 @@ impl Venue for HyperliquidVenue {
         catalog::fetch_hyperliquid(http, self.dex).await
     }
 
-    fn stream(&self, symbol: &str, _market_id: Option<u64>) -> StreamPlan {
-        stream::stream_plan(symbol)
+    fn stream(&self, symbol: &str, _market_id: Option<u64>) -> Result<StreamPlan, String> {
+        Ok(stream::stream_plan(symbol))
     }
 
     async fn enrich(&self, http: &reqwest::Client, row: &mut MarketInfo) -> Result<(), String> {

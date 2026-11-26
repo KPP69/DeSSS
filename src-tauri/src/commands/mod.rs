@@ -250,7 +250,7 @@ async fn connect_account_inner(
             latency_ms: None,
             equity_usd: 0.0,
             available_usd: 0.0,
-            pnl_usd: 0.0,
+            pnl_usd: None,
             currency: String::new(),
             positions: vec![],
             error: None,

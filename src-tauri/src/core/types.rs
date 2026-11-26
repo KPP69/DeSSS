@@ -386,7 +386,10 @@ pub struct AccountLive {
     pub latency_ms: Option<u64>,
     pub equity_usd: f64,
     pub available_usd: f64,
-    pub pnl_usd: f64,
+    /// Unrealised PnL, when the venue reports it. `None` means
+    /// unknown — never a fake 0 (Lighter has no account-level
+    /// field; a position without one makes the sum untrustworthy).
+    pub pnl_usd: Option<f64>,
     pub currency: String,
     pub positions: Vec<LivePosition>,
     pub error: Option<String>,

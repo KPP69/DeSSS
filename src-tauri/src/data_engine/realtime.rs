@@ -206,7 +206,7 @@ impl RealtimeEngine {
             .iter()
             .find(|v| v.id() == exchange_id.as_str())
         {
-            let sp = v.stream(symbol, self.catalog.market_id(exchange_id, symbol));
+            let sp = v.stream(symbol, self.catalog.market_id(exchange_id, symbol))?;
             return Ok(Plan {
                 kind: sp.kind,
                 url: sp.url,
@@ -451,7 +451,8 @@ impl RealtimeEngine {
                 FrameAction::Publish(book.to_book(&key.0, &key.1, 10, now_ms()))
             }
             StreamKind::Lighter => {
-                let Some(frame) = parse_lighter_book_frame(&v) else {
+                let Some(frame) = crate::venues::lighter::stream::parse_lighter_book_frame(&v)
+                else {
                     if let Some(err) = v.get("error") {
                         self.bus.log(
                             "warn",
@@ -462,11 +463,15 @@ impl RealtimeEngine {
                     return FrameAction::None;
                 };
                 match frame {
-                    LighterFrame::Snapshot { nonce, bids, asks } => {
+                    crate::venues::lighter::stream::LighterFrame::Snapshot {
+                        nonce,
+                        bids,
+                        asks,
+                    } => {
                         book.apply_snapshot_with_nonce(Some(nonce), &bids, &asks);
                         FrameAction::Publish(book.to_book(&key.0, &key.1, 10, now_ms()))
                     }
-                    LighterFrame::Delta {
+                    crate::venues::lighter::stream::LighterFrame::Delta {
                         begin_nonce,
                         nonce,
                         bids,
@@ -528,68 +533,6 @@ impl RealtimeEngine {
     }
 }
 
-/// One parsed Lighter `order_book` frame.
-enum LighterFrame {
-    /// `subscribed/order_book`: full snapshot + nonce baseline.
-    Snapshot {
-        nonce: u64,
-        bids: Vec<(f64, f64)>,
-        asks: Vec<(f64, f64)>,
-    },
-    /// `update/order_book`: incremental delta, checked against the
-    /// previous frame's nonce.
-    Delta {
-        begin_nonce: u64,
-        nonce: u64,
-        bids: Vec<(f64, f64)>,
-        asks: Vec<(f64, f64)>,
-    },
-}
-
-/// Lighter order_book frame: `type` is `subscribed/order_book` or
-/// `update/order_book`; the book lives in `order_book` with string
-/// `price` / `size` levels and `nonce` / `begin_nonce`. `offset` is
-/// server-scoped and deliberately ignored (see `book.rs`).
-fn parse_lighter_book_frame(v: &serde_json::Value) -> Option<LighterFrame> {
-    let t = v.get("type").and_then(|t| t.as_str())?;
-    let ob = v.get("order_book")?;
-    let parse_side = |side: &serde_json::Value| -> Option<Vec<(f64, f64)>> {
-        side.as_array().map(|rows| {
-            rows.iter()
-                .filter_map(|r| {
-                    let px = r
-                        .get("price")
-                        .and_then(|p| p.as_str())?
-                        .parse::<f64>()
-                        .ok()?;
-                    let sz = r
-                        .get("size")
-                        .and_then(|s| s.as_str())?
-                        .parse::<f64>()
-                        .ok()?;
-                    Some((px, sz))
-                })
-                .collect()
-        })
-    };
-    let bids = parse_side(ob.get("bids")?)?;
-    let asks = parse_side(ob.get("asks")?)?;
-    let nonce = ob.get("nonce").and_then(|n| n.as_u64())?;
-    match t {
-        "subscribed/order_book" => Some(LighterFrame::Snapshot { nonce, bids, asks }),
-        "update/order_book" => {
-            let begin_nonce = ob.get("begin_nonce").and_then(|n| n.as_u64())?;
-            Some(LighterFrame::Delta {
-                begin_nonce,
-                nonce,
-                bids,
-                asks,
-            })
-        }
-        _ => None,
-    }
-}
-
 /// AsterDEX `bookTicker` frame: top of book only.
 fn parse_asterdex_book_ticker(v: &serde_json::Value) -> Option<(f64, f64, f64, f64)> {
     if v.get("e").and_then(|e| e.as_str()) != Some("bookTicker") {
@@ -644,37 +587,6 @@ mod tests {
     fn hl_ignores_other_channels() {
         let v = val(r#"{"channel":"trades","data":{}}"#);
         assert!(parse_hl_l2book(&v).is_none());
-    }
-
-    #[test]
-    fn lighter_snapshot_and_delta() {
-        let snap = val(
-            r#"{"type":"subscribed/order_book","channel":"order_book:1","order_book":{"asks":[{"price":"100","size":"1"}],"bids":[{"price":"99","size":"2"}],"offset":5,"nonce":10,"begin_nonce":9}}"#,
-        );
-        match parse_lighter_book_frame(&snap).expect("snapshot") {
-            LighterFrame::Snapshot { nonce, bids, asks } => {
-                assert_eq!(nonce, 10);
-                assert_eq!(bids, vec![(99.0, 2.0)]);
-                assert_eq!(asks, vec![(100.0, 1.0)]);
-            }
-            _ => panic!("expected snapshot"),
-        }
-        let delta = val(
-            r#"{"type":"update/order_book","channel":"order_book:1","order_book":{"asks":[],"bids":[{"price":"99","size":"0"}],"offset":6,"nonce":12,"begin_nonce":10}}"#,
-        );
-        match parse_lighter_book_frame(&delta).expect("delta") {
-            LighterFrame::Delta {
-                begin_nonce,
-                nonce,
-                bids,
-                ..
-            } => {
-                assert_eq!(begin_nonce, 10);
-                assert_eq!(nonce, 12);
-                assert_eq!(bids, vec![(99.0, 0.0)]);
-            }
-            _ => panic!("expected delta"),
-        }
     }
 
     #[test]

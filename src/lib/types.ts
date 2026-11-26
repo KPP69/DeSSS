@@ -47,7 +47,7 @@ export type AccountLive = {
   latencyMs: number | null;
   equityUsd: number;
   availableUsd: number;
-  pnlUsd: number;
+  pnlUsd: number | null;
   currency: string;
   positions: LivePosition[];
   error: string | null;

@@ -421,7 +421,7 @@ mod tests {
             latency_ms: Some(120),
             equity_usd: 10000.0,
             available_usd: 8000.0,
-            pnl_usd: 0.0,
+            pnl_usd: Some(0.0),
             currency: "USDC".to_string(),
             positions: vec![LivePosition {
                 symbol: "BTC".to_string(),

@@ -83,7 +83,11 @@ fn field_index(creds: &Map<String, Value>, key: &str) -> Option<i64> {
     }
 }
 
-fn require_index(creds: &Map<String, Value>, key: &str, label: &str) -> Result<i64, String> {
+pub(crate) fn require_index(
+    creds: &Map<String, Value>,
+    key: &str,
+    label: &str,
+) -> Result<i64, String> {
     field_index(creds, key).ok_or_else(|| format!("字段缺失或无效：{label}"))
 }
 
