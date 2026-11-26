@@ -26,7 +26,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
-use tokio::task::JoinHandle;
+use tauri::async_runtime::JoinHandle;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::adapters::book::BookState;

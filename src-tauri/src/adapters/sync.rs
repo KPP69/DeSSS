@@ -32,7 +32,7 @@ pub struct SyncManager {
     /// Aborting the handle is what makes delete/disconnect cleanup
     /// synchronous: without it the run task would keep its adapter clone
     /// (and the credentials inside it) alive until the next poll tick.
-    tasks: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
+    tasks: Mutex<HashMap<String, tauri::async_runtime::JoinHandle<()>>>,
     /// Post-fill reconciliation grace (spec §3): shared with every
     /// adapter so their poll loops skip writes inside the window.
     reconcile: Arc<ReconcileState>,
@@ -206,7 +206,7 @@ impl SyncManager {
 
     /// Register the spawned run loop for an account (called right after
     /// the spawn, so a delete landing at any later point can abort it).
-    pub fn register_task(&self, account_id: String, handle: tokio::task::JoinHandle<()>) {
+    pub fn register_task(&self, account_id: String, handle: tauri::async_runtime::JoinHandle<()>) {
         if let Ok(mut m) = self.tasks.lock() {
             m.insert(account_id, handle);
         }
