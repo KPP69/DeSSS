@@ -357,7 +357,7 @@ pub async fn search_market_info(
     state: State<'_, Arc<AppState>>,
     query: String,
     exchange_ids: Vec<String>,
-) -> Result<Vec<crate::adapters::market_catalog::MarketInfo>, String> {
+) -> Result<Vec<crate::core::market::MarketInfo>, String> {
     use crate::adapters::market_catalog::MarketCatalog;
     let started = Instant::now();
     if query.trim().is_empty() {
