@@ -260,7 +260,7 @@ impl SyncManager {
 }
 
 /// Read a 0x-prefixed 42-char wallet address from stored credentials.
-fn valid_address(credentials: &Value, key: &str, label: &str) -> Result<String, String> {
+pub(crate) fn valid_address(credentials: &Value, key: &str, label: &str) -> Result<String, String> {
     let address = credentials
         .get(key)
         .and_then(|v| v.as_str())
@@ -284,6 +284,23 @@ pub fn build_adapter(
     reconcile: Arc<ReconcileState>,
 ) -> Result<Arc<dyn ExchangeAdapter>, String> {
     let account_id = row.id.clone();
+    // Transition rule (PR-1.2): a registered venue builds its own
+    // adapter; unregistered exchanges fall through to the old match,
+    // which PR-1.4 deletes with the else branches.
+    if let Some(v) = crate::venues::all()
+        .iter()
+        .find(|v| v.id() == row.exchange_id.as_str())
+    {
+        return v.build(
+            credentials,
+            &crate::venues::VenueCtx {
+                account_id: account_id.clone(),
+                bus: bus.clone(),
+                live: Arc::clone(&live),
+                reconcile: Arc::clone(&reconcile),
+            },
+        );
+    }
     match row.exchange_id.as_str() {
         "hyperliquid" | "entropy" => {
             let dex = if row.exchange_id == "entropy" {

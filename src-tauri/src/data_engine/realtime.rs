@@ -35,6 +35,7 @@ use crate::adapters::now_ms;
 use crate::adapters::sync::SyncManager;
 use crate::adapters::types::OrderBook;
 use crate::bus::{AppEvent, EventBus};
+use crate::core::stream_kind::StreamKind;
 use crate::net::ws::connect_ws;
 
 /// Milliseconds without a frame after which a streamed book counts as
@@ -43,15 +44,6 @@ pub const STREAM_STALE_MS: i64 = 5_000;
 
 /// One subscribed market: `(exchange_id, symbol)`.
 pub type StreamKey = (String, String);
-
-/// Which exchange protocol a stream speaks.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum StreamKind {
-    Hyperliquid,
-    Lighter,
-    Asterdex,
-    Arcus,
-}
 
 /// Static dial plan for one key, resolved once when the task starts.
 /// A plan failure (unknown Lighter market id, unsupported exchange) is
@@ -207,6 +199,20 @@ impl RealtimeEngine {
     /// page only streams symbols its search just returned).
     fn plan(&self, key: &StreamKey) -> Result<Plan, String> {
         let (exchange_id, symbol) = (&key.0, &key.1);
+        // Transition rule (PR-1.2): a registered venue owns its dial
+        // plan; unregistered exchanges fall through to the old match,
+        // which PR-1.4 deletes with the else branches.
+        if let Some(v) = crate::venues::all()
+            .iter()
+            .find(|v| v.id() == exchange_id.as_str())
+        {
+            let sp = v.stream(symbol, self.catalog.market_id(exchange_id, symbol));
+            return Ok(Plan {
+                kind: sp.kind,
+                url: sp.url,
+                subscribe: sp.subscribe,
+            });
+        }
         match exchange_id.as_str() {
             // Hyperliquid main and Entropy (HIP-3 dex `io`) share the
             // socket. The catalog already stores the dex-prefixed
@@ -437,7 +443,8 @@ impl RealtimeEngine {
                 if v.get("channel").and_then(|c| c.as_str()) != Some("l2Book") {
                     return FrameAction::None;
                 }
-                let Some((bids, asks)) = parse_hl_l2book(&v) else {
+                let Some((bids, asks)) = crate::venues::hyperliquid::stream::parse_hl_l2book(&v)
+                else {
                     return FrameAction::None;
                 };
                 book.apply_snapshot(&bids, &asks);
@@ -519,28 +526,6 @@ impl RealtimeEngine {
             }
         }
     }
-}
-
-/// Hyperliquid `l2Book` frame: `data.levels` is `[bids, asks]`, each
-/// level `{"px", "sz", "n"}`. Returns `(bids, asks)` as float pairs.
-fn parse_hl_l2book(v: &serde_json::Value) -> Option<(Vec<(f64, f64)>, Vec<(f64, f64)>)> {
-    let data = v.get("data")?;
-    let levels = data.get("levels")?.as_array()?;
-    if levels.len() < 2 {
-        return None;
-    }
-    let parse_side = |side: &serde_json::Value| -> Option<Vec<(f64, f64)>> {
-        side.as_array().map(|rows| {
-            rows.iter()
-                .filter_map(|r| {
-                    let px = r.get("px").and_then(|p| p.as_str())?.parse::<f64>().ok()?;
-                    let sz = r.get("sz").and_then(|s| s.as_str())?.parse::<f64>().ok()?;
-                    Some((px, sz))
-                })
-                .collect()
-        })
-    };
-    Some((parse_side(&levels[0])?, parse_side(&levels[1])?))
 }
 
 /// One parsed Lighter `order_book` frame.
@@ -639,6 +624,7 @@ fn parse_arcus_l2(v: &serde_json::Value) -> Option<(Vec<(f64, f64)>, Vec<(f64, f
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::venues::hyperliquid::stream::parse_hl_l2book;
 
     fn val(s: &str) -> serde_json::Value {
         serde_json::from_str(s).expect("fixture")

@@ -56,7 +56,7 @@ fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 
-fn field_str<'a>(creds: &'a Map<String, Value>, key: &str) -> Option<&'a str> {
+pub(crate) fn field_str<'a>(creds: &'a Map<String, Value>, key: &str) -> Option<&'a str> {
     creds
         .get(key)
         .and_then(|v| v.as_str())
@@ -64,7 +64,11 @@ fn field_str<'a>(creds: &'a Map<String, Value>, key: &str) -> Option<&'a str> {
         .filter(|s| !s.is_empty())
 }
 
-fn require_str(creds: &Map<String, Value>, key: &str, label: &str) -> Result<String, String> {
+pub(crate) fn require_str(
+    creds: &Map<String, Value>,
+    key: &str,
+    label: &str,
+) -> Result<String, String> {
     field_str(creds, key)
         .map(|s| s.to_string())
         .ok_or_else(|| format!("缺少必填项：{label}"))
@@ -83,7 +87,7 @@ fn require_index(creds: &Map<String, Value>, key: &str, label: &str) -> Result<i
     field_index(creds, key).ok_or_else(|| format!("字段缺失或无效：{label}"))
 }
 
-fn mask_address(addr: &str) -> String {
+pub(crate) fn mask_address(addr: &str) -> String {
     let chars: Vec<char> = addr.chars().collect();
     if chars.len() > 10 {
         let head: String = chars.iter().take(6).collect();
@@ -111,6 +115,12 @@ pub fn validate_credentials(
     exchange_id: &str,
     creds: &Map<String, Value>,
 ) -> Result<String, String> {
+    // Transition rule (PR-1.2): a registered venue validates its own
+    // credentials; unregistered exchanges fall through to the old
+    // match, which PR-1.4 deletes.
+    if let Some(v) = crate::venues::all().iter().find(|v| v.id() == exchange_id) {
+        return v.validate_credentials(creds);
+    }
     match exchange_id {
         // Entropy reuses the Hyperliquid HIP-3 access pattern: same fields.
         "hyperliquid" | "entropy" => {
@@ -202,11 +212,7 @@ fn with_rollback_error(main_err: String, rollback: Result<(), VaultError>) -> St
 }
 
 pub fn list_accounts(db: &DataEngine) -> Result<Vec<AccountView>, String> {
-    Ok(db
-        .list_accounts()?
-        .iter()
-        .map(AccountView::from)
-        .collect())
+    Ok(db.list_accounts()?.iter().map(AccountView::from).collect())
 }
 
 pub fn create_account(
@@ -370,7 +376,8 @@ mod tests {
         let paths = temp_paths("crud");
         let db = DataEngine::open(paths.clone()).expect("db");
         let vault = VaultStore::open(&paths).expect("vault");
-        let view = create_account(&db, &vault, "Main HL", "hyperliquid", hl_creds()).expect("create");
+        let view =
+            create_account(&db, &vault, "Main HL", "hyperliquid", hl_creds()).expect("create");
         assert!(view.credential_configured);
         assert!(view.masked_identifier.contains('…'));
         assert!(!view.masked_identifier.contains("deadbeef"));
@@ -424,7 +431,10 @@ mod tests {
         );
         update_account(&db, &vault, &view.id, "A", "hyperliquid", Some(new_creds)).expect("update");
         let stored = vault.get(&view.id).unwrap();
-        assert_eq!(stored["agent_private_key"], Value::String("0xnewkey".to_string()));
+        assert_eq!(
+            stored["agent_private_key"],
+            Value::String("0xnewkey".to_string())
+        );
     }
 
     #[test]

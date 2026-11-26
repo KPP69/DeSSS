@@ -5,5 +5,6 @@
 
 pub mod book;
 pub mod precision;
+pub mod stream_kind;
 pub mod symbol;
 pub mod types;
