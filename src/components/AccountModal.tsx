@@ -30,7 +30,7 @@ export default function AccountModal({ open, editing, onClose }: Props) {
 
   const [label, setLabel] = useState("");
   const [exchangeId, setExchangeId] = useState(EXCHANGES[0].id);
-  const [mode, setMode] = useState("api");
+  const [mode, setMode] = useState("agent");
   const [values, setValues] = useState<Record<string, string>>({});
   const [formError, setFormError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -41,7 +41,7 @@ export default function AccountModal({ open, editing, onClose }: Props) {
   function reset() {
     setLabel("");
     setExchangeId(EXCHANGES[0].id);
-    setMode("api");
+    setMode("agent");
     setValues({});
     setFormError(null);
     setSubmitting(false);
@@ -66,7 +66,7 @@ export default function AccountModal({ open, editing, onClose }: Props) {
     if (isEdit) return; // locked in edit mode (selector is disabled anyway)
     setExchangeId(id);
     setValues({}); // never reuse field values across exchanges
-    setMode("api");
+    setMode("agent");
   }
 
   async function submit() {

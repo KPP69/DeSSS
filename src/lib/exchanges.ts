@@ -90,15 +90,8 @@ export const EXCHANGES: ExchangeDef[] = [
   {
     id: "asterdex",
     name: "AsterDEX",
+    note: "V3 仅支持 Agent 钱包凭证",
     modes: [
-      {
-        id: "api",
-        label: "API Key / Secret",
-        fields: [
-          { key: "api_key", label: "API Key", type: "text", required: true },
-          { key: "api_secret", label: "API Secret", type: "password", required: true },
-        ],
-      },
       {
         id: "agent",
         label: "Agent 钱包",

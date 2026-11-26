@@ -731,19 +731,6 @@ fn parse_arcus_bbo(v: &serde_json::Value) -> (Option<f64>, Option<f64>) {
     )
 }
 
-/// AsterDEX open interest in USD: `openInterest` is base units, valued
-/// at the mark price (same conversion as the bulk parsers).
-///
-/// V1 path, retired with the V1 API on 2026-10-10: the V3 spec has no
-/// openInterest endpoint at all, so nothing calls this anymore. Kept
-/// (with its test) for the PR-1.4 deletion; do not call it.
-fn parse_asterdex_open_interest(v: &serde_json::Value, mark_px: Option<f64>) -> Option<f64> {
-    match (num_field(v, "openInterest"), mark_px) {
-        (Some(oi), Some(px)) => Some(oi * px),
-        _ => None,
-    }
-}
-
 /// AsterDEX `ticker/24hr` (all symbols, one call) -> symbol -> 24h volume
 /// in USD (`quoteVolume` is already quote-currency notional).
 fn parse_asterdex_volumes(v: &serde_json::Value) -> HashMap<String, f64> {
@@ -777,25 +764,6 @@ async fn fetch_arcus_bbo(
 ) -> Result<(Option<f64>, Option<f64>), String> {
     let v = get_json(http, &format!("{ARCUS_REST_URL}/v1/bbo/{symbol}")).await?;
     Ok(parse_arcus_bbo(&v))
-}
-
-/// V1 per-symbol open-interest fetch (`/fapi/v1/openInterest`).
-///
-/// Retired with the V1 API on 2026-10-10; the V3 spec has no
-/// openInterest endpoint, so nothing calls this anymore. Kept for the
-/// PR-1.4 deletion; do not call it.
-#[allow(dead_code)]
-async fn fetch_asterdex_open_interest(
-    http: &reqwest::Client,
-    symbol: &str,
-    mark_px: Option<f64>,
-) -> Result<Option<f64>, String> {
-    let v = get_json(
-        http,
-        &format!("{ASTER_REST_URL}/fapi/v1/openInterest?symbol={symbol}"),
-    )
-    .await?;
-    Ok(parse_asterdex_open_interest(&v, mark_px))
 }
 
 async fn fetch_arcus(http: &reqwest::Client) -> Result<Vec<MarketInfo>, String> {
@@ -1621,15 +1589,6 @@ mod tests {
             parse_arcus_bbo(&json(r#"{"bestBid":null,"bestAsk":null}"#)),
             (None, None)
         );
-    }
-
-    #[test]
-    fn parse_asterdex_open_interest_cases() {
-        let v = json(r#"{"symbol":"BTCUSDT","openInterest":"6091.502","time":1795633911549}"#);
-        // 6091.502 base units x $59940.4 mark.
-        let oi = parse_asterdex_open_interest(&v, Some(59940.4)).unwrap();
-        assert!((oi - 6091.502 * 59940.4).abs() < 1.0);
-        assert_eq!(parse_asterdex_open_interest(&v, None), None);
     }
 
     #[test]

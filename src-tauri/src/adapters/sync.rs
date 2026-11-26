@@ -6,9 +6,8 @@
 //! public identifiers are used (wallet address for Hyperliquid/Entropy,
 //! account index for Lighter, wallet address for Arcus). Private keys are
 //! never read here and never leave the vault. AsterDEX is the exception
-//! that needs a secret: its API Key/Secret pair is passed to the adapter
-//! for HMAC signing only, and an Agent wallet's private key for V3 EIP-712
-//! signing only; neither is ever logged.
+//! that needs a secret: an Agent wallet's private key is passed to the
+//! adapter for V3 EIP-712 signing only; it is never logged.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, RwLock};
@@ -274,8 +273,8 @@ pub(crate) fn valid_address(credentials: &Value, key: &str, label: &str) -> Resu
 
 /// Build a read-only adapter for one stored account. Returns an error
 /// when the needed public identifier is missing from the vault record.
-/// AsterDEX never errors on missing credentials: the adapter logs the
-/// missing-key reason to the console and skips polling.
+/// AsterDEX fails fast on missing Agent credentials and on stored
+/// API Key-mode credentials (retired with V1: migration error).
 pub fn build_adapter(
     row: &AccountRow,
     credentials: &Value,
@@ -356,56 +355,38 @@ pub fn build_adapter(
             )))
         }
         "asterdex" => {
-            // API Key mode: V1 HMAC signing. Agent mode: V3 EIP-712
-            // signing with the agent private key; the master wallet
-            // address is the V3 `user`, the agent address the `signer`.
-            // The secret is decoded and checked against the agent address
-            // here, so a mismatched key fails fast with a clear error
-            // instead of failing every signed request later.
+            // V3 only: Agent-wallet (EIP-712) signing with the agent
+            // private key; the master wallet address is the V3 `user`,
+            // the agent address the `signer`. The secret is decoded and
+            // checked against the agent address here, so a mismatched
+            // key fails fast with a clear error instead of failing every
+            // signed request later. API Key mode was retired with the V1
+            // API on 2026-10-10: stored api-mode credentials fail here
+            // with a migration error and no adapter is built.
             let mode = credentials
                 .get("mode")
                 .and_then(|v| v.as_str())
-                .unwrap_or("api");
-            if mode == "agent" {
-                let user = valid_address(credentials, "master_wallet_address", "主钱包地址")?;
-                let signer = valid_address(credentials, "agent_wallet_address", "Agent 钱包地址")?;
-                let secret_hex = credentials
-                    .get("agent_private_key")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| "保存的凭证缺少 Agent 钱包私钥".to_string())?;
-                let secret = crate::adapters::asterdex::decode_agent_secret(secret_hex)?;
-                let derived = crate::adapters::asterdex::address_from_secret(&secret);
-                if !derived.eq_ignore_ascii_case(&signer) {
-                    return Err(
-                        "Agent 钱包私钥与 Agent 钱包地址不匹配，请检查保存的凭证".to_string()
-                    );
-                }
-                return Ok(Arc::new(AsterdexAdapter::new_agent(
-                    &row.exchange_id,
-                    account_id,
-                    user,
-                    signer,
-                    secret,
-                    bus,
-                    live,
-                    reconcile,
-                )));
+                .unwrap_or("agent");
+            if mode != "agent" {
+                return Err("AsterDEX 已停用 API Key 模式，请用 Agent 钱包重新保存凭证".to_string());
             }
-            let (api_key, api_secret) = (
-                credentials
-                    .get("api_key")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string()),
-                credentials
-                    .get("api_secret")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string()),
-            );
-            Ok(Arc::new(AsterdexAdapter::new(
+            let user = valid_address(credentials, "master_wallet_address", "主钱包地址")?;
+            let signer = valid_address(credentials, "agent_wallet_address", "Agent 钱包地址")?;
+            let secret_hex = credentials
+                .get("agent_private_key")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "保存的凭证缺少 Agent 钱包私钥".to_string())?;
+            let secret = crate::adapters::asterdex::decode_agent_secret(secret_hex)?;
+            let derived = crate::adapters::asterdex::address_from_secret(&secret);
+            if !derived.eq_ignore_ascii_case(&signer) {
+                return Err("Agent 钱包私钥与 Agent 钱包地址不匹配，请检查保存的凭证".to_string());
+            }
+            Ok(Arc::new(AsterdexAdapter::new_agent(
                 &row.exchange_id,
                 account_id,
-                api_key,
-                api_secret,
+                user,
+                signer,
+                secret,
                 bus,
                 live,
                 reconcile,
@@ -461,6 +442,61 @@ mod tests {
             map.insert("acc-1".to_string(), live_with_positions());
         }
         m
+    }
+
+    fn asterdex_row() -> AccountRow {
+        AccountRow {
+            id: "acc-1".to_string(),
+            label: "AsterDEX".to_string(),
+            exchange_id: "asterdex".to_string(),
+            masked_identifier: "0x…".to_string(),
+            created_at: 0,
+            updated_at: 0,
+            status: "connected".to_string(),
+            credential_configured: true,
+        }
+    }
+
+    /// PR-0.5.1: a stored API Key-mode AsterDEX account fails at build
+    /// with the migration error — no adapter is constructed, nothing is
+    /// retried, nothing is silent. An agent-mode account with missing
+    /// fields fails with the field error instead, proving the dispatch
+    /// reaches the agent path.
+    #[test]
+    fn asterdex_api_mode_build_fails_with_migration_error() {
+        let row = asterdex_row();
+        let api_creds = serde_json::json!({
+            "mode": "api", "api_key": "key", "api_secret": "secret"
+        });
+        let err = match build_adapter(
+            &row,
+            &api_creds,
+            EventBus::new(16),
+            Arc::new(RwLock::new(HashMap::new())),
+            Arc::new(ReconcileState::new()),
+        ) {
+            Ok(_) => panic!("api-mode build must fail"),
+            Err(e) => e,
+        };
+        assert!(
+            err.contains("已停用 API Key 模式"),
+            "migration error expected: {err}"
+        );
+        let agent_creds = serde_json::json!({"mode": "agent"});
+        let err = match build_adapter(
+            &row,
+            &agent_creds,
+            EventBus::new(16),
+            Arc::new(RwLock::new(HashMap::new())),
+            Arc::new(ReconcileState::new()),
+        ) {
+            Ok(_) => panic!("agent-mode build without fields must fail"),
+            Err(e) => e,
+        };
+        assert!(
+            err.contains("缺少主钱包地址"),
+            "field error expected, not migration: {err}"
+        );
     }
 
     #[test]

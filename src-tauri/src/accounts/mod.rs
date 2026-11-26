@@ -98,17 +98,6 @@ pub(crate) fn mask_address(addr: &str) -> String {
     }
 }
 
-fn mask_api_key(key: &str) -> String {
-    let chars: Vec<char> = key.chars().collect();
-    if chars.len() > 8 {
-        let head: String = chars.iter().take(4).collect();
-        let tail: String = chars.iter().skip(chars.len() - 4).collect();
-        format!("{head}…{tail}")
-    } else {
-        "••••••".to_string()
-    }
-}
-
 /// Validate a full credential set for `exchange_id` and derive the masked
 /// identifier stored in SQLite. Error messages name fields, never values.
 pub fn validate_credentials(
@@ -154,7 +143,10 @@ pub fn validate_credentials(
             ))
         }
         "asterdex" => {
-            let mode = field_str(creds, "mode").unwrap_or("api");
+            // V3 only: Agent-wallet credentials. Stored api-mode
+            // credentials fail fast here with the migration error
+            // instead of passing validation and failing at connect.
+            let mode = field_str(creds, "mode").unwrap_or("agent");
             match mode {
                 "agent" => {
                     // V3 signing needs the master wallet (user) as well as
@@ -164,11 +156,7 @@ pub fn validate_credentials(
                     require_str(creds, "agent_private_key", "Agent 钱包私钥")?;
                     Ok(mask_address(&master))
                 }
-                _ => {
-                    let api_key = require_str(creds, "api_key", "API Key")?;
-                    require_str(creds, "api_secret", "API Secret")?;
-                    Ok(mask_api_key(&api_key))
-                }
+                _ => Err("AsterDEX 已停用 API Key 模式，请用 Agent 钱包重新保存凭证".to_string()),
             }
         }
         "arcus" => {
@@ -452,6 +440,28 @@ mod tests {
         let vault2 = VaultStore::open(&paths).expect("vault2");
         assert_eq!(list_accounts(&db2).unwrap().len(), 0);
         assert!(!vault2.has(&view.id));
+    }
+
+    #[test]
+    fn asterdex_api_mode_validation_fails_with_migration_error() {
+        let creds = serde_json::json!({
+            "mode": "api", "api_key": "key", "api_secret": "secret"
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let err = validate_credentials("asterdex", &creds).expect_err("api mode rejected");
+        assert!(err.contains("已停用 API Key 模式"), "{err}");
+        let agent = serde_json::json!({
+            "mode": "agent",
+            "master_wallet_address": "0x1111111111111111111111111111111111111111",
+            "agent_wallet_address": "0x2222222222222222222222222222222222222222",
+            "agent_private_key": "0xkey"
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        assert!(validate_credentials("asterdex", &agent).is_ok());
     }
 
     #[test]

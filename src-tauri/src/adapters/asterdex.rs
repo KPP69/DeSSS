@@ -3,15 +3,7 @@
 //! Official endpoints (asterdex/api-docs, V3 recommended):
 //! - Market data: none. The adapter opens no WS connection at all —
 //!   public market data comes from the on-demand catalog.
-//! - Account, API Key / Secret mode (V1 HMAC): RETIRED. `GET
-//!   /fapi/v2/account` + `/fapi/v2/positionRisk` (HMAC-SHA256 over the
-//!   query string, `X-MBX-APIKEY` header) were retired with all V1
-//!   endpoints on 2026-10-10, and the V3 spec has no HMAC / API-key
-//!   auth at all — USER_DATA requires an EIP-712 signer + signature.
-//!   API-key accounts therefore have no working read path until they
-//!   are re-saved as Agent-wallet accounts; `fetch_account_state_v1`
-//!   and `signed_get` are kept (dead) for the PR-1.4 deletion and the
-//!   dispatch returns a migration error instead of calling them.
+//! - V3 只支持 Agent 钱包（EIP-712）；V1 已于 2026-10-10 退役，代码已移除。
 //! - Account, Agent-wallet mode (V3 EIP-712): `GET /fapi/v3/account` +
 //!   `/fapi/v3/positionRisk`, signed by EIP-712 over the URL-encoded
 //!   parameter string (`user` = master wallet, `signer` = agent address,
@@ -32,10 +24,8 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use hmac::{Hmac, Mac};
 use k256::ecdsa::signature::hazmat::PrehashSigner;
 use serde_json::Value;
-use sha2::Sha256;
 use sha3::{Digest, Keccak256};
 
 use super::reconcile::ReconcileState;
@@ -46,17 +36,6 @@ use crate::bus::{AppEvent, EventBus};
 pub const ASTER_REST_URL: &str = "https://fapi.asterdex.com";
 
 const POLL_INTERVAL: Duration = Duration::from_secs(10);
-
-/// HMAC-SHA256 of `query` with `secret`, lowercase hex. Pure Rust
-/// (`hmac` + `sha2`); the secret never leaves this function and never
-/// enters a log line or an error message.
-fn sign_hmac_sha256(secret: &str, query: &str) -> String {
-    let mut mac =
-        Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key length");
-    mac.update(query.as_bytes());
-    let out = mac.finalize().into_bytes();
-    out.iter().map(|b| format!("{b:02x}")).collect()
-}
 
 // ---- V3 EIP-712 signing (Agent-wallet mode) ----
 // Official V3 scheme (asterdex/api-docs, V3 recommended): the signed
@@ -176,11 +155,10 @@ fn dominant_currency(v: &Value) -> String {
         .unwrap_or_else(|| "USDT".to_string())
 }
 
-/// Parse an account payload (V1 `/fapi/v2/account` or V3
-/// `/fapi/v3/account`) into (equity, available, pnl, settlement
-/// currency). The `total*` fields are USDT-only, so the per-asset rows
-/// win when present; `equity_fallback` is used when there are none
-/// (V1: wallet + unrealized; V3: totalMarginBalance).
+/// Parse a V3 `/fapi/v3/account` payload into (equity, available, pnl,
+/// settlement currency). The `total*` fields are USDT-only, so the
+/// per-asset rows win when present; `equity_fallback` is used when there
+/// are none (V3: totalMarginBalance).
 fn parse_account_shaped(
     v: &Value,
     equity_fallback: f64,
@@ -196,17 +174,12 @@ fn parse_account_shaped(
     Ok((equity, available, pnl, dominant_currency(v)))
 }
 
-fn parse_account(v: &Value) -> Result<(f64, f64, f64, String), String> {
-    let fallback = f64_from(&v["totalWalletBalance"]) + f64_from(&v["totalUnrealizedProfit"]);
-    parse_account_shaped(v, fallback)
-}
-
 fn parse_account_v3(v: &Value) -> Result<(f64, f64, f64, String), String> {
     parse_account_shaped(v, f64_from(&v["totalMarginBalance"]))
 }
 
-/// Parse a positionRisk payload (V1/V3) or the `positions[]` inside a
-/// V3 account payload into live positions. `positionAmt` is signed: its
+/// Parse a V3 positionRisk payload or the `positions[]` inside a V3
+/// account payload into live positions. `positionAmt` is signed: its
 /// sign is the side when `positionSide` is absent or `BOTH`; zero rows
 /// are skipped. The PnL key differs by endpoint (`unRealizedProfit` in
 /// positionRisk, `unrealizedProfit` in the V3 account body) — both are
@@ -269,12 +242,9 @@ struct AgentCreds {
 pub struct AsterdexAdapter {
     id: String,
     account_id: String,
-    /// API Key / Secret for the V1 signed USER_DATA reads. None in
-    /// Agent-wallet mode (V3 EIP-712) or when no key pair is stored.
-    api_key: Option<String>,
-    api_secret: Option<String>,
-    /// V3 Agent-wallet credentials. None in API Key mode or when the
-    /// account stores no agent credentials.
+    /// V3 Agent-wallet credentials. None when the account stores no
+    /// agent credentials (the adapter then fails every read with the
+    /// migration error instead of polling).
     agent: Option<AgentCreds>,
     http: reqwest::Client,
     bus: EventBus,
@@ -297,8 +267,6 @@ impl AsterdexAdapter {
     pub fn new(
         id: &str,
         account_id: String,
-        api_key: Option<String>,
-        api_secret: Option<String>,
         bus: EventBus,
         live: Arc<RwLock<HashMap<String, AccountLive>>>,
         reconcile: Arc<ReconcileState>,
@@ -306,8 +274,6 @@ impl AsterdexAdapter {
         Self {
             id: id.to_string(),
             account_id,
-            api_key,
-            api_secret,
             agent: None,
             http: crate::net::shared_http_client(),
             bus,
@@ -344,7 +310,7 @@ impl AsterdexAdapter {
                 signer,
                 secret,
             }),
-            ..Self::new(id, account_id, None, None, bus, live, reconcile)
+            ..Self::new(id, account_id, bus, live, reconcile)
         }
     }
 
@@ -409,37 +375,6 @@ impl AsterdexAdapter {
         self.publish_live();
     }
 
-    /// One signed USER_DATA GET (V1 HMAC). The query is `timestamp` +
-    /// `recvWindow` + any extra params, signed last; the secret is never
-    /// logged.
-    async fn signed_get(&self, path: &str, extra: &str) -> Result<Value, String> {
-        let (key, secret) = match (&self.api_key, &self.api_secret) {
-            (Some(k), Some(s)) => (k.clone(), s.clone()),
-            _ => return Err("该账户未保存 API Key/Secret".to_string()),
-        };
-        let ts = now_ms();
-        let query = if extra.is_empty() {
-            format!("timestamp={ts}&recvWindow=5000")
-        } else {
-            format!("{extra}&timestamp={ts}&recvWindow=5000")
-        };
-        let signature = sign_hmac_sha256(&secret, &query);
-        let url = format!("{ASTER_REST_URL}{path}?{query}&signature={signature}");
-        let resp =
-            crate::net::send_read(|| self.http.get(&url).header("X-MBX-APIKEY", key.clone()))
-                .await
-                .map_err(|e| format!("AsterDEX {path} 请求失败：{e}"))?;
-        let status = resp.status();
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            let snippet: String = body.chars().take(200).collect();
-            return Err(format!("AsterDEX {path} 接口返回 HTTP {status}：{snippet}"));
-        }
-        resp.json()
-            .await
-            .map_err(|e| format!("{path} 响应解析失败：{e}"))
-    }
-
     /// One V3 signed USER_DATA GET (Agent-wallet mode). The signed string
     /// is the endpoint params (if any) followed by `user` / `signer` /
     /// `nonce`; the EIP-712 signature is appended last. No API-key
@@ -470,37 +405,6 @@ impl AsterdexAdapter {
         resp.json()
             .await
             .map_err(|e| format!("{path} 响应解析失败：{e}"))
-    }
-
-    /// One REST read of the account + positions (V1 HMAC path).
-    ///
-    /// Retired with the V1 API on 2026-10-10; the V3 spec has no HMAC
-    /// auth, so nothing calls this anymore. Kept for the PR-1.4
-    /// deletion; do not call it.
-    #[allow(dead_code)]
-    async fn fetch_account_state_v1(&self) -> Result<(Snapshot, Balance), String> {
-        let v = self.signed_get("/fapi/v2/account", "").await?;
-        let (equity, available, pnl, currency) = parse_account(&v)?;
-        let pv = self.signed_get("/fapi/v2/positionRisk", "").await?;
-        let positions = parse_positions(&pv);
-        let snap = Snapshot {
-            equity_usd: equity,
-            available_usd: available,
-            pnl_usd: pnl,
-            currency: currency.clone(),
-            positions,
-        };
-        let balance = Balance {
-            adapter_id: self.id.clone(),
-            account_id: self.account_id.clone(),
-            asset: currency,
-            free: available,
-            locked: (equity - available).max(0.0),
-            total: equity,
-            equity_usd: equity,
-            ts: now_ms(),
-        };
-        Ok((snap, balance))
     }
 
     /// One REST read of the account + positions (V3 EIP-712 path). The
@@ -580,17 +484,15 @@ impl AsterdexAdapter {
         }
     }
 
-    /// REST 轮询循环：Agent 钱包（V3）轮询；API Key 账户（V1 已停用）
-    /// 会在每次轮询里拿到迁移提示；两种凭证都没有时记原因后退出。
+    /// REST 轮询循环：只轮询 Agent 钱包（V3）；未配置 Agent 凭证时
+    /// 记原因后退出，不发任何请求。
     async fn rest_loop(&self) {
-        // Agent-wallet mode (V3) polls; API-key-only accounts reach the
-        // poll and fail with the V1-migration message; with neither
-        // credential the reason is logged once and the loop exits.
-        if self.agent.is_none() && (self.api_key.is_none() || self.api_secret.is_none()) {
+        // Agent-wallet mode (V3) polls; without agent credentials the
+        // reason is logged once and the loop exits.
+        if self.agent.is_none() {
             self.log(
                 "warn",
-                "账户读取已跳过：未保存 API Key/Secret，也未配置 Agent 钱包——只显示公开行情"
-                    .to_string(),
+                "账户读取已跳过：未配置 Agent 钱包凭证——只显示公开行情".to_string(),
             );
             return;
         }
@@ -705,57 +607,6 @@ impl ExchangeAdapter for AsterdexAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn hmac_sha256_matches_rfc4231_test_case_2() {
-        // RFC 4231, test case 2: key "Jefe", data "what do ya want for
-        // nothing?" — the exact scheme AsterDEX V1 signing uses.
-        let sig = sign_hmac_sha256("Jefe", "what do ya want for nothing?");
-        assert_eq!(
-            sig,
-            "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
-        );
-    }
-
-    #[test]
-    fn account_parse_sums_per_asset_rows_and_picks_dominant_currency() {
-        let v = serde_json::json!({
-            "totalWalletBalance": "1000.0",
-            "totalUnrealizedProfit": "10.0",
-            "availableBalance": "900.0",
-            "assets": [
-                {"asset": "USDT", "walletBalance": "1000.0", "unrealizedProfit": "10.0",
-                 "marginBalance": "1010.0", "availableBalance": "900.0"},
-                {"asset": "USDC", "walletBalance": "500.0", "unrealizedProfit": "5.0",
-                 "marginBalance": "505.0", "availableBalance": "400.0"}
-            ]
-        });
-        let (equity, available, pnl, currency) = parse_account(&v).expect("parse");
-        assert!((equity - 1515.0).abs() < 1e-9);
-        assert!((available - 1300.0).abs() < 1e-9);
-        assert!((pnl - 15.0).abs() < 1e-9);
-        assert_eq!(currency, "USDT");
-    }
-
-    #[test]
-    fn account_parse_falls_back_to_totals_without_assets() {
-        let v = serde_json::json!({
-            "totalWalletBalance": "2000.0",
-            "totalUnrealizedProfit": "-20.0",
-            "availableBalance": "1500.0"
-        });
-        let (equity, available, pnl, currency) = parse_account(&v).expect("parse");
-        assert!((equity - 1980.0).abs() < 1e-9);
-        assert!((available - 1500.0).abs() < 1e-9);
-        assert!((pnl + 20.0).abs() < 1e-9);
-        assert_eq!(currency, "USDT");
-    }
-
-    #[test]
-    fn account_parse_rejects_unexpected_shape() {
-        let v = serde_json::json!({"code": -1121, "msg": "Invalid symbol."});
-        assert!(parse_account(&v).is_err());
-    }
 
     #[test]
     fn position_risk_parses_signed_amounts_and_skips_zero_rows() {
@@ -920,24 +771,22 @@ mod tests {
         assert!(parse_positions(&v["positions"]).is_empty());
     }
 
-    /// PR-0.5: an API Key / Secret account has no V3 read path — the
-    /// V3 spec authenticates USER_DATA by EIP-712 signer + signature
-    /// only — so the dispatch fails fast with the migration message
-    /// instead of calling the retired V1 endpoints. No network is
-    /// touched: the error is returned before any request is built.
+    /// PR-0.5.1: an adapter without Agent-wallet credentials has no
+    /// V3 read path — the V3 spec authenticates USER_DATA by EIP-712
+    /// signer + signature only — so the dispatch fails fast with the
+    /// migration message. No network is touched: the error is returned
+    /// before any request is built.
     #[tokio::test]
-    async fn api_key_account_fetch_fails_with_migration_error() {
+    async fn adapter_without_agent_wallet_fails_with_migration_error() {
         let adapter = AsterdexAdapter::new(
             "asterdex",
             "acc-1".to_string(),
-            Some("key".to_string()),
-            Some("secret".to_string()),
             EventBus::new(16),
             Arc::new(RwLock::new(HashMap::new())),
             Arc::new(ReconcileState::new()),
         );
         let err = match adapter.fetch_account_state().await {
-            Ok(_) => panic!("API-key fetch must fail"),
+            Ok(_) => panic!("fetch without an agent wallet must fail"),
             Err(e) => e,
         };
         assert!(err.contains("V1"), "error names V1: {err}");

@@ -29,9 +29,6 @@ futures-util = "0.3"
 tokio-rustls = "0.26"
 rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring", "logging"] }
 webpki-roots = "0.26"
-# AsterDEX V1 signed REST: HMAC-SHA256 over the query string (pure Rust).
-hmac = "0.12"
-sha2 = "0.10"
 # AsterDEX V3 Agent wallets: EIP-712 signing (pure Rust, no OpenSSL).
 k256 = { version = "0.13", features = ["ecdsa"] }
 sha3 = "0.10"

@@ -164,10 +164,10 @@ mod tests {
     #[test]
     fn redact_url_query_cuts_signature_params() {
         let signed =
-            "请求失败：https://fapi.asterdex.com/fapi/v1/account?timestamp=123&signature=deadbeef";
+            "请求失败：https://fapi.asterdex.com/fapi/v3/account?timestamp=123&signature=deadbeef";
         assert_eq!(
             redact_url_query(signed),
-            "请求失败：https://fapi.asterdex.com/fapi/v1/account"
+            "请求失败：https://fapi.asterdex.com/fapi/v3/account"
         );
     }
 
