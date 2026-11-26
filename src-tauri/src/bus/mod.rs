@@ -18,6 +18,9 @@ pub enum AppEvent {
         message: String,
         ts: i64,
     },
+    /// The market catalog stored new rows (background refresh or
+    /// staleness fallback): the Data page re-searches once.
+    CatalogUpdated,
     System {
         message: String,
     },

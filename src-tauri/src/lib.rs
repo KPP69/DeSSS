@@ -5,6 +5,7 @@ pub mod commands;
 pub mod core;
 pub mod data_engine;
 pub mod execution;
+pub mod logging;
 pub mod net;
 pub mod portable;
 pub mod risk;
@@ -25,7 +26,7 @@ use risk::{RiskConfig, RiskGateway};
 pub struct AppState {
     pub paths: PortablePaths,
     pub bus: EventBus,
-    pub db: data_engine::DataEngine,
+    pub db: Arc<data_engine::DataEngine>,
     pub vault: Arc<vault::VaultHandle>,
     pub sync: Arc<SyncManager>,
     pub catalog: Arc<MarketCatalog>,
@@ -44,7 +45,10 @@ pub fn run() {
 
     let paths = PortablePaths::resolve();
     paths.ensure_dirs().expect("create ./data");
-    let db = data_engine::DataEngine::open(paths.clone()).expect("open desss.db");
+    // File logging first (PR-0.3): ./data/logs/app.log, 5 MB x 2
+    // rolling. Best-effort — a failure only drops log lines.
+    logging::init(&paths.log_dir);
+    let db = Arc::new(data_engine::DataEngine::open(paths.clone()).expect("open desss.db"));
     // The vault never aborts startup: if vault.enc is corrupted or vault.key
     // is missing, the handle keeps the error and account commands surface it,
     // while the original files stay untouched.
@@ -56,7 +60,7 @@ pub fn run() {
     // the forwarder, never kill it (see spawn_bus_forwarder).
     let bus = EventBus::new(4096);
     let sync = Arc::new(SyncManager::new());
-    let catalog = Arc::new(MarketCatalog::new(bus.clone()));
+    let catalog = Arc::new(MarketCatalog::with_db(bus.clone(), db.clone()));
     let streams = Arc::new(data_engine::realtime::RealtimeEngine::new(
         bus.clone(),
         catalog.clone(),
@@ -81,6 +85,7 @@ pub fn run() {
     let s2 = state.clone();
     let sampler_state = state.clone();
     let sync_state = state.clone();
+    let catalog_state = state.clone();
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(state)
@@ -159,9 +164,23 @@ pub fn run() {
             .build()?;
             let handle = app.handle().clone();
             commands::spawn_bus_forwarder(handle, s2.clone());
-            // Market catalog: on-demand only — no background refresh loop.
-            // A search or manual refresh fetches the checked exchanges
-            // whose cache is older than 30s; otherwise nothing is fetched.
+            // Market catalog background refresh (PR-0.3): one async
+            // refresh at startup, then every 12h. Search never waits
+            // for it — the catalog is SQLite-backed, and the page
+            // re-searches once per `CatalogUpdated` event. Same spawn
+            // rule as the sampler above.
+            {
+                let state = catalog_state.clone();
+                tauri::async_runtime::spawn(async move {
+                    use crate::adapters::market_catalog::KNOWN_EXCHANGES;
+                    let ids: Vec<String> = KNOWN_EXCHANGES.iter().map(|s| s.to_string()).collect();
+                    state.catalog.refresh_exchanges(&ids, false).await;
+                    loop {
+                        tokio::time::sleep(Duration::from_secs(12 * 3600)).await;
+                        state.catalog.refresh_exchanges(&ids, false).await;
+                    }
+                });
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -179,6 +198,7 @@ pub fn run() {
             commands::set_proxy,
             commands::search_market_info,
             commands::refresh_market_catalog,
+            commands::get_catalog_status,
             commands::set_stream_symbols,
             commands::get_risk_config,
             commands::set_risk_config,

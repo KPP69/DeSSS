@@ -87,6 +87,10 @@ export type MarketInfo = {
 /** Result of a manual catalog refresh: cached rows + refresh timestamp. */
 export type CatalogRefresh = { count: number; updatedAt: number };
 
+/** Per-venue catalog status (PR-0.3): row count, newest row time, last error. */
+export type VenueCatalogStatus = { exchangeId: string; updatedAt: number | null; rows: number; error: string | null };
+export type CatalogStatus = { venues: VenueCatalogStatus[]; logDir: string };
+
 /** Risk gateway config: kill switch + hard limits (phase 5A §3). */
 export type RiskConfig = {
   killSwitch: boolean;

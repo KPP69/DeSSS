@@ -2,10 +2,15 @@
 //! for all six exchanges, standardized into [`MarketInfo`] and served to the
 //! Data page's symbol search.
 //!
-//! On-demand only: there is no background refresh loop. A search or manual
-//! refresh fetches (concurrently) the checked exchanges whose cache is
-//! older than [`CACHE_TTL`]; otherwise the cached rows are served. With no
-//! search and no refresh, the catalog makes zero requests.
+//! Search is zero-network (PR-0.3): static fields live in SQLite
+//! `instruments` as [`Instrument`] and load into memory at startup, so
+//! the first search after a restart reads local data only; live fields
+//! ([`Quote`]) stay in memory and come from bulk refreshes, WS frames,
+//! or the one-time 5s-staleness REST fallback for the top rows. The
+//! catalog refreshes in the background (startup, every 12h, manual,
+//! or a search/order miss) — never on the search path. A search
+//! therefore makes zero requests; a failed exchange backs off 60s and
+//! its last good rows stay in place.
 //!
 //! Design notes (all endpoints probed live 2026-11-25/26, no keys needed):
 //! - Hyperliquid / Entropy: one `POST metaAndAssetCtxs` each (weight 20).
@@ -59,11 +64,14 @@
 //!   exchanges still refresh concurrently; per-market enrichment (BBO /
 //!   OI fills) is capped at [`ENRICH_CONCURRENCY`] concurrent requests
 //!   by a `Semaphore`, so a wide search cannot trigger 429s.
-//! - Two cache layers: the static catalog (specs, leverage, tick sizes)
-//!   keeps the 30s bulk cache; the live fields of search hits (mark
-//!   price, funding) refresh on a short 2s cycle via `refresh_live_rows`
-//!   (per-exchange live snapshots), so a watched search ticks without
-//!   refetching the whole catalog.
+//! - Two halves: the static catalog ([`Instrument`]: specs, leverage,
+//!   tick sizes) persists in SQLite and keeps the 30s bulk cache; the
+//!   live half ([`Quote`]: mark, funding, BBO) is memory-only and
+//!   arrives with each bulk refresh, from WS frames on the Data page,
+//!   or from the one-time 5s-staleness REST fallback for a search's
+//!   top 5 rows. A watched search re-reads memory every 2s — zero
+//!   requests — and re-searches once when a background refresh
+//!   completes (`CatalogUpdated`).
 //! - `last_success_at` records the last cycle in which at least one
 //!   exchange actually succeeded — attempt time is never recorded, so a
 //!   fully failed cycle leaves the "缓存更新于" timestamp untouched.
@@ -84,15 +92,36 @@ use crate::net::shared_http_client;
 /// Cached rows are fresh for 30s: a search inside that window serves the
 /// cache with no request; older rows are refetched on demand.
 pub const CACHE_TTL: Duration = Duration::from_secs(30);
+/// One exchange's bulk fetch may take at most this long: a slow venue
+/// fails into backoff instead of holding a search hostage. The shared
+/// HTTP client's 20s timeout is untouched (a global bound, not a
+/// per-venue one).
+pub const REFRESH_TIMEOUT: Duration = Duration::from_secs(5);
+/// After a failed refresh, automatic refreshes skip the exchange for
+/// this long (manual refresh bypasses it). One failure never retries
+/// on every keystroke.
+pub const ERROR_BACKOFF: Duration = Duration::from_secs(60);
+/// The WS-staleness fallback covers at most this many of a search's
+/// top rows, once, in the background.
+pub const FALLBACK_TOP_N: usize = 5;
+/// The WS-staleness fallback covers at most this many of a search's
+/// top rows, once, in the background.
 /// AsterDEX specs change slowly (890 KB payload) — refetch at most hourly.
 const ASTER_SPECS_TTL: Duration = Duration::from_secs(3600);
-/// Live fields of search hits (mark price, funding) refresh at most once
-/// per exchange per this interval — the watched-search tick cycle.
-const LIVE_TTL: Duration = Duration::from_secs(2);
 /// Max concurrent per-market enrichment requests (BBO / OI fills): wide
 /// searches fan out over many symbols, and the venues rate-limit (429)
 /// above roughly a dozen parallel calls.
 const ENRICH_CONCURRENCY: usize = 10;
+
+/// Outcome of one exchange's refresh attempt, for the `refresh`
+/// instrumentation line: skipped (fresh or backed off — not a
+/// failure), stored (new rows), or failed.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum RefreshOutcome {
+    Skipped,
+    Stored,
+    Failed,
+}
 
 /// Exchange ids the catalog knows, in display order.
 pub const KNOWN_EXCHANGES: [&str; 6] = [
@@ -152,6 +181,123 @@ pub struct MarketInfo {
     pub open_interest_usd: Option<f64>,
     /// When this row was built, unix ms.
     pub updated_at: i64,
+}
+
+/// A market's static contract: everything that does not move between
+/// refreshes. This is what SQLite `instruments` persists — a restart
+/// reloads it with no network, so the first search is local. `dex` is
+/// derived from the exchange (`entropy` -> `"io"`, else `None`);
+/// `status` is `"trading"` for every parsed row: the parsers only keep
+/// tradeable markets, so no exchange currently contributes another
+/// status. `base_symbol` is NOT stored — it is derived from `symbol`
+/// at assembly time.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Instrument {
+    pub exchange_id: String,
+    pub symbol: String,
+    pub tick_size: Option<f64>,
+    pub step_size: Option<f64>,
+    pub min_notional: Option<f64>,
+    pub max_leverage: Option<f64>,
+    pub funding_interval_h: Option<f64>,
+    pub settlement_currency: String,
+    pub market_id: Option<u64>,
+    pub dex: Option<String>,
+    pub status: String,
+    pub updated_at: i64,
+}
+
+/// A market's live fields: everything a refresh or a WS frame can
+/// move. Memory-only by design — quotes are never persisted. `bbo`
+/// is `(bid_px, ask_px)`; `change_24h` has no bulk source on any venue
+/// yet (AsterDEX `ticker/24hr` carries `priceChangePercent` — a later
+/// wiring), so it is `None` for now rather than invented.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Quote {
+    pub mark_px: Option<f64>,
+    pub index_px: Option<f64>,
+    pub bid_px: Option<f64>,
+    pub ask_px: Option<f64>,
+    pub mid_px: Option<f64>,
+    pub funding_rate_raw: Option<f64>,
+    pub funding_1h: Option<f64>,
+    pub funding_apr: Option<f64>,
+    pub next_funding_time: Option<i64>,
+    pub volume_24h_usd: Option<f64>,
+    pub open_interest_usd: Option<f64>,
+    pub change_24h: Option<f64>,
+}
+
+impl MarketInfo {
+    /// Split a row into its static half (persisted) and live half
+    /// (memory-only). The split is lossless: assembling the pair
+    /// returns the original row.
+    pub fn split(&self) -> (Instrument, Quote) {
+        (
+            Instrument {
+                exchange_id: self.exchange_id.clone(),
+                symbol: self.symbol.clone(),
+                tick_size: self.tick_size,
+                step_size: self.step_size,
+                min_notional: self.min_notional,
+                max_leverage: self.max_leverage,
+                funding_interval_h: self.funding_interval_hours,
+                settlement_currency: self.settlement_currency.clone(),
+                market_id: self.market_id,
+                dex: if self.exchange_id == "entropy" {
+                    Some("io".to_string())
+                } else {
+                    None
+                },
+                status: "trading".to_string(),
+                updated_at: self.updated_at,
+            },
+            Quote {
+                mark_px: self.mark_px,
+                index_px: self.index_px,
+                bid_px: self.bid_px,
+                ask_px: self.ask_px,
+                mid_px: self.mid_px,
+                funding_rate_raw: self.funding_rate_raw,
+                funding_1h: self.funding_1h,
+                funding_apr: self.funding_apr,
+                next_funding_time: self.next_funding_time,
+                volume_24h_usd: self.volume_24h_usd,
+                open_interest_usd: self.open_interest_usd,
+                change_24h: None,
+            },
+        )
+    }
+
+    /// Reassemble a row from its static half and a live half
+    /// (empty after a cold start — prices show "—" until a refresh
+    /// or a WS frame fills them).
+    pub fn assemble(ins: &Instrument, q: &Quote) -> MarketInfo {
+        MarketInfo {
+            exchange_id: ins.exchange_id.clone(),
+            symbol: ins.symbol.clone(),
+            base_symbol: normalize_base_symbol(&ins.symbol),
+            market_id: ins.market_id,
+            settlement_currency: ins.settlement_currency.clone(),
+            max_leverage: ins.max_leverage,
+            tick_size: ins.tick_size,
+            step_size: ins.step_size,
+            min_notional: ins.min_notional,
+            bid_px: q.bid_px,
+            ask_px: q.ask_px,
+            mid_px: q.mid_px,
+            mark_px: q.mark_px,
+            index_px: q.index_px,
+            funding_rate_raw: q.funding_rate_raw,
+            funding_interval_hours: ins.funding_interval_h,
+            funding_1h: q.funding_1h,
+            funding_apr: q.funding_apr,
+            next_funding_time: q.next_funding_time,
+            volume_24h_usd: q.volume_24h_usd,
+            open_interest_usd: q.open_interest_usd,
+            updated_at: ins.updated_at,
+        }
+    }
 }
 
 /// `normalize_base_symbol` now lives in `crate::core::symbol`
@@ -645,78 +791,21 @@ async fn fetch_arcus(http: &reqwest::Client) -> Result<Vec<MarketInfo>, String> 
     parse_arcus(&v, crate::adapters::now_ms())
 }
 
-/// Live fields for one symbol (mark price + funding), refreshed on the
-/// short cycle for search hits only. Static specs never come from here.
-#[derive(Clone, Copy, Default)]
-struct LiveFields {
-    mark_px: Option<f64>,
-    funding_raw: Option<f64>,
-    funding_1h: Option<f64>,
-    funding_apr: Option<f64>,
-}
-
-struct LiveSnapshot {
-    at: Instant,
-    fields: HashMap<String, LiveFields>,
-}
-
-/// Project full bulk rows down to their live fields (mark + funding).
-fn live_fields_of(rows: Vec<MarketInfo>) -> HashMap<String, LiveFields> {
-    rows.into_iter()
-        .map(|r| {
-            (
-                r.symbol,
-                LiveFields {
-                    mark_px: r.mark_px,
-                    funding_raw: r.funding_rate_raw,
-                    funding_1h: r.funding_1h,
-                    funding_apr: r.funding_apr,
-                },
-            )
-        })
-        .collect()
-}
-
-/// AsterDEX live fields from `premiumIndex` alone (mark + last funding
-/// rate). Intervals come from the cached `fundingInfo` map (last bulk
-/// refresh); a symbol missing from it has an unknown interval, so its
-/// 1h rate and APR stay `None` — same rule as the bulk parser.
-async fn fetch_live_asterdex(
-    http: &reqwest::Client,
-    intervals: &HashMap<String, f64>,
-) -> Result<HashMap<String, LiveFields>, String> {
-    let v = get_json(http, &format!("{ASTER_REST_URL}/fapi/v1/premiumIndex")).await?;
-    let mut out = HashMap::new();
-    if let Some(list) = v.as_array() {
-        for p in list {
-            let Some(symbol) = str_field(p, "symbol") else {
-                continue;
-            };
-            let raw = num_field(p, "lastFundingRate");
-            let interval = intervals.get(symbol).copied().filter(|h| *h > 0.0);
-            let funding_1h = match (raw, interval) {
-                (Some(r), Some(h)) => Some(funding_1h_from(r, h)),
-                _ => None,
-            };
-            out.insert(
-                symbol.to_string(),
-                LiveFields {
-                    mark_px: num_field(p, "markPrice"),
-                    funding_raw: raw,
-                    funding_1h,
-                    funding_apr: funding_1h.map(funding_apr_pct),
-                },
-            );
-        }
-    }
-    Ok(out)
-}
-
 pub struct MarketCatalog {
     http: reqwest::Client,
     bus: EventBus,
+    /// SQLite handle for the `instruments` table. `None` in tests and
+    /// in any catalog built without a database (memory-only, no
+    /// persistence); `Some` in the app via [`MarketCatalog::with_db`].
+    db: Option<Arc<crate::data_engine::DataEngine>>,
     data: RwLock<HashMap<(String, String), MarketInfo>>,
     last_errors: Mutex<HashMap<String, String>>,
+    /// When each exchange last failed a refresh (unix `Instant`):
+    /// automatic refreshes skip it inside [`ERROR_BACKOFF`].
+    error_at: Mutex<HashMap<String, Instant>>,
+    /// Last time the 5s-staleness fallback was claimed, to keep the
+    /// 2s search tick from spawning one fallback task per tick.
+    last_fallback: Mutex<Option<Instant>>,
     aster_specs: RwLock<HashMap<String, AsterSpec>>,
     aster_specs_at: Mutex<Option<Instant>>,
     /// When each exchange's rows were last fetched successfully.
@@ -733,9 +822,6 @@ pub struct MarketCatalog {
     refresh_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// Caps concurrent per-market enrichment requests (BBO / OI fills).
     enrich_sem: tokio::sync::Semaphore,
-    /// Per-exchange live snapshots (mark + funding for any symbol),
-    /// refreshed at most once per [`LIVE_TTL`].
-    live_snapshots: Mutex<HashMap<String, LiveSnapshot>>,
     /// Last-known AsterDEX funding intervals from `fundingInfo`
     /// (per-symbol hours). The live funding math reads this; on a
     /// fundingInfo failure the previous map is kept, and a symbol never
@@ -748,17 +834,45 @@ impl MarketCatalog {
         Self {
             http: shared_http_client(),
             bus,
+            db: None,
             data: RwLock::new(HashMap::new()),
             last_errors: Mutex::new(HashMap::new()),
+            error_at: Mutex::new(HashMap::new()),
+            last_fallback: Mutex::new(None),
             aster_specs: RwLock::new(HashMap::new()),
             aster_specs_at: Mutex::new(None),
             fetched_at: Mutex::new(HashMap::new()),
             last_success_at: Mutex::new(None),
             refresh_locks: Mutex::new(HashMap::new()),
             enrich_sem: tokio::sync::Semaphore::new(ENRICH_CONCURRENCY),
-            live_snapshots: Mutex::new(HashMap::new()),
             aster_intervals: RwLock::new(HashMap::new()),
         }
+    }
+
+    /// The app's catalog: like [`MarketCatalog::new`] but with the
+    /// `instruments` table attached, so a cold start loads the last
+    /// stored catalog with no network. A load failure is logged and
+    /// the catalog starts empty (a background refresh refills it).
+    pub fn with_db(bus: EventBus, db: Arc<crate::data_engine::DataEngine>) -> Self {
+        let catalog = Self {
+            db: Some(db.clone()),
+            ..Self::new(bus)
+        };
+        match db.load_instruments() {
+            Ok(instruments) => {
+                let mut data = catalog.data.write().unwrap_or_else(|e| e.into_inner());
+                for ins in &instruments {
+                    let row = MarketInfo::assemble(ins, &Quote::default());
+                    data.insert((row.exchange_id.clone(), row.symbol.clone()), row);
+                }
+                tracing::info!(
+                    "catalog loaded {} instruments from sqlite, network=0",
+                    instruments.len()
+                );
+            }
+            Err(e) => tracing::warn!("catalog sqlite load failed: {e}"),
+        }
+        catalog
     }
 
     /// The per-exchange refresh lock (created on first use). Two tasks
@@ -837,12 +951,71 @@ impl MarketCatalog {
         last.remove(exchange_id);
     }
 
+    /// Replace one exchange's rows in memory, persist their static
+    /// halves to SQLite, and log the symbol diff. Quotes are never
+    /// persisted. A first load logs the whole list (capped at 10
+    /// symbols per side); later cycles log only what changed.
     fn store(&self, exchange_id: &str, rows: Vec<MarketInfo>) {
-        let mut data = self.data.write().unwrap_or_else(|e| e.into_inner());
-        data.retain(|(ex, _), _| ex != exchange_id);
-        for row in rows {
-            data.insert((row.exchange_id.clone(), row.symbol.clone()), row);
+        let old: std::collections::HashSet<String> = {
+            let data = self.data.read().unwrap_or_else(|e| e.into_inner());
+            data.values()
+                .filter(|r| r.exchange_id == exchange_id)
+                .map(|r| r.symbol.clone())
+                .collect()
+        };
+        let new: std::collections::HashSet<String> =
+            rows.iter().map(|r| r.symbol.clone()).collect();
+        let mut added: Vec<&str> = new.difference(&old).map(|s| s.as_str()).collect();
+        let mut removed: Vec<&str> = old.difference(&new).map(|s| s.as_str()).collect();
+        added.sort_unstable();
+        removed.sort_unstable();
+        let instruments: Vec<Instrument> = rows.iter().map(|r| r.split().0).collect();
+        if let Some(db) = &self.db {
+            if let Err(e) = db.replace_instruments(exchange_id, &instruments) {
+                tracing::warn!("catalog sqlite persist failed ({exchange_id}): {e}");
+            }
         }
+        {
+            let mut data = self.data.write().unwrap_or_else(|e| e.into_inner());
+            data.retain(|(ex, _), _| ex != exchange_id);
+            for row in rows {
+                data.insert((row.exchange_id.clone(), row.symbol.clone()), row);
+            }
+        }
+        if !added.is_empty() || !removed.is_empty() {
+            tracing::info!(
+                "catalog venue={exchange_id} added=[{}] removed=[{}]",
+                Self::diff_list(&added),
+                Self::diff_list(&removed),
+            );
+        }
+    }
+
+    /// A diff side for the log: up to 10 symbols, then `…+N more`.
+    fn diff_list(items: &[&str]) -> String {
+        let shown: Vec<&str> = items.iter().take(10).copied().collect();
+        let mut out = shown.join(", ");
+        if items.len() > 10 {
+            if !out.is_empty() {
+                out.push_str(", ");
+            }
+            out.push_str(&format!("…+{} more", items.len() - 10));
+        }
+        out
+    }
+
+    /// Per-venue catalog status for the System page and the refresh
+    /// button: row count and the newest row's `updated_at` (the
+    /// "目录更新于" time — a failed cycle leaves it untouched).
+    pub fn venue_status(&self, exchange_id: &str) -> (usize, Option<i64>) {
+        let data = self.data.read().unwrap_or_else(|e| e.into_inner());
+        let mut rows = 0;
+        let mut updated_at = None;
+        for row in data.values().filter(|r| r.exchange_id == exchange_id) {
+            rows += 1;
+            updated_at = Some(updated_at.unwrap_or(0).max(row.updated_at));
+        }
+        (rows, updated_at)
     }
 
     fn mark_fetched(&self, exchange_id: &str) {
@@ -859,55 +1032,115 @@ impl MarketCatalog {
         match result {
             Ok(rows) => {
                 self.log_refresh_ok(exchange_id);
+                self.error_at
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(exchange_id);
                 self.store(exchange_id, rows);
                 self.mark_fetched(exchange_id);
                 true
             }
             Err(e) => {
+                self.error_at
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(exchange_id.to_string(), Instant::now());
                 self.log_refresh_error(exchange_id, format!("{exchange_id} 全量行情刷新失败：{e}"));
                 false
             }
         }
     }
 
+    /// True when the exchange failed a refresh inside [`ERROR_BACKOFF`]:
+    /// automatic refreshes skip it (manual refresh bypasses this).
+    fn in_backoff(&self, exchange_id: &str) -> bool {
+        self.error_at
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(exchange_id)
+            .map(|t| t.elapsed() < ERROR_BACKOFF)
+            .unwrap_or(false)
+    }
+
+    /// Pure refresh gate (no network): fresh (inside [`CACHE_TTL`])
+    /// or backed off (failed inside [`ERROR_BACKOFF`]) means skip;
+    /// `force` (manual refresh) overrides both. Unit-tested without
+    /// network.
+    fn should_refresh(&self, exchange_id: &str, force: bool) -> bool {
+        if force {
+            return true;
+        }
+        if self.is_fresh(exchange_id) {
+            return false;
+        }
+        if self.in_backoff(exchange_id) {
+            return false;
+        }
+        true
+    }
+
     /// Fetch one exchange's bulk rows under that exchange's refresh lock,
     /// so two concurrent refreshes of the same exchange serialize while
     /// different exchanges still run concurrently. Freshness is re-checked
     /// under the lock: a concurrent refresh may have just finished while
-    /// this task was waiting. Returns true when rows were stored.
-    async fn refresh_one(&self, exchange_id: &str, force: bool) -> bool {
+    /// this task was waiting. The whole per-exchange fetch runs under a
+    /// [`REFRESH_TIMEOUT`] timeout, so one slow venue can never hold a
+    /// search hostage; a timeout is recorded as a failure (60s backoff).
+    async fn refresh_one(&self, exchange_id: &str, force: bool) -> RefreshOutcome {
         let lock = self.refresh_lock(exchange_id);
         let _guard = lock.lock().await;
-        if !force && self.is_fresh(exchange_id) {
-            return false;
+        if !self.should_refresh(exchange_id, force) {
+            return RefreshOutcome::Skipped;
         }
+        let started = Instant::now();
         // Transition rule (PR-1.2): a registered venue fetches its own
         // catalog; unregistered exchanges fall through to the old match,
-        // which PR-1.4 deletes with the else branches.
-        if let Some(v) = crate::venues::all().iter().find(|v| v.id() == exchange_id) {
-            return self.apply(exchange_id, v.catalog(&self.http).await);
-        }
-        match exchange_id {
-            "hyperliquid" => self.apply(
-                exchange_id,
-                crate::venues::hyperliquid::catalog::fetch_hyperliquid(&self.http, None).await,
-            ),
-            "entropy" => self.apply(
-                exchange_id,
-                crate::venues::hyperliquid::catalog::fetch_hyperliquid(&self.http, Some("io"))
-                    .await,
-            ),
-            "lighter" => self.apply(
-                exchange_id,
-                fetch_lighter(&self.http, LighterNetwork::Mainnet).await,
-            ),
-            "lighter_robinhood" => self.apply(
-                exchange_id,
-                fetch_lighter(&self.http, LighterNetwork::Robinhood).await,
-            ),
-            "arcus" => self.apply(exchange_id, fetch_arcus(&self.http).await),
-            "asterdex" => self.refresh_asterdex().await,
-            _ => false,
+        // which PR-1.4 deletes with the else branches. One future for
+        // both paths, so the timeout covers them identically.
+        let fetched = async {
+            if let Some(v) = crate::venues::all().iter().find(|v| v.id() == exchange_id) {
+                return self.apply(exchange_id, v.catalog(&self.http).await);
+            }
+            match exchange_id {
+                "hyperliquid" => self.apply(
+                    exchange_id,
+                    crate::venues::hyperliquid::catalog::fetch_hyperliquid(&self.http, None).await,
+                ),
+                "entropy" => self.apply(
+                    exchange_id,
+                    crate::venues::hyperliquid::catalog::fetch_hyperliquid(&self.http, Some("io"))
+                        .await,
+                ),
+                "lighter" => self.apply(
+                    exchange_id,
+                    fetch_lighter(&self.http, LighterNetwork::Mainnet).await,
+                ),
+                "lighter_robinhood" => self.apply(
+                    exchange_id,
+                    fetch_lighter(&self.http, LighterNetwork::Robinhood).await,
+                ),
+                "arcus" => self.apply(exchange_id, fetch_arcus(&self.http).await),
+                "asterdex" => self.refresh_asterdex().await,
+                _ => false,
+            }
+        };
+        let ok = match tokio::time::timeout(REFRESH_TIMEOUT, fetched).await {
+            Ok(ok) => ok,
+            Err(_) => self.apply(exchange_id, Err("刷新超时（5s）".to_string())),
+        };
+        let rows = if ok {
+            self.venue_status(exchange_id).0
+        } else {
+            0
+        };
+        tracing::info!(
+            "catalog venue={exchange_id} took={}ms ok={ok} rows={rows}",
+            started.elapsed().as_millis()
+        );
+        if ok {
+            RefreshOutcome::Stored
+        } else {
+            RefreshOutcome::Failed
         }
     }
 
@@ -1037,9 +1270,11 @@ impl MarketCatalog {
     /// concurrent callers cannot run two fetches for the same exchange.
     /// A single exchange failing leaves its last good rows in place and
     /// logs a warning. Unknown ids are ignored. `last_success_at` moves
-    /// only when at least one exchange actually succeeded.
+    /// only when at least one exchange actually succeeded — and the
+    /// page is told to re-search once via `CatalogUpdated`.
     pub async fn refresh_exchanges(&self, exchange_ids: &[String], force: bool) {
         use futures_util::future::join_all;
+        let started = Instant::now();
         let wanted: Vec<&str> = KNOWN_EXCHANGES
             .iter()
             .copied()
@@ -1052,13 +1287,27 @@ impl MarketCatalog {
         if todo.is_empty() {
             return;
         }
-        let oks = join_all(todo.iter().map(|id| self.refresh_one(id, force))).await;
-        if oks.iter().any(|o| *o) {
+        let outcomes = join_all(todo.iter().map(|id| self.refresh_one(id, force))).await;
+        let stored = outcomes
+            .iter()
+            .filter(|o| **o == RefreshOutcome::Stored)
+            .count();
+        let failed = outcomes
+            .iter()
+            .filter(|o| **o == RefreshOutcome::Failed)
+            .count();
+        tracing::info!(
+            "refresh venues={} took={}ms ok={stored} fail={failed}",
+            todo.len(),
+            started.elapsed().as_millis()
+        );
+        if stored > 0 {
             let mut last = self
                 .last_success_at
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
             *last = Some(crate::adapters::now_ms());
+            self.bus.publish(crate::bus::AppEvent::CatalogUpdated);
         }
     }
 
@@ -1098,137 +1347,6 @@ impl MarketCatalog {
                 .then_with(|| a.symbol.cmp(&b.symbol))
         });
         out
-    }
-
-    /// Refresh the live fields (mark price + funding) of exactly the rows
-    /// a search returned, at most once per [`LIVE_TTL`] per exchange. The
-    /// static catalog keeps its 30s bulk cache — only these dynamic fields
-    /// tick on the short cycle, so a watched search stays fresh without
-    /// refetching specs or leverage. Each exchange's live fetch runs under
-    /// that exchange's refresh lock (serial with its bulk refresh).
-    ///
-    /// A failed live fetch leaves the rows with their bulk values (never
-    /// blanked) and logs one deduped warning; a stale snapshot is never
-    /// applied as if it were fresh — only a snapshot inside [`LIVE_TTL`]
-    /// touches a row, and a touched row's `updated_at` moves to now.
-    pub async fn refresh_live_rows(&self, rows: &mut [MarketInfo]) {
-        let now_ms = crate::adapters::now_ms();
-        // Owned ids: the snapshot-apply step below mutates `rows`, so the
-        // exchange list cannot borrow from it.
-        let mut exchanges: Vec<String> = Vec::new();
-        for row in rows.iter() {
-            if !exchanges.contains(&row.exchange_id) {
-                exchanges.push(row.exchange_id.clone());
-            }
-        }
-        for exchange_id in exchanges {
-            let lock = self.refresh_lock(&exchange_id);
-            let _guard = lock.lock().await;
-            let snapshot_fresh = self
-                .live_snapshots
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .get(&exchange_id)
-                .map(|s| s.at.elapsed() < LIVE_TTL)
-                .unwrap_or(false);
-            if !snapshot_fresh {
-                let intervals = {
-                    let slot = self
-                        .aster_intervals
-                        .read()
-                        .unwrap_or_else(|e| e.into_inner());
-                    slot.clone()
-                };
-                // Transition rule (PR-1.2): a registered venue fetches
-                // its own live fields; unregistered exchanges fall
-                // through to the old match (deleted in PR-1.4).
-                let fetched = if let Some(v) = crate::venues::all()
-                    .iter()
-                    .find(|v| v.id() == exchange_id.as_str())
-                {
-                    v.catalog(&self.http).await.map(live_fields_of)
-                } else {
-                    match exchange_id.as_str() {
-                        "hyperliquid" => {
-                            crate::venues::hyperliquid::catalog::fetch_hyperliquid(&self.http, None)
-                                .await
-                                .map(live_fields_of)
-                        }
-                        "entropy" => crate::venues::hyperliquid::catalog::fetch_hyperliquid(
-                            &self.http,
-                            Some("io"),
-                        )
-                        .await
-                        .map(live_fields_of),
-                        "lighter" => fetch_lighter(&self.http, LighterNetwork::Mainnet)
-                            .await
-                            .map(live_fields_of),
-                        "lighter_robinhood" => fetch_lighter(&self.http, LighterNetwork::Robinhood)
-                            .await
-                            .map(live_fields_of),
-                        "asterdex" => fetch_live_asterdex(&self.http, &intervals).await,
-                        "arcus" => fetch_arcus(&self.http).await.map(live_fields_of),
-                        _ => continue,
-                    }
-                };
-                match fetched {
-                    Ok(fields) => {
-                        let mut live = self
-                            .live_snapshots
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner());
-                        live.insert(
-                            exchange_id.clone(),
-                            LiveSnapshot {
-                                at: Instant::now(),
-                                fields,
-                            },
-                        );
-                    }
-                    Err(e) => self.log_refresh_error(
-                        &format!("live-{exchange_id}"),
-                        format!("{exchange_id} 实时数据刷新失败：{e}"),
-                    ),
-                }
-            }
-            // Apply only a fresh snapshot: a failed fetch must not dress
-            // stale fields up as current data.
-            let fields = {
-                let live = self
-                    .live_snapshots
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
-                match live.get(&exchange_id) {
-                    Some(s) if s.at.elapsed() < LIVE_TTL => Some(s.fields.clone()),
-                    _ => None,
-                }
-            };
-            let Some(fields) = fields else {
-                continue;
-            };
-            for row in rows.iter_mut().filter(|r| r.exchange_id == exchange_id) {
-                let Some(lf) = fields.get(&row.symbol) else {
-                    continue;
-                };
-                let mut touched = false;
-                if let Some(px) = lf.mark_px {
-                    row.mark_px = Some(px);
-                    touched = true;
-                }
-                // Funding is replaced as a group only when the live fetch
-                // saw a raw rate; its 1h/APR may honestly be None (unknown
-                // AsterDEX interval) — that None is the truth, not a loss.
-                if let Some(raw) = lf.funding_raw {
-                    row.funding_rate_raw = Some(raw);
-                    row.funding_1h = lf.funding_1h;
-                    row.funding_apr = lf.funding_apr;
-                    touched = true;
-                }
-                if touched {
-                    row.updated_at = now_ms;
-                }
-            }
-        }
     }
 
     /// Fill the per-symbol gaps the bulk endpoints cannot provide, for
@@ -1359,6 +1477,61 @@ impl MarketCatalog {
             })
             .collect();
         join_all(futs).await
+    }
+
+    /// The 5s-staleness fallback, for the search path. `stale_top5` is
+    /// pure selection: the top rows (search order) whose WS book is
+    /// stale. `merge_enriched` fills them once via REST and merges
+    /// only the live fields back into the in-memory cache, so a
+    /// re-search shows them. Returns true when any row actually
+    /// changed — the page re-searches only then.
+    pub fn stale_top5(
+        rows: &[MarketInfo],
+        is_stale: impl Fn(&str, &str) -> bool,
+    ) -> Vec<MarketInfo> {
+        rows.iter()
+            .take(FALLBACK_TOP_N)
+            .filter(|r| is_stale(&r.exchange_id, &r.symbol))
+            .cloned()
+            .collect()
+    }
+
+    pub async fn merge_enriched(&self, rows: Vec<MarketInfo>) -> bool {
+        let enriched = self.enrich_rows(rows).await;
+        let mut changed = false;
+        let mut data = self.data.write().unwrap_or_else(|e| e.into_inner());
+        for row in enriched {
+            if let Some(cur) = data.get_mut(&(row.exchange_id.clone(), row.symbol.clone())) {
+                if cur.bid_px != row.bid_px
+                    || cur.ask_px != row.ask_px
+                    || cur.mid_px != row.mid_px
+                    || cur.open_interest_usd != row.open_interest_usd
+                {
+                    cur.bid_px = row.bid_px;
+                    cur.ask_px = row.ask_px;
+                    cur.mid_px = row.mid_px;
+                    cur.open_interest_usd = row.open_interest_usd;
+                    cur.updated_at = row.updated_at;
+                    changed = true;
+                }
+            }
+        }
+        changed
+    }
+
+    /// Claim the fallback slot: at most one fallback task per 10s, so
+    /// the 2s search tick cannot spawn one per tick. The slot is
+    /// claimed at search time; the task itself waits 5s for WS frames
+    /// before checking staleness.
+    pub fn claim_fallback_slot(&self) -> bool {
+        let mut slot = self.last_fallback.lock().unwrap_or_else(|e| e.into_inner());
+        let due = slot
+            .map(|t| t.elapsed() > Duration::from_secs(10))
+            .unwrap_or(true);
+        if due {
+            *slot = Some(Instant::now());
+        }
+        due
     }
 
     /// Lighter market id for a cached row, for the realtime stream: the
@@ -1848,5 +2021,181 @@ mod tests {
         // No other exchange was touched.
         assert!(!catalog.has_rows_for("entropy"));
         assert!(catalog.last_refresh_error("entropy").is_none());
+    }
+
+    /// PR-0.3: the refresh gate is TTL + backoff, decided without
+    /// network. Fresh (inside 30s) skips; a failed exchange backs off
+    /// 60s; `force` (manual refresh) overrides both; a later success
+    /// clears the backoff.
+    #[test]
+    fn refresh_gate_ttl_and_backoff() {
+        let catalog = MarketCatalog::new(EventBus::new(16));
+        // Nothing cached, no error: due.
+        assert!(catalog.should_refresh("hyperliquid", false));
+        // Just fetched: inside TTL, skip — unless forced.
+        catalog.mark_fetched("hyperliquid");
+        assert!(!catalog.should_refresh("hyperliquid", false));
+        assert!(catalog.should_refresh("hyperliquid", true));
+        // A failed exchange backs off (no error text needed here).
+        assert!(catalog.should_refresh("entropy", false));
+        catalog.apply("entropy", Err("boom".to_string()));
+        assert!(catalog.in_backoff("entropy"));
+        assert!(!catalog.should_refresh("entropy", false));
+        assert!(catalog.should_refresh("entropy", true));
+        // A later success clears the backoff.
+        catalog.apply("entropy", Ok(vec![]));
+        assert!(!catalog.in_backoff("entropy"));
+    }
+
+    /// PR-0.3: an unknown symbol misses locally but the exchange is
+    /// due exactly one forced refresh; once that fails, the 60s
+    /// backoff stops further retries (no retry on every keystroke).
+    #[test]
+    fn unknown_symbol_miss_then_backoff() {
+        let catalog = MarketCatalog::new(EventBus::new(16));
+        catalog.store(
+            "hyperliquid",
+            vec![MarketInfo {
+                exchange_id: "hyperliquid".into(),
+                symbol: "BTC".into(),
+                base_symbol: "BTC".into(),
+                market_id: None,
+                settlement_currency: "USDC".into(),
+                max_leverage: Some(40.0),
+                tick_size: Some(1.0),
+                step_size: Some(0.00001),
+                min_notional: Some(10.0),
+                bid_px: None,
+                ask_px: None,
+                mid_px: None,
+                mark_px: Some(58033.0),
+                index_px: None,
+                funding_rate_raw: None,
+                funding_interval_hours: Some(1.0),
+                funding_1h: None,
+                funding_apr: None,
+                next_funding_time: None,
+                volume_24h_usd: None,
+                open_interest_usd: None,
+                updated_at: 0,
+            }],
+        );
+        let all: Vec<String> = KNOWN_EXCHANGES.iter().map(|s| s.to_string()).collect();
+        assert!(catalog.search("ZZZZ", &all).is_empty());
+        // The miss leaves the exchange due exactly one refresh...
+        assert!(catalog.should_refresh("hyperliquid", false));
+        // ...and a failed refresh backs it off instead of retrying.
+        catalog.apply("hyperliquid", Err("boom".to_string()));
+        assert!(!catalog.should_refresh("hyperliquid", false));
+    }
+
+    /// PR-0.3: the Instrument/Quote split is lossless — assembling the
+    /// pair returns the original row, field for field, on both the
+    /// plain and the `io:`-prefixed (Entropy) shapes.
+    #[test]
+    fn split_assemble_round_trip_loses_nothing() {
+        for (exchange_id, symbol, base_symbol) in [
+            ("hyperliquid", "BTC", "BTC"),
+            ("entropy", "io:NVDA", "NVDA"),
+        ] {
+            let row = MarketInfo {
+                exchange_id: exchange_id.into(),
+                symbol: symbol.into(),
+                base_symbol: base_symbol.into(),
+                market_id: Some(7),
+                settlement_currency: "USDC".into(),
+                max_leverage: Some(40.0),
+                tick_size: Some(0.5),
+                step_size: Some(0.001),
+                min_notional: Some(10.0),
+                bid_px: Some(58000.0),
+                ask_px: Some(58001.0),
+                mid_px: Some(58000.5),
+                mark_px: Some(58000.5),
+                index_px: Some(58000.0),
+                funding_rate_raw: Some(0.0008),
+                funding_interval_hours: Some(1.0),
+                funding_1h: Some(0.0008),
+                funding_apr: Some(700.8),
+                next_funding_time: Some(1_800_000_000_000),
+                volume_24h_usd: Some(1_234_567.0),
+                open_interest_usd: Some(9_876_543.0),
+                updated_at: 1_700_000_000_000,
+            };
+            let (ins, quote) = row.split();
+            assert_eq!(MarketInfo::assemble(&ins, &quote), row);
+        }
+    }
+
+    /// PR-0.3: cold start loads instruments from SQLite with no
+    /// network — statics survive, quotes start empty (prices show
+    /// "—" until a refresh or WS frame). Timings are asserted
+    /// generously (temp dir, tiny DB) and printed for the record.
+    #[test]
+    fn cold_start_loads_instruments_from_sqlite() {
+        use crate::data_engine::DataEngine;
+        use crate::portable::PortablePaths;
+        let dir = std::env::temp_dir().join(format!("desss-pr03-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let paths = PortablePaths {
+            root: dir.clone(),
+            data_dir: dir.clone(),
+            db_path: dir.join("desss.db"),
+            log_dir: dir.join("logs"),
+            vault_key_path: dir.join("vault.key"),
+            vault_enc_path: dir.join("vault.enc"),
+        };
+        let db = Arc::new(DataEngine::open(paths).unwrap());
+        let row = MarketInfo {
+            exchange_id: "hyperliquid".into(),
+            symbol: "BTC".into(),
+            base_symbol: "BTC".into(),
+            market_id: None,
+            settlement_currency: "USDC".into(),
+            max_leverage: Some(40.0),
+            tick_size: Some(1.0),
+            step_size: Some(0.00001),
+            min_notional: Some(10.0),
+            bid_px: None,
+            ask_px: None,
+            mid_px: None,
+            mark_px: Some(58033.0),
+            index_px: None,
+            funding_rate_raw: None,
+            funding_interval_hours: Some(1.0),
+            funding_1h: Some(0.0001),
+            funding_apr: Some(87.6),
+            next_funding_time: None,
+            volume_24h_usd: Some(1_000_000.0),
+            open_interest_usd: Some(2_000_000.0),
+            updated_at: 1_700_000_000_000,
+        };
+        // Seed via one catalog, then cold-load via a fresh one.
+        {
+            let catalog = MarketCatalog::with_db(EventBus::new(16), db.clone());
+            catalog.store("hyperliquid", vec![row.clone()]);
+            assert!(catalog.has_rows_for("hyperliquid"));
+        }
+        let t0 = std::time::Instant::now();
+        let cold = MarketCatalog::with_db(EventBus::new(16), db.clone());
+        let load_ms = t0.elapsed().as_millis();
+        let all: Vec<String> = KNOWN_EXCHANGES.iter().map(|s| s.to_string()).collect();
+        let t0 = std::time::Instant::now();
+        let hits = cold.search("BTC", &all);
+        let first_ms = t0.elapsed().as_millis();
+        assert_eq!(hits.len(), 1);
+        // Statics survived the round trip; quotes start empty.
+        assert_eq!(hits[0].tick_size, Some(1.0));
+        assert_eq!(hits[0].max_leverage, Some(40.0));
+        assert_eq!(hits[0].mark_px, None);
+        let t0 = std::time::Instant::now();
+        let hits2 = cold.search("BTC", &all);
+        let hot_ms = t0.elapsed().as_millis();
+        assert_eq!(hits2.len(), 1);
+        eprintln!("cold-start: load={load_ms}ms first_search={first_ms}ms hot_search={hot_ms}ms");
+        assert!(load_ms + first_ms < 200, "cold first search under 200ms");
+        assert!(hot_ms < 100, "hot search under 100ms");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

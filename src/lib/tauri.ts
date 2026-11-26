@@ -1,6 +1,6 @@
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { AppInfo, AccountView, CredentialMap, OrderBook, AccountLive, LogEntry, RuntimeSnapshot, ProxyState, MarketInfo, CatalogRefresh, RiskConfig, DrawdownStatus, OrderInfo, TradeInfo } from "./types";
+import type { AppInfo, AccountView, CredentialMap, OrderBook, AccountLive, LogEntry, RuntimeSnapshot, ProxyState, MarketInfo, CatalogRefresh, CatalogStatus, RiskConfig, DrawdownStatus, OrderInfo, TradeInfo } from "./types";
 
 // Tauri 框架级英文报错翻译成中文（实机事故 2026-11-26：下单失败只显示
 // "invalid args input for command place_order: missing field account_id"，
@@ -53,14 +53,15 @@ export const api = {
   getRuntimeSnapshot: () => invoke<RuntimeSnapshot>("get_runtime_snapshot"),
   getProxy: () => invoke<ProxyState>("get_proxy"),
   setProxy: (url: string) => invoke<ProxyState>("set_proxy", { url }),
-  // Market catalog (phase 4): bulk specs + prices + funding for all six
-  // exchanges, searched on demand (empty query returns nothing).
-  // A search fetches only the checked exchanges whose cache is older
-  // than 30s; the refresh button forces a refetch of the checked ones.
+  // Market catalog (PR-0.3): search is zero-network — it reads the
+  // SQLite-backed in-memory catalog only. A miss triggers one
+  // background refresh; the page re-searches on `catalog://updated`.
+  // The refresh button fires a background refresh and returns at once.
   searchMarketInfo: (query: string, exchangeIds: string[]) =>
     invoke<MarketInfo[]>("search_market_info", { query, exchangeIds }),
   refreshMarketCatalog: (exchangeIds: string[]) =>
     invoke<CatalogRefresh>("refresh_market_catalog", { exchangeIds }),
+  getCatalogStatus: () => invoke<CatalogStatus>("get_catalog_status"),
   // Realtime streams (phase 5A §2): reconcile the backend's wanted set
   // with the symbols on screen. Empty list = unsubscribe everything.
   setStreamSymbols: (keys: { exchangeId: string; symbol: string }[]) =>
@@ -110,6 +111,9 @@ export const api = {
 
 export function onBook(cb: (b: OrderBook) => void): Promise<UnlistenFn> {
   return listen<OrderBook>("market://book", (e) => cb(e.payload));
+}
+export function onCatalogUpdated(cb: () => void): Promise<UnlistenFn> {
+  return listen("catalog://updated", () => cb());
 }
 export function onAccountLive(cb: (a: AccountLive) => void): Promise<UnlistenFn> {
   return listen<AccountLive>("account://live", (e) => cb(e.payload));

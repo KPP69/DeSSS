@@ -1,8 +1,9 @@
 import React, { useEffect, useState } from "react";
 import { Button } from "../components/ui";
 import ThemeSwitcher from "../components/ThemeSwitcher";
+import { getExchange } from "../lib/exchanges";
 import { api } from "../lib/tauri";
-import type { ProxyState } from "../lib/types";
+import type { CatalogStatus, ProxyState } from "../lib/types";
 
 /**
  * System page: local proxy setting. The backend resolves the proxy in
@@ -16,6 +17,7 @@ export default function SystemPage() {
   const [input, setInput] = useState("");
   const [msg, setMsg] = useState("");
   const [saving, setSaving] = useState(false);
+  const [catalog, setCatalog] = useState<CatalogStatus | null>(null);
 
   useEffect(() => {
     api
@@ -25,6 +27,7 @@ export default function SystemPage() {
         setInput(p.custom ?? "");
       })
       .catch(() => {});
+    api.getCatalogStatus().then(setCatalog).catch(() => {});
   }, []);
 
   const save = () => {
@@ -71,6 +74,37 @@ export default function SystemPage() {
           </div>
         )}
         {msg && <div className="text-xs text-ds-text-2 mt-2">{msg}</div>}
+      </div>
+      <div className="bg-ds-panel border border-ds-line rounded-[10px] shadow-card p-4 mb-4 max-w-xl">
+        <div className="font-semibold text-ds-text-1 mb-1">数据目录</div>
+        <div className="text-xs text-ds-text-2 mb-3 leading-relaxed">
+          品种目录落库保存，搜索不走网络；后台每 12 小时刷新一次。
+        </div>
+        {catalog ? (
+          <>
+            <div className="text-xs text-ds-text-2 leading-relaxed num">
+              {catalog.venues.map((v) => (
+                <div key={v.exchangeId} className="flex justify-between gap-2">
+                  <span>{getExchange(v.exchangeId).name}</span>
+                  <span>
+                    {v.rows} 个品种
+                    {" · "}
+                    {v.error
+                      ? "刷新失败"
+                      : v.updatedAt == null
+                        ? "未就绪"
+                        : `更新于 ${new Date(v.updatedAt).toLocaleString("zh-CN", { hour12: false })}`}
+                  </span>
+                </div>
+              ))}
+            </div>
+            <div className="text-xs text-ds-text-3 mt-3 num break-all">
+              日志目录：{catalog.logDir}
+            </div>
+          </>
+        ) : (
+          <div className="text-xs text-ds-text-3">加载中…</div>
+        )}
       </div>
     </div>
   );

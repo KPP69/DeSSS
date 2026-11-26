@@ -1,8 +1,8 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Button, DataTable, EmptyState, MultiSelectDropdown, tdClsCompact, trCls } from "../components/ui";
 import { EXCHANGES, getExchange } from "../lib/exchanges";
-import { api, onBook } from "../lib/tauri";
-import type { MarketInfo, OrderBook } from "../lib/types";
+import { api, onBook, onCatalogUpdated } from "../lib/tauri";
+import type { CatalogStatus, MarketInfo, OrderBook } from "../lib/types";
 import { useDataUiStore } from "../store/useDataUiStore";
 
 /** One streamed book, top of book only, keyed `exchangeId:symbol`. */
@@ -14,20 +14,22 @@ const LIVE_MS = 5000;
 
 /**
  * Data page: on-demand symbol search over the bulk market catalog (phase 4).
- * No background refresh and no WS book subscription: a search or manual
- * refresh fetches only the checked exchanges (30s cache), and the page
- * never dumps the whole market — without a query it shows a search guide.
- * The view toggle lives in the AppShell secondary toolbar (App.tsx); the
- * tool row below is absolutely static — the cache time lives in the
- * results footer, never in the row, so nothing ever shifts the controls.
+ * Search is zero-network (PR-0.3): it reads the SQLite-backed in-memory
+ * catalog only, so a search never waits on a venue. Prices come from WS
+ * frames (a row with no frame after 5s gets one background REST fill
+ * for the top rows); the catalog itself refreshes in the background
+ * (startup, every 12h, manual, or a miss) and the page re-searches once
+ * per `catalog://updated` event. The view toggle lives in the AppShell
+ * secondary toolbar (App.tsx); the tool row below is absolutely static —
+ * the cache time lives in the results footer, never in the row, so
+ * nothing ever shifts the controls.
  *
  * Live watching: while the user stays on 标的查询 with a non-empty query,
- * the page re-runs the same lightweight search every 2s so the rows tick
- * (backend live-refreshes mark/funding on a 2s cycle and fills the true
- * BBO per hit). Clearing the query or leaving the view stops the timer
- * at once — background goes back to zero requests. Every search carries
- * an incrementing request id: a stale response can never overwrite newer
- * state or a cleared state.
+ * the page re-runs the same local search every 2s so the rows tick
+ * (WS books flush at 150ms). Clearing the query or leaving the view
+ * stops the timer at once — background goes back to zero requests.
+ * Every search carries an incrementing request id: a stale response can
+ * never overwrite newer state or a cleared state.
  */
 
 /** Decimals to show for a price, derived from the market's tick size. */
@@ -37,7 +39,7 @@ function priceDecimals(tick: number | null): number {
 }
 
 function fmtPrice(px: number | null, tick: number | null): string {
-  if (px == null) return "—";
+  if (px == null || px === 0) return "—";
   return px.toFixed(priceDecimals(tick));
 }
 
@@ -173,15 +175,21 @@ function MarketRows({
 
 export default function DataPage() {
   const view = useDataUiStore((s) => s.view);
-  const [query, setQuery] = useState("");
-  const [checked, setChecked] = useState<string[]>(EXCHANGES.map((e) => e.id));
+  const query = useDataUiStore((s) => s.query);
+  const setQuery = useDataUiStore((s) => s.setQuery);
+  const checked = useDataUiStore((s) => s.checked);
+  const setChecked = useDataUiStore((s) => s.setChecked);
   const [results, setResults] = useState<MarketInfo[]>([]);
   const [searched, setSearched] = useState(false);
   const [searching, setSearching] = useState(false);
+  const [notReady, setNotReady] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [cacheUpdatedAt, setCacheUpdatedAt] = useState<number | null>(null);
+  const [venueStatus, setVenueStatus] = useState<CatalogStatus | null>(null);
   const [expandedKey, setExpandedKey] = useState<string | null>(null);
   const reqId = useRef(0);
+  // Pending debounce timer: Enter clears it first, then searches at once.
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Streamed books (phase 5A §2): incoming `market://book` frames land
   // in a buffer and flush into state at most every 150ms, so a
   // millisecond book flood re-renders ~7 times a second, never per frame.
@@ -260,15 +268,18 @@ export default function DataPage() {
         if (reqId.current === id) {
           setResults(rows);
           setSearched(true);
+          setNotReady(false);
           if (mode === "fresh") setExpandedKey(null);
           if (rows.length > 0) {
             setCacheUpdatedAt(Math.max(...rows.map((r) => r.updatedAt)));
           }
         }
-      } catch {
+      } catch (e) {
         if (reqId.current === id && mode === "fresh") {
+          const msg = e instanceof Error ? e.message : String(e);
           setResults([]);
           setSearched(true);
+          setNotReady(msg.includes("目录未就绪"));
         }
       } finally {
         if (reqId.current === id) setSearching(false);
@@ -286,9 +297,40 @@ export default function DataPage() {
       void runSearch(query, checked);
       return;
     }
-    const t = setTimeout(() => void runSearch(query, checked), 300);
-    return () => clearTimeout(t);
+    debounceRef.current = setTimeout(() => void runSearch(query, checked), 300);
+    return () => {
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+      debounceRef.current = null;
+    };
   }, [query, checked, runSearch]);
+
+  // Per-venue catalog status for the line under the tool row, loaded
+  // on mount and on every background catalog update. The same event
+  // re-runs the current search once (tick mode: never collapses the
+  // expanded row, never blanks on failure).
+  const loadStatus = useCallback(() => {
+    api.getCatalogStatus().then(setVenueStatus).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    loadStatus();
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    void onCatalogUpdated(() => {
+      loadStatus();
+      const s = useDataUiStore.getState();
+      if (s.view === "search" && s.query.trim()) {
+        void runSearch(s.query, s.checked, "tick");
+      }
+    }).then((u) => {
+      if (cancelled) u();
+      else unlisten = u;
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [loadStatus, runSearch]);
 
   // Live watching, only while the user is on 标的查询 with a non-empty
   // query: re-run the same lightweight search every 2s so the rows tick.
@@ -305,6 +347,7 @@ export default function DataPage() {
     try {
       const r = await api.refreshMarketCatalog(checked);
       if (r.updatedAt > 0) setCacheUpdatedAt(r.updatedAt);
+      loadStatus();
       if (query.trim()) await runSearch(query, checked);
     } finally {
       setRefreshing(false);
@@ -327,7 +370,13 @@ export default function DataPage() {
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               onKeyDown={(e) => {
-                if (e.key === "Enter") void runSearch(query, checked);
+                if (e.key === "Enter") {
+                  if (debounceRef.current) {
+                    clearTimeout(debounceRef.current);
+                    debounceRef.current = null;
+                  }
+                  void runSearch(query, checked);
+                }
               }}
               placeholder="输入 BTC、ETH、SOL、NVDA 等标的名称，查询 6 所实时对比数据"
               className="flex-1 min-w-0 bg-ds-panel-2 border border-ds-line rounded-lg px-3 h-8 text-ds-text-1 outline-none focus:border-ds-accent num"
@@ -347,10 +396,31 @@ export default function DataPage() {
             </div>
           </div>
 
+          {/* Per-venue catalog status (updated time / not ready / failed).
+              Lives below the tool row so the row itself stays static. */}
+          {venueStatus && (
+            <div className="text-xs text-ds-text-3 mb-3 num">
+              {venueStatus.venues.map((v) => {
+                const st = v.error
+                  ? "失败"
+                  : v.updatedAt == null
+                    ? "未就绪"
+                    : fmtClock(v.updatedAt);
+                return (
+                  <span key={v.exchangeId} className="mr-3">
+                    {getExchange(v.exchangeId).name} {st}
+                  </span>
+                );
+              })}
+            </div>
+          )}
+
           {!searched && !searching ? (
             <EmptyState>输入 BTC、ETH、SOL、NVDA 等标的名称，查询 6 所实时对比数据。</EmptyState>
           ) : searching && results.length === 0 ? (
             <EmptyState>搜索中…</EmptyState>
+          ) : notReady ? (
+            <EmptyState>目录未就绪，正在拉取…</EmptyState>
           ) : results.length === 0 ? (
             <EmptyState>未找到包含「{query.trim()}」的标的。</EmptyState>
           ) : (
@@ -365,6 +435,7 @@ export default function DataPage() {
               </DataTable>
               <div className="text-xs text-ds-text-3 mt-2">
                 共 {results.length} 个交易所结果
+                {searching && <> · 搜索中…</>}
                 {cacheUpdatedAt != null && <> · 缓存更新于 {fmtClock(cacheUpdatedAt)}</>}
                 {" · "}点击行查看完整规则详情 · 费率正值（多头付费）为绿，负值为红
               </div>

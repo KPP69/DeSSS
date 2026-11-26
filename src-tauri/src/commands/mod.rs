@@ -1,5 +1,6 @@
 use crate::AppState;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, State};
 
 // Frontend/backend field alignment — two rules, both load-bearing
@@ -72,6 +73,9 @@ pub fn spawn_bus_forwarder(handle: AppHandle, state: Arc<AppState>) {
                         ts,
                     } => {
                         let _=handle.emit("app://log", serde_json::json!({"level":level,"source":source,"message":message,"ts":ts}));
+                    }
+                    crate::bus::AppEvent::CatalogUpdated => {
+                        let _ = handle.emit("catalog://updated", ());
                     }
                     _ => {}
                 },
@@ -341,24 +345,67 @@ pub fn get_vault_status(state: State<'_, Arc<AppState>>) -> Result<Option<String
 
 /// Search the market catalog by base symbol (exact or prefix) or native
 /// symbol (substring, case insensitive), restricted to the checked
-/// exchanges. A search fetches a checked exchange's bulk endpoint only
-/// when its cache is older than 30s; otherwise the cache is served. An
-/// empty query returns nothing — the Data page never dumps the whole
-/// market over IPC. Public data needs no account and never touches
-/// account credentials. Matched rows then get a short-cycle (2s) live
-/// refresh of mark price + funding, and are enriched with the true
-/// per-symbol BBO (and AsterDEX open interest), which the bulk endpoints
-/// cannot provide.
+/// exchanges. Zero-network (PR-0.3): it reads only the in-memory
+/// catalog (SQLite-backed at startup) and never awaits a fetch. An
+/// empty catalog answers "目录未就绪，正在拉取" and triggers one
+/// background refresh; a miss on a loaded catalog triggers one
+/// background refresh of the checked exchanges (60s backoff inside),
+/// and the page re-searches once when `CatalogUpdated` arrives.
+/// Prices come from WS frames; rows with no frame after 5s get one
+/// background REST fill for the top 5 rows. An empty query returns
+/// nothing — the Data page never dumps the whole market over IPC.
 #[tauri::command]
 pub async fn search_market_info(
     state: State<'_, Arc<AppState>>,
     query: String,
     exchange_ids: Vec<String>,
 ) -> Result<Vec<crate::adapters::market_catalog::MarketInfo>, String> {
-    state.catalog.refresh_exchanges(&exchange_ids, false).await;
-    let mut rows = state.catalog.search(&query, &exchange_ids);
-    state.catalog.refresh_live_rows(&mut rows).await;
-    Ok(state.catalog.enrich_rows(rows).await)
+    use crate::adapters::market_catalog::MarketCatalog;
+    let started = Instant::now();
+    if query.trim().is_empty() {
+        return Ok(vec![]);
+    }
+    let rows = state.catalog.search(&query, &exchange_ids);
+    let venues = exchange_ids.len();
+    if rows.is_empty() {
+        // Miss: one background refresh of the checked exchanges (the
+        // gate inside skips fresh/backed-off ones); the page
+        // re-searches once when `CatalogUpdated` arrives.
+        let catalog = state.catalog.clone();
+        let ids = exchange_ids.clone();
+        tauri::async_runtime::spawn(async move {
+            catalog.refresh_exchanges(&ids, false).await;
+        });
+        let took = started.elapsed().as_millis();
+        tracing::info!("search q={query} venues={venues} hits=0 took={took}ms network=0");
+        if !exchange_ids.iter().any(|id| state.catalog.has_rows_for(id)) {
+            return Err("目录未就绪，正在拉取".to_string());
+        }
+        return Ok(vec![]);
+    }
+    // Rows on screen: claim the 5s-staleness fallback slot (at most one
+    // task per 10s) and let WS frames arrive first.
+    if state.catalog.claim_fallback_slot() {
+        let catalog = state.catalog.clone();
+        let streams = state.streams.clone();
+        let bus = state.bus.clone();
+        let snapshot = rows.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            let stale = MarketCatalog::stale_top5(&snapshot, |ex, sym| {
+                streams.is_stale(&(ex.to_string(), sym.to_string()))
+            });
+            if !stale.is_empty() && catalog.merge_enriched(stale).await {
+                bus.publish(crate::bus::AppEvent::CatalogUpdated);
+            }
+        });
+    }
+    let took = started.elapsed().as_millis();
+    tracing::info!(
+        "search q={query} venues={venues} hits={} took={took}ms network=0",
+        rows.len()
+    );
+    Ok(rows)
 }
 
 #[derive(serde::Serialize)]
@@ -368,21 +415,64 @@ pub struct CatalogRefresh {
     pub updated_at: i64,
 }
 
-/// Manually refresh the checked exchanges (ignoring the 30s cache) and
-/// return the cached row count plus the last *successful* refresh
-/// timestamp (unix ms) for the Data page's "缓存更新于" display — a cycle
-/// where every exchange failed leaves the timestamp untouched. Async
-/// commands with a `State` input must return a `Result` (Tauri requirement).
+/// Manually refresh the checked exchanges (ignoring the 30s cache).
+/// Fire-and-forget (PR-0.3): the refresh runs in the background and
+/// this returns immediately with the current snapshot; the page
+/// re-searches when `CatalogUpdated` arrives. Async commands with a
+/// `State` input must return a `Result` (Tauri requirement).
 #[tauri::command]
 pub async fn refresh_market_catalog(
     state: State<'_, Arc<AppState>>,
     exchange_ids: Vec<String>,
 ) -> Result<CatalogRefresh, String> {
-    state.catalog.refresh_exchanges(&exchange_ids, true).await;
+    let catalog = state.catalog.clone();
+    tauri::async_runtime::spawn(async move {
+        catalog.refresh_exchanges(&exchange_ids, true).await;
+    });
     Ok(CatalogRefresh {
         count: state.catalog.len(),
         updated_at: state.catalog.last_success_at().unwrap_or(0),
     })
+}
+
+/// Per-venue catalog status for the System page and the Data page
+/// refresh button: row count, newest row time ("目录更新于"), and
+/// the last refresh error, plus the log directory path. Sync
+/// command — reads memory only.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VenueCatalogStatus {
+    pub exchange_id: String,
+    pub updated_at: Option<i64>,
+    pub rows: usize,
+    pub error: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogStatus {
+    pub venues: Vec<VenueCatalogStatus>,
+    pub log_dir: String,
+}
+
+#[tauri::command]
+pub fn get_catalog_status(state: State<'_, Arc<AppState>>) -> CatalogStatus {
+    let venues = crate::adapters::market_catalog::KNOWN_EXCHANGES
+        .iter()
+        .map(|id| {
+            let (rows, updated_at) = state.catalog.venue_status(id);
+            VenueCatalogStatus {
+                exchange_id: id.to_string(),
+                updated_at,
+                rows,
+                error: state.catalog.last_refresh_error(id),
+            }
+        })
+        .collect();
+    CatalogStatus {
+        venues,
+        log_dir: state.paths.log_dir.display().to_string(),
+    }
 }
 
 /// Reconcile the on-demand realtime streams with the symbols on screen.
