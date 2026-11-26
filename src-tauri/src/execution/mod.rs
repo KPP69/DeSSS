@@ -34,11 +34,11 @@ use rust_decimal::Decimal;
 use crate::adapters::hl_signing;
 use crate::adapters::market_catalog::MarketCatalog;
 use crate::adapters::sync::SyncManager;
-use crate::adapters::types::{Order, OrderInfo, OrderRequest, OrderStatus, TradeInfo};
 use crate::adapters::{AdapterError, ExchangeAdapter, UNKNOWN_OID};
 use crate::bus::EventBus;
+use crate::core::precision::{align_down, align_price_for_side, to_decimal};
+use crate::core::types::{Order, OrderInfo, OrderRequest, OrderStatus, TradeInfo};
 use crate::data_engine::realtime::RealtimeEngine;
-use crate::risk::precision::{align_down, align_price_for_side, to_decimal};
 use crate::risk::{RiskCheckContext, RiskGateway};
 
 /// Everything the engine needs, passed explicitly so the pipeline
@@ -228,7 +228,7 @@ fn log(deps: &ExecDeps, level: &str, message: String) {
     deps.bus.log(level, "order", message);
 }
 
-fn live_of(deps: &ExecDeps, account_id: &str) -> Option<crate::adapters::types::AccountLive> {
+fn live_of(deps: &ExecDeps, account_id: &str) -> Option<crate::core::types::AccountLive> {
     deps.sync
         .live_states()
         .into_iter()
@@ -928,9 +928,9 @@ mod tests {
     use super::*;
     use crate::adapters::market_catalog::MarketCatalog;
     use crate::adapters::sync::SyncManager;
-    use crate::adapters::types::{Balance, Position};
     use crate::adapters::AdapterResult;
     use crate::bus::EventBus;
+    use crate::core::types::{Balance, Position};
     use crate::data_engine::realtime::RealtimeEngine;
     use crate::risk::{RiskConfig, RiskGateway};
     use async_trait::async_trait;
@@ -1033,12 +1033,12 @@ mod tests {
     /// never with the catalog-missing error.
     #[tokio::test]
     async fn place_order_loads_cold_catalog_for_its_exchange() {
-        use crate::adapters::hyperliquid::HyperliquidAdapter;
         use crate::adapters::market_catalog::MarketCatalog;
         use crate::adapters::sync::SyncManager;
         use crate::bus::EventBus;
         use crate::data_engine::realtime::RealtimeEngine;
         use crate::risk::{RiskConfig, RiskGateway};
+        use crate::venues::hyperliquid::HyperliquidAdapter;
 
         let bus = EventBus::new(16);
         let catalog = Arc::new(MarketCatalog::new(bus.clone()));

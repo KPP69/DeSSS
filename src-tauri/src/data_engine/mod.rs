@@ -3,7 +3,7 @@ use std::sync::Mutex;
 
 pub mod realtime;
 
-use crate::adapters::market_catalog::Instrument;
+use crate::core::market::Instrument;
 use crate::portable::PortablePaths;
 
 /// One row of the `accounts` table. Metadata only — credentials live in the
@@ -43,7 +43,6 @@ impl DataEngine {
                funding_interval_h REAL,
                settlement_currency TEXT NOT NULL DEFAULT '',
                market_id INTEGER,
-               dex TEXT,
                status TEXT NOT NULL DEFAULT 'trading',
                updated_at INTEGER NOT NULL,
                PRIMARY KEY (exchange_id, symbol)
@@ -144,8 +143,8 @@ impl DataEngine {
         {
             let mut stmt = tx
                 .prepare(
-                    "INSERT INTO instruments(exchange_id, symbol, tick_size, step_size, min_notional, max_leverage, funding_interval_h, settlement_currency, market_id, dex, status, updated_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                    "INSERT INTO instruments(exchange_id, symbol, tick_size, step_size, min_notional, max_leverage, funding_interval_h, settlement_currency, market_id, status, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 )
                 .map_err(|e| format!("写入目录失败：{e}"))?;
             for ins in instruments {
@@ -159,7 +158,6 @@ impl DataEngine {
                     ins.funding_interval_h,
                     ins.settlement_currency,
                     ins.market_id.map(|m| m as i64),
-                    ins.dex,
                     ins.status,
                     ins.updated_at,
                 ])
@@ -175,7 +173,7 @@ impl DataEngine {
         let conn = self.lock();
         let mut stmt = conn
             .prepare(
-                "SELECT exchange_id, symbol, tick_size, step_size, min_notional, max_leverage, funding_interval_h, settlement_currency, market_id, dex, status, updated_at
+                "SELECT exchange_id, symbol, tick_size, step_size, min_notional, max_leverage, funding_interval_h, settlement_currency, market_id, status, updated_at
                  FROM instruments ORDER BY exchange_id, symbol",
             )
             .map_err(|e| format!("读取目录失败：{e}"))?;
@@ -191,9 +189,8 @@ impl DataEngine {
                     funding_interval_h: row.get(6)?,
                     settlement_currency: row.get(7)?,
                     market_id: row.get::<_, Option<i64>>(8)?.map(|m| m as u64),
-                    dex: row.get(9)?,
-                    status: row.get(10)?,
-                    updated_at: row.get(11)?,
+                    status: row.get(9)?,
+                    updated_at: row.get(10)?,
                 })
             })
             .map_err(|e| format!("读取目录失败：{e}"))?;

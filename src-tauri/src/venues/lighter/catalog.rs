@@ -5,10 +5,11 @@
 
 use std::collections::HashMap;
 
-use crate::adapters::market_catalog::{
-    funding_1h_from, funding_apr_pct, get_json, next_hour_utc_ms, normalize_base_symbol, num_field,
-    opt_f64, str_field, MarketInfo,
+use crate::core::market::{
+    funding_1h_from, funding_apr_pct, get_json, next_hour_utc_ms, num_field, opt_f64, str_field,
+    MarketInfo,
 };
+use crate::core::symbol::normalize_base_symbol;
 use crate::venues::lighter::LighterNetwork;
 
 /// Parse Lighter / Lighter RH `orderBookDetails` + `funding-rates` responses.

@@ -2,9 +2,8 @@
 //! Moved verbatim from `adapters/market_catalog.rs`.
 
 use super::ARCUS_REST_URL;
-use crate::adapters::market_catalog::{
-    funding_apr_pct, get_json, normalize_base_symbol, num_field, str_field, MarketInfo,
-};
+use crate::core::market::{funding_apr_pct, get_json, num_field, str_field, MarketInfo};
+use crate::core::symbol::normalize_base_symbol;
 
 /// Parse Arcus `GET /v1/markets` (covers specs, prices and funding in one
 /// call). `nextFundingAt` is in **seconds**, not ms. Max leverage is

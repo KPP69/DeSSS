@@ -28,10 +28,10 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 
-use crate::adapters::market_catalog::MarketInfo;
 use crate::adapters::reconcile::ReconcileState;
 use crate::adapters::ExchangeAdapter;
 use crate::bus::EventBus;
+use crate::core::market::MarketInfo;
 use crate::core::types::{AccountLive, LivePosition};
 use crate::venues::{CredentialField, CredentialKind, StreamPlan, Venue, VenueCtx};
 
@@ -94,8 +94,7 @@ impl ArcusAdapter {
 }
 
 /// Arcus venue: one registry entry, read-only. No order placement
-/// in this phase — the old `signing_private_key` credential is not
-/// collected anymore (nothing signs with it).
+/// in this phase.
 pub struct ArcusVenue;
 
 pub static ARCUS: ArcusVenue = ArcusVenue;
@@ -183,12 +182,6 @@ mod tests {
             "wallet_address": "0x1111111111111111111111111111111111111111"
         }));
         assert!(ARCUS.validate_credentials(&ok).is_ok());
-        // The dropped signing_private_key is not required anymore.
-        let with_key = creds(serde_json::json!({
-            "wallet_address": "0x1111111111111111111111111111111111111111",
-            "signing_private_key": "0xkey"
-        }));
-        assert!(ARCUS.validate_credentials(&with_key).is_ok());
         let missing = creds(serde_json::json!({}));
         assert!(ARCUS.validate_credentials(&missing).is_err());
     }

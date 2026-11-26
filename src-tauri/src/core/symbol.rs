@@ -3,7 +3,10 @@
 //! derives only the cross-exchange *search key* from a native
 //! symbol — it never rewrites the canonical `symbol` itself.
 
-/// Normalize an exchange-native symbol to a cross-exchange base name:
+/// Normalize an exchange-native symbol to a cross-exchange base name.
+/// Only for catalog matching (search keys, base-symbol grouping):
+/// NEVER use the result as a symbol sent to an exchange — the
+/// catalog symbol goes out verbatim (Entropy `io:NVDA` included).
 /// strip the `io:` prefix (Entropy), split off a `/QUOTE` or `-QUOTE`
 /// suffix (Lighter `NVDA/USDG`, Arcus `BTC-USD`), strip a leading `rh`
 /// (Lighter `rhSPY/USDC`), strip a trailing quote suffix (AsterDEX

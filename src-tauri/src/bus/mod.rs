@@ -1,4 +1,4 @@
-use crate::adapters::types::*;
+use crate::core::types::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Mutex;

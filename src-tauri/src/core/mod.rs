@@ -4,6 +4,7 @@
 //! particular.
 
 pub mod book;
+pub mod market;
 pub mod precision;
 pub mod stream_kind;
 pub mod symbol;

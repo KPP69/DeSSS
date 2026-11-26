@@ -43,15 +43,6 @@ impl From<&AccountRow> for AccountView {
     }
 }
 
-pub const SUPPORTED_EXCHANGES: [&str; 6] = [
-    "hyperliquid",
-    "entropy",
-    "lighter",
-    "lighter_robinhood",
-    "asterdex",
-    "arcus",
-];
-
 fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
@@ -159,7 +150,11 @@ pub fn create_account(
     credentials: Map<String, Value>,
 ) -> Result<AccountView, String> {
     let label = validate_label(label)?;
-    if !SUPPORTED_EXCHANGES.contains(&exchange_id) {
+    if crate::venues::all()
+        .iter()
+        .find(|v| v.id() == exchange_id)
+        .is_none()
+    {
         return Err(format!("不支持的交易所：{exchange_id}"));
     }
     let masked = validate_credentials(exchange_id, &credentials)?;
@@ -391,17 +386,20 @@ mod tests {
     }
 
     #[test]
-    fn asterdex_api_mode_validation_fails_with_migration_error() {
+    fn asterdex_old_api_blob_fails_with_missing_field_error() {
+        // A stored api-mode blob carries no wallet_address: with the
+        // mode check deleted (D3), it fails on the missing field —
+        // no migration text, no downgrade, no guessing.
         let creds = serde_json::json!({
             "mode": "api", "api_key": "key", "api_secret": "secret"
         })
         .as_object()
         .unwrap()
         .clone();
-        let err = validate_credentials("asterdex", &creds).expect_err("api mode rejected");
-        assert!(err.contains("已停用 API Key 模式"), "{err}");
+        let err = validate_credentials("asterdex", &creds).expect_err("old blob rejected");
+        assert!(err.contains("缺少必填项：主钱包地址"), "{err}");
+        assert!(!err.contains("已停用"), "{err}");
         let agent = serde_json::json!({
-            "mode": "agent",
             "wallet_address": "0x1111111111111111111111111111111111111111",
             "agent_private_key": "0xkey"
         })

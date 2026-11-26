@@ -16,7 +16,7 @@ impl HyperliquidAdapter {
         match (&self.agent_secret, &self.agent_address) {
             (Some(secret), Some(addr)) => Ok((*secret, addr.clone())),
             _ => Err(AdapterError::Other(
-                "该账户未保存 Agent 钱包私钥，无法下单（请在账户中心重新保存凭证）".to_string(),
+                "该账户未保存 Agent 钱包私钥，无法下单".to_string(),
             )),
         }
     }

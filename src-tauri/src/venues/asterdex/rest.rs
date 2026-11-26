@@ -11,9 +11,9 @@ use super::{
     sign::{next_nonce_value, sign_v3},
     AsterdexAdapter, Snapshot, ASTER_REST_URL,
 };
-use crate::adapters::types::{AccountLive, Balance, LivePosition, Order, OrderRequest, Position};
 use crate::adapters::{f64_from, now_ms, AdapterResult, ExchangeAdapter};
 use crate::bus::AppEvent;
+use crate::core::types::{AccountLive, Balance, LivePosition, Order, OrderRequest, Position};
 
 const POLL_INTERVAL: Duration = Duration::from_secs(10);
 
@@ -169,10 +169,7 @@ impl AsterdexAdapter {
     /// `nonce`; the EIP-712 signature is appended last. No API-key
     /// header — V3 authenticates by signature alone.
     async fn signed_get_v3(&self, path: &str, endpoint_params: &str) -> Result<Value, String> {
-        let agent = self
-            .agent
-            .as_ref()
-            .ok_or_else(|| "该账户未配置 Agent 钱包凭证".to_string())?;
+        let agent = &self.agent;
         let nonce = self.next_nonce();
         let auth = format!("user={}&signer={}&nonce={nonce}", agent.user, agent.signer);
         let msg = if endpoint_params.is_empty() {
@@ -227,22 +224,11 @@ impl AsterdexAdapter {
         };
         Ok((snap, balance))
     }
-    /// One REST read of the account + positions. Returns (snapshot, balance).
-    ///
-    /// V3 (EIP-712) is the only live path. API Key / Secret accounts
-    /// have no V3 equivalent — the V3 spec authenticates USER_DATA by
-    /// signer + signature only — so they fail here with a migration
-    /// message instead of calling the retired V1 endpoints.
+    /// One REST read of the account + positions (V3 EIP-712 path).
+    /// V3 is the only path: USER_DATA authenticates by signer +
+    /// signature, there is no API-key read.
     async fn fetch_account_state(&self) -> Result<(Snapshot, Balance), String> {
-        if self.agent.is_some() {
-            self.fetch_account_state_v3().await
-        } else {
-            Err(
-                "AsterDEX V1 接口已于 2026-10-10 停用，API Key/Secret 账户无法读取账户数据；\
-                请在账户页重新保存为 Agent 钱包凭证（主钱包地址 + Agent 私钥）"
-                    .to_string(),
-            )
-        }
+        self.fetch_account_state_v3().await
     }
     async fn poll_account(&self) {
         // Post-fill grace (spec §3): a poll landing inside the window
@@ -269,18 +255,8 @@ impl AsterdexAdapter {
             }
         }
     }
-    /// REST 轮询循环：只轮询 Agent 钱包（V3）；未配置 Agent 凭证时
-    /// 记原因后退出，不发任何请求。
+    /// REST 轮询循环：轮询 Agent 钱包（V3）。
     async fn rest_loop(&self) {
-        // Agent-wallet mode (V3) polls; without agent credentials the
-        // reason is logged once and the loop exits.
-        if self.agent.is_none() {
-            self.log(
-                "warn",
-                "账户读取已跳过：未配置 Agent 钱包凭证——只显示公开行情".to_string(),
-            );
-            return;
-        }
         self.poll_account().await;
         let mut tick = tokio::time::interval(POLL_INTERVAL);
         tick.tick().await;
@@ -393,11 +369,6 @@ impl ExchangeAdapter for AsterdexAdapter {
 mod tests {
     use super::super::sign::*;
     use super::*;
-    use std::collections::HashMap;
-    use std::sync::{Arc, RwLock};
-
-    use crate::adapters::reconcile::ReconcileState;
-    use crate::bus::EventBus;
 
     #[test]
     fn position_risk_parses_signed_amounts_and_skips_zero_rows() {
@@ -560,31 +531,6 @@ mod tests {
         assert!((pnl - 0.0).abs() < 1e-9);
         assert_eq!(currency, "BUSD");
         assert!(parse_positions(&v["positions"]).is_empty());
-    }
-
-    /// PR-0.5.1: an adapter without Agent-wallet credentials has no
-    /// V3 read path — the V3 spec authenticates USER_DATA by EIP-712
-    /// signer + signature only — so the dispatch fails fast with the
-    /// migration message. No network is touched: the error is returned
-    /// before any request is built.
-    #[tokio::test]
-    async fn adapter_without_agent_wallet_fails_with_migration_error() {
-        let adapter = AsterdexAdapter::new(
-            "asterdex",
-            "acc-1".to_string(),
-            EventBus::new(16),
-            Arc::new(RwLock::new(HashMap::new())),
-            Arc::new(ReconcileState::new()),
-        );
-        let err = match adapter.fetch_account_state().await {
-            Ok(_) => panic!("fetch without an agent wallet must fail"),
-            Err(e) => e,
-        };
-        assert!(err.contains("V1"), "error names V1: {err}");
-        assert!(
-            err.contains("Agent"),
-            "error points at Agent wallets: {err}"
-        );
     }
 
     #[test]

@@ -15,7 +15,7 @@ use tauri::{AppHandle, Emitter, State};
 //     so EVERY struct that crosses the boundary needs
 //     `#[serde(rename_all = "camelCase")]` — otherwise the frontend's
 //     camelCase payload fails with "missing field ...". Wire DTOs live
-//     in the module that owns them (`adapters::types`, `risk`,
+//     in the module that owns them (`core::types`, `risk`,
 //     `data_engine::realtime`), NOT here, so their alignment tests run
 //     in the scratch crate (this file is not included there).
 #[derive(serde::Serialize)]
@@ -97,8 +97,8 @@ pub fn spawn_bus_forwarder(handle: AppHandle, state: Arc<AppState>) {
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeSnapshot {
-    pub books: Vec<crate::adapters::types::OrderBook>,
-    pub live: Vec<crate::adapters::types::AccountLive>,
+    pub books: Vec<crate::core::types::OrderBook>,
+    pub live: Vec<crate::core::types::AccountLive>,
     pub logs: Vec<crate::bus::LogLine>,
 }
 
@@ -155,7 +155,7 @@ pub fn set_proxy(url: String) -> Result<ProxyState, String> {
 pub async fn connect_account(
     state: State<'_, Arc<AppState>>,
     id: String,
-) -> Result<crate::adapters::types::AccountLive, String> {
+) -> Result<crate::core::types::AccountLive, String> {
     // Connect failures used to be invisible: the frontend swallowed the
     // error and the backend logged nothing, so a failed click left the
     // account on "未连接" with no feedback at all. Log the reason to the
@@ -182,7 +182,7 @@ pub async fn connect_account(
 async fn connect_account_inner(
     state: Arc<AppState>,
     id: String,
-) -> Result<crate::adapters::types::AccountLive, String> {
+) -> Result<crate::core::types::AccountLive, String> {
     if state.sync.is_running(&id) {
         return Err("该账户已连接".to_string());
     }
@@ -242,7 +242,7 @@ async fn connect_account_inner(
         .live_states()
         .into_iter()
         .find(|l| l.account_id == id)
-        .unwrap_or(crate::adapters::types::AccountLive {
+        .unwrap_or(crate::core::types::AccountLive {
             account_id: id,
             adapter_id: row.exchange_id,
             wallet_key: None,
@@ -286,9 +286,7 @@ pub async fn disconnect_account(state: State<'_, Arc<AppState>>, id: String) -> 
 }
 
 #[tauri::command]
-pub fn list_account_live(
-    state: State<'_, Arc<AppState>>,
-) -> Vec<crate::adapters::types::AccountLive> {
+pub fn list_account_live(state: State<'_, Arc<AppState>>) -> Vec<crate::core::types::AccountLive> {
     state.sync.live_states()
 }
 
@@ -457,8 +455,9 @@ pub struct CatalogStatus {
 
 #[tauri::command]
 pub fn get_catalog_status(state: State<'_, Arc<AppState>>) -> CatalogStatus {
-    let venues = crate::adapters::market_catalog::KNOWN_EXCHANGES
+    let venues = crate::venues::all()
         .iter()
+        .map(|v| v.id())
         .map(|id| {
             let (rows, updated_at) = state.catalog.venue_status(id);
             VenueCatalogStatus {
@@ -571,8 +570,8 @@ fn exec_deps(state: &State<'_, Arc<AppState>>) -> crate::execution::ExecDeps {
 #[tauri::command]
 pub async fn place_order(
     state: State<'_, Arc<AppState>>,
-    input: crate::adapters::types::PlaceOrderInput,
-) -> Result<crate::adapters::types::OrderInfo, String> {
+    input: crate::core::types::PlaceOrderInput,
+) -> Result<crate::core::types::OrderInfo, String> {
     let deps = exec_deps(&state);
     crate::execution::place_order(
         &deps,
@@ -599,7 +598,7 @@ pub async fn cancel_order(
     account_id: String,
     order_id: String,
     symbol: String,
-) -> Result<crate::adapters::types::OrderInfo, String> {
+) -> Result<crate::core::types::OrderInfo, String> {
     let deps = exec_deps(&state);
     crate::execution::cancel_order(&deps, &account_id, &order_id, &symbol).await
 }
@@ -609,7 +608,7 @@ pub async fn cancel_order(
 pub async fn list_open_orders(
     state: State<'_, Arc<AppState>>,
     account_id: String,
-) -> Result<Vec<crate::adapters::types::OrderInfo>, String> {
+) -> Result<Vec<crate::core::types::OrderInfo>, String> {
     let deps = exec_deps(&state);
     crate::execution::list_open_orders(&deps, &account_id).await
 }
@@ -617,14 +616,12 @@ pub async fn list_open_orders(
 /// Order records kept by the execution engine (newest first).
 /// Sync command: the store is in-memory.
 #[tauri::command]
-pub fn list_order_records(
-    state: State<'_, Arc<AppState>>,
-) -> Vec<crate::adapters::types::OrderInfo> {
+pub fn list_order_records(state: State<'_, Arc<AppState>>) -> Vec<crate::core::types::OrderInfo> {
     state.orders.list()
 }
 
 /// Recorded fills (newest first). Sync command.
 #[tauri::command]
-pub fn list_order_fills(state: State<'_, Arc<AppState>>) -> Vec<crate::adapters::types::TradeInfo> {
+pub fn list_order_fills(state: State<'_, Arc<AppState>>) -> Vec<crate::core::types::TradeInfo> {
     state.orders.list_fills()
 }

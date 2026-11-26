@@ -15,8 +15,8 @@
 //!   availableBalance / unrealizedProfit) with the totals as fallback;
 //!   the displayed settlement currency is the asset with the largest
 //!   margin balance (USDT, USDC, USDF, USD1, ...).
-//! - No credentials at all: the reason is logged to the console and the
-//!   adapter skips REST polling, so the account stays unconnected.
+//! - No credentials at all: build fails on the missing field, so no
+//!   adapter is constructed and the account stays unconnected.
 
 //! Venue home (PR-1.3 commit 2): the adapter moved verbatim from
 //! `adapters/asterdex.rs`; the V3 catalog moved from
@@ -29,11 +29,6 @@ pub mod rest;
 pub mod sign;
 pub mod stream;
 
-// Re-exported at the venue root so the `adapters/asterdex.rs` shim
-// (deleted in commit 3) keeps resolving the signing helpers the
-// Hyperliquid build and the sync manager use.
-pub use self::sign::{address_from_secret, decode_agent_secret};
-
 use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, RwLock};
@@ -41,10 +36,10 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 
-use crate::adapters::market_catalog::MarketInfo;
 use crate::adapters::reconcile::ReconcileState;
 use crate::adapters::ExchangeAdapter;
 use crate::bus::EventBus;
+use crate::core::market::MarketInfo;
 use crate::core::types::{AccountLive, LivePosition};
 use crate::venues::{CredentialField, CredentialKind, StreamPlan, Venue, VenueCtx};
 
@@ -73,10 +68,9 @@ struct Snapshot {
 pub struct AsterdexAdapter {
     id: String,
     account_id: String,
-    /// V3 Agent-wallet credentials. None when the account stores no
-    /// agent credentials (the adapter then fails every read with the
-    /// migration error instead of polling).
-    agent: Option<AgentCreds>,
+    /// V3 Agent-wallet credentials. Always present: build fails
+    /// without them, so no read path ever runs credential-less.
+    agent: AgentCreds,
     http: reqwest::Client,
     bus: EventBus,
     live: Arc<RwLock<HashMap<String, AccountLive>>>,
@@ -95,9 +89,14 @@ pub struct AsterdexAdapter {
 }
 
 impl AsterdexAdapter {
-    pub fn new(
+    /// Agent-wallet mode (V3 EIP-712). The secret was already decoded
+    /// and checked against `signer` by the sync manager.
+    pub fn new_agent(
         id: &str,
         account_id: String,
+        user: String,
+        signer: String,
+        secret: [u8; 32],
         bus: EventBus,
         live: Arc<RwLock<HashMap<String, AccountLive>>>,
         reconcile: Arc<ReconcileState>,
@@ -105,7 +104,11 @@ impl AsterdexAdapter {
         Self {
             id: id.to_string(),
             account_id,
-            agent: None,
+            agent: AgentCreds {
+                user,
+                signer,
+                secret,
+            },
             http: crate::net::shared_http_client(),
             bus,
             live,
@@ -120,28 +123,6 @@ impl AsterdexAdapter {
             last_nonce: Mutex::new(0),
             reconcile,
             wake: Arc::new(tokio::sync::Notify::new()),
-        }
-    }
-
-    /// Agent-wallet mode (V3 EIP-712). The secret was already decoded
-    /// and checked against `signer` by the sync manager.
-    pub fn new_agent(
-        id: &str,
-        account_id: String,
-        user: String,
-        signer: String,
-        secret: [u8; 32],
-        bus: EventBus,
-        live: Arc<RwLock<HashMap<String, AccountLive>>>,
-        reconcile: Arc<ReconcileState>,
-    ) -> Self {
-        Self {
-            agent: Some(AgentCreds {
-                user,
-                signer,
-                secret,
-            }),
-            ..Self::new(id, account_id, bus, live, reconcile)
         }
     }
 }
@@ -189,13 +170,6 @@ impl Venue for AsterdexVenue {
         &self,
         creds: &serde_json::Map<String, serde_json::Value>,
     ) -> Result<String, String> {
-        // Stored api-mode credentials fail fast with the migration
-        // error (PR-0.5.1). `mode` is not a declared field anymore —
-        // new accounts never save one — but old blobs still carry it.
-        let mode = crate::accounts::field_str(creds, "mode").unwrap_or("agent");
-        if mode != "agent" {
-            return Err("AsterDEX 已停用 API Key 模式，请用 Agent 钱包重新保存凭证".to_string());
-        }
         let wallet = crate::accounts::require_str(creds, "wallet_address", "主钱包地址")?;
         crate::accounts::require_str(creds, "agent_private_key", "Agent 钱包私钥")?;
         Ok(crate::accounts::mask_address(&wallet))
@@ -206,24 +180,13 @@ impl Venue for AsterdexVenue {
         creds: &serde_json::Value,
         ctx: &VenueCtx,
     ) -> Result<Arc<dyn ExchangeAdapter>, String> {
-        // Same legacy mode check as validate: a stored api-mode
-        // account fails here with the migration error, never silently.
-        let mode = creds
-            .get("mode")
-            .and_then(|v| v.as_str())
-            .unwrap_or("agent");
-        if mode != "agent" {
-            return Err("AsterDEX 已停用 API Key 模式，请用 Agent 钱包重新保存凭证".to_string());
-        }
         let user = crate::adapters::sync::valid_address(creds, "wallet_address", "主钱包地址")?;
         let secret_hex = creds
             .get("agent_private_key")
             .and_then(|v| v.as_str())
             .ok_or_else(|| "保存的凭证缺少 Agent 钱包私钥".to_string())?;
         let secret = sign::decode_agent_secret(secret_hex)?;
-        // The agent (signer) address is derived from the key — no
-        // separate agent_wallet_address field is stored or read
-        // anymore (PR-1.3 commit 2: the old field is ignored).
+        // The agent (signer) address is derived from the key.
         let signer = sign::address_from_secret(&secret);
         Ok(Arc::new(AsterdexAdapter::new_agent(
             self.id(),
@@ -256,28 +219,12 @@ mod tests {
     }
 
     #[test]
-    fn validate_accepts_agent_fields_and_rejects_api_mode() {
+    fn validate_accepts_agent_fields() {
         let agent = creds(serde_json::json!({
             "wallet_address": "0x1111111111111111111111111111111111111111",
             "agent_private_key": "0xkey"
         }));
         assert!(ASTERDEX.validate_credentials(&agent).is_ok());
-        // Old stored api-mode blob: migration error, before any
-        // field check.
-        let api = creds(serde_json::json!({
-            "mode": "api", "api_key": "key", "api_secret": "secret"
-        }));
-        let err = ASTERDEX
-            .validate_credentials(&api)
-            .expect_err("api mode rejected");
-        assert!(err.contains("已停用 API Key 模式"), "{err}");
-        // The dropped agent_wallet_address is not required anymore.
-        let no_agent_addr = creds(serde_json::json!({
-            "wallet_address": "0x1111111111111111111111111111111111111111",
-            "agent_private_key": "0xkey",
-            "agent_wallet_address": "0x2222222222222222222222222222222222222222"
-        }));
-        assert!(ASTERDEX.validate_credentials(&no_agent_addr).is_ok());
         let missing = creds(serde_json::json!({ "agent_private_key": "0xkey" }));
         assert!(ASTERDEX.validate_credentials(&missing).is_err());
     }

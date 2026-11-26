@@ -172,8 +172,10 @@ pub fn run() {
             {
                 let state = catalog_state.clone();
                 tauri::async_runtime::spawn(async move {
-                    use crate::adapters::market_catalog::KNOWN_EXCHANGES;
-                    let ids: Vec<String> = KNOWN_EXCHANGES.iter().map(|s| s.to_string()).collect();
+                    let ids: Vec<String> = crate::venues::all()
+                        .iter()
+                        .map(|v| v.id().to_string())
+                        .collect();
                     state.catalog.refresh_exchanges(&ids, false).await;
                     loop {
                         tokio::time::sleep(Duration::from_secs(12 * 3600)).await;

@@ -34,10 +34,10 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 
-use crate::adapters::market_catalog::MarketInfo;
 use crate::adapters::reconcile::ReconcileState;
 use crate::adapters::ExchangeAdapter;
 use crate::bus::EventBus;
+use crate::core::market::MarketInfo;
 use crate::core::types::{AccountLive, LivePosition};
 use crate::venues::{CredentialField, CredentialKind, StreamPlan, Venue, VenueCtx};
 
@@ -117,7 +117,7 @@ impl HyperliquidAdapter {
     ) -> Self {
         let agent_address = agent_secret
             .as_ref()
-            .map(|s| crate::adapters::asterdex::address_from_secret(s));
+            .map(|s| crate::venues::asterdex::sign::address_from_secret(s));
         Self {
             id: id.to_string(),
             dex: dex.map(|d| d.to_string()),
@@ -217,7 +217,7 @@ impl Venue for HyperliquidVenue {
         // malformed key fails fast here, like AsterDEX.
         let agent_secret = match creds.get("agent_private_key").and_then(|v| v.as_str()) {
             Some(k) if !k.trim().is_empty() => Some(
-                crate::adapters::asterdex::decode_agent_secret(k)
+                crate::venues::asterdex::sign::decode_agent_secret(k)
                     .map_err(|e| format!("Agent 钱包私钥不正确：{e}"))?,
             ),
             _ => None,

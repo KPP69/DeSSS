@@ -9,10 +9,10 @@ use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 
-use crate::adapters::market_catalog::MarketInfo;
 use crate::adapters::reconcile::ReconcileState;
 use crate::adapters::ExchangeAdapter;
 use crate::bus::EventBus;
+use crate::core::market::MarketInfo;
 use crate::core::stream_kind::StreamKind;
 use crate::core::types::AccountLive;
 

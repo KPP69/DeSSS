@@ -29,13 +29,13 @@ use futures_util::{SinkExt, StreamExt};
 use tauri::async_runtime::JoinHandle;
 use tokio_tungstenite::tungstenite::Message;
 
-use crate::adapters::book::BookState;
 use crate::adapters::market_catalog::MarketCatalog;
 use crate::adapters::now_ms;
 use crate::adapters::sync::SyncManager;
-use crate::adapters::types::OrderBook;
 use crate::bus::{AppEvent, EventBus};
+use crate::core::book::BookState;
 use crate::core::stream_kind::StreamKind;
+use crate::core::types::OrderBook;
 use crate::net::ws::connect_ws;
 
 /// Milliseconds without a frame after which a streamed book counts as
@@ -46,15 +46,28 @@ pub const STREAM_STALE_MS: i64 = 5_000;
 pub type StreamKey = (String, String);
 
 /// Static dial plan for one key, resolved once when the task starts.
-/// A plan failure (unknown Lighter market id, unsupported exchange) is
-/// permanent: the task logs once and stops instead of retrying forever.
-#[derive(Debug)]
+/// A plan failure is transient (missing catalog data — retried, see
+/// `resolve_plan_with_retry`) or permanent (unknown exchange — the
+/// task logs once and stops).
+#[derive(Debug, PartialEq, Eq)]
 struct Plan {
     kind: StreamKind,
     url: String,
     /// Subscribe message to send after the handshake, if any
     /// (AsterDEX encodes the stream in the URL itself).
     subscribe: Option<String>,
+}
+
+/// Why a dial plan could not be built: transient (missing
+/// catalog data — the catalog refresh fills it, so retry) vs
+/// permanent (unknown exchange — the registry will never know
+/// it, so stop). A venue's own stream error is always transient:
+/// the only way `Venue::stream` fails today is a missing catalog
+/// market id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PlanError {
+    Transient(String),
+    Permanent(String),
 }
 
 /// What one parsed frame asks the stream loop to do.
@@ -197,87 +210,90 @@ impl RealtimeEngine {
     /// Resolve the dial plan for a key. Lighter needs the numeric market
     /// id from the catalog (the row must already be cached — the Data
     /// page only streams symbols its search just returned).
-    fn plan(&self, key: &StreamKey) -> Result<Plan, String> {
+    fn plan(&self, key: &StreamKey) -> Result<Plan, PlanError> {
         let (exchange_id, symbol) = (&key.0, &key.1);
-        // Transition rule (PR-1.2): a registered venue owns its dial
-        // plan; unregistered exchanges fall through to the old match,
-        // which PR-1.4 deletes with the else branches.
-        if let Some(v) = crate::venues::all()
+        let Some(v) = crate::venues::all()
             .iter()
             .find(|v| v.id() == exchange_id.as_str())
-        {
-            let sp = v.stream(symbol, self.catalog.market_id(exchange_id, symbol))?;
-            return Ok(Plan {
-                kind: sp.kind,
-                url: sp.url,
-                subscribe: sp.subscribe,
-            });
-        }
-        match exchange_id.as_str() {
-            // Hyperliquid main and Entropy (HIP-3 dex `io`) share the
-            // socket. The catalog already stores the dex-prefixed
-            // symbol (`io:NVDA`), so the coin goes out exactly as
-            // stored — the old code prefixed it again here and the
-            // stream subscribed to the nonexistent `io:io:NVDA`.
-            "hyperliquid" | "entropy" => Ok(Plan {
-                kind: StreamKind::Hyperliquid,
-                url: "wss://api.hyperliquid.xyz/ws".to_string(),
-                subscribe: Some(
-                    serde_json::json!({
-                        "method": "subscribe",
-                        "subscription": { "type": "l2Book", "coin": symbol }
-                    })
-                    .to_string(),
-                ),
-            }),
-            "lighter" | "lighter_robinhood" => {
-                let market_id = self
-                    .catalog
-                    .market_id(exchange_id, symbol)
-                    .ok_or_else(|| format!("目录中没有 {symbol} 的市场编号"))?;
-                let base = if exchange_id == "lighter" {
-                    "wss://mainnet.zklighter.elliot.ai/stream"
-                } else {
-                    "wss://api.rh.lighter.xyz/stream"
-                };
-                Ok(Plan {
-                    kind: StreamKind::Lighter,
-                    // `?readonly=true` is the documented way to read
-                    // public data from a restricted region.
-                    url: format!("{base}?readonly=true"),
-                    subscribe: Some(
-                        serde_json::json!({
-                            "type": "subscribe",
-                            "channel": format!("order_book/{market_id}")
-                        })
-                        .to_string(),
-                    ),
-                })
+        else {
+            return Err(PlanError::Permanent(format!("未知交易所：{exchange_id}")));
+        };
+        let sp = v
+            .stream(symbol, self.catalog.market_id(exchange_id, symbol))
+            .map_err(PlanError::Transient)?;
+        Ok(Plan {
+            kind: sp.kind,
+            url: sp.url,
+            subscribe: sp.subscribe,
+        })
+    }
+
+    /// Resolve the dial plan, retrying transient failures (missing
+    /// catalog data) every 30s or immediately on `CatalogUpdated`,
+    /// whichever first. Permanent failures (unknown exchange) log
+    /// once and stop. Returns `None` when the plan can never be
+    /// built or the key is no longer wanted. Logs only when the
+    /// error changes or when a retry finally succeeds; retries are
+    /// uncapped, and a failed plan holds no socket or task (only
+    /// the plan is re-resolved — dialing starts after it succeeds).
+    async fn resolve_plan_with_retry(self: &Arc<Self>, key: &StreamKey) -> Option<Plan> {
+        let mut last_err: Option<String> = None;
+        let mut rx = self.bus.subscribe();
+        loop {
+            match self.plan(key) {
+                Ok(p) => {
+                    if last_err.is_some() {
+                        self.bus.log(
+                            "info",
+                            "stream",
+                            format!("{} {} 实时流订阅恢复", key.0, key.1),
+                        );
+                    }
+                    return Some(p);
+                }
+                Err(PlanError::Permanent(e)) => {
+                    self.bus.log(
+                        "error",
+                        "stream",
+                        format!("{} {} 实时流无法订阅：{e}", key.0, key.1),
+                    );
+                    return None;
+                }
+                Err(PlanError::Transient(e)) => {
+                    if last_err.as_deref() != Some(e.as_str()) {
+                        self.bus.log(
+                            "warn",
+                            "stream",
+                            format!("{} {} 实时流暂无订阅计划，30s 后重试：{e}", key.0, key.1),
+                        );
+                        last_err = Some(e);
+                    }
+                    // Wait 30s or until the catalog updates, whichever
+                    // first. A lagged receiver means events were missed,
+                    // so retry now; a closed channel (shutdown) waits
+                    // out the 30s instead of spinning.
+                    let update = async {
+                        loop {
+                            match rx.recv().await {
+                                Ok(AppEvent::CatalogUpdated) => break,
+                                Ok(_) => continue,
+                                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => break,
+                                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                                    tokio::time::sleep(Duration::from_secs(30)).await;
+                                    break;
+                                }
+                            }
+                        }
+                    };
+                    tokio::select! {
+                        _ = tokio::time::sleep(Duration::from_secs(30)) => {}
+                        _ = update => {}
+                    }
+                    if !self.is_wanted(key) {
+                        return None;
+                    }
+                }
             }
-            "asterdex" => Ok(Plan {
-                kind: StreamKind::Asterdex,
-                // bookTicker is the top of book only — exactly what the
-                // Data page shows — and needs no sequence handling.
-                url: format!(
-                    "wss://fstream.asterdex.com/ws/{}@bookTicker",
-                    symbol.to_lowercase()
-                ),
-                subscribe: None,
-            }),
-            "arcus" => Ok(Plan {
-                kind: StreamKind::Arcus,
-                url: "wss://api.arcus.xyz/v1/ws".to_string(),
-                subscribe: Some(
-                    serde_json::json!({
-                        "type": "subscribe",
-                        "channel": "l2Orderbook",
-                        "id": symbol,
-                        "nLevels": 20
-                    })
-                    .to_string(),
-                ),
-            }),
-            other => Err(format!("该交易所暂不支持实时流：{other}")),
         }
     }
 
@@ -286,16 +302,8 @@ impl RealtimeEngine {
     /// retries with backoff (2s, doubling to 30s); a long-lived stream
     /// resets the backoff.
     async fn run_stream(self: Arc<Self>, key: StreamKey) {
-        let plan = match self.plan(&key) {
-            Ok(p) => p,
-            Err(e) => {
-                self.bus.log(
-                    "error",
-                    "stream",
-                    format!("{} {} 实时流无法订阅：{e}", key.0, key.1),
-                );
-                return;
-            }
+        let Some(plan) = self.resolve_plan_with_retry(&key).await else {
+            return;
         };
         let mut backoff = Duration::from_secs(2);
         loop {
@@ -498,8 +506,8 @@ impl RealtimeEngine {
                 FrameAction::Publish(OrderBook {
                     adapter_id: key.0.clone(),
                     symbol: key.1.clone(),
-                    bids: vec![crate::adapters::types::PriceLevel(bid_px, bid_sz)],
-                    asks: vec![crate::adapters::types::PriceLevel(ask_px, ask_sz)],
+                    bids: vec![crate::core::types::PriceLevel(bid_px, bid_sz)],
+                    asks: vec![crate::core::types::PriceLevel(ask_px, ask_sz)],
                     ts: now_ms(),
                 })
             }
@@ -538,6 +546,8 @@ impl RealtimeEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::core::market::MarketInfo;
     use crate::venues::hyperliquid::stream::parse_hl_l2book;
 
     fn val(s: &str) -> serde_json::Value {
@@ -665,7 +675,10 @@ mod tests {
         for exchange_id in ["lighter", "lighter_robinhood"] {
             let key: StreamKey = (exchange_id.to_string(), "BTC-USDC".to_string());
             let err = engine.plan(&key).expect_err("no catalog rows");
-            assert_eq!(err, "目录中没有 BTC-USDC 的市场编号");
+            assert_eq!(
+                err,
+                PlanError::Transient("目录中没有 BTC-USDC 的市场编号".to_string())
+            );
         }
     }
 
@@ -692,5 +705,67 @@ mod tests {
                 .wait_for_first_frame(&key, Duration::from_secs(2))
                 .await
         );
+    }
+
+    #[test]
+    fn plan_error_is_transient_for_missing_market_id_and_permanent_for_unknown_exchange() {
+        let bus = EventBus::new(16);
+        let catalog = Arc::new(MarketCatalog::new(bus.clone()));
+        let engine = RealtimeEngine::new(bus, catalog, None);
+        // Lighter with an empty catalog: no market id -> transient.
+        let key: StreamKey = ("lighter".to_string(), "BTC-USDC".to_string());
+        assert_eq!(
+            engine.plan(&key),
+            Err(PlanError::Transient(
+                "目录中没有 BTC-USDC 的市场编号".to_string()
+            ))
+        );
+        // An exchange the registry never heard of: permanent.
+        let key: StreamKey = ("nope".to_string(), "BTC".to_string());
+        assert_eq!(
+            engine.plan(&key),
+            Err(PlanError::Permanent("未知交易所：nope".to_string()))
+        );
+    }
+
+    #[test]
+    fn plan_succeeds_once_the_catalog_row_arrives() {
+        let bus = EventBus::new(16);
+        let catalog = Arc::new(MarketCatalog::new(bus.clone()));
+        let engine = RealtimeEngine::new(bus, catalog.clone(), None);
+        let row = MarketInfo {
+            exchange_id: "lighter".to_string(),
+            symbol: "BTC-USDC".to_string(),
+            base_symbol: "BTC".to_string(),
+            market_id: Some(1),
+            settlement_currency: "USDC".to_string(),
+            max_leverage: None,
+            tick_size: None,
+            step_size: None,
+            min_notional: None,
+            bid_px: None,
+            ask_px: None,
+            mid_px: None,
+            mark_px: None,
+            index_px: None,
+            funding_rate_raw: None,
+            funding_interval_hours: None,
+            funding_1h: None,
+            funding_apr: None,
+            next_funding_time: None,
+            volume_24h_usd: None,
+            open_interest_usd: None,
+            updated_at: 0,
+        };
+        catalog.store("lighter", vec![row]);
+        let key: StreamKey = ("lighter".to_string(), "BTC-USDC".to_string());
+        let plan = engine.plan(&key).expect("plan");
+        assert_eq!(
+            plan.url,
+            "wss://mainnet.zklighter.elliot.ai/stream?readonly=true"
+        );
+        let sub: serde_json::Value =
+            serde_json::from_str(plan.subscribe.as_ref().expect("subscribe")).expect("json");
+        assert_eq!(sub["channel"].as_str().unwrap(), "order_book/1");
     }
 }

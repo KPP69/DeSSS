@@ -42,15 +42,13 @@
 //! risk commands; the in-memory config is the single source of truth
 //! while the app runs.
 
-pub mod precision;
-
 use std::sync::RwLock;
 
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
+use crate::core::precision::{is_aligned, to_decimal};
 use crate::data_engine::DataEngine;
-use precision::{is_aligned, to_decimal};
 
 /// Which directions new orders may open. "sell" here means opening a
 /// short; closing a long by selling is not a new short and is not

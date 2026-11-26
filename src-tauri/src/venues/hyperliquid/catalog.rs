@@ -3,9 +3,7 @@
 //! `adapters/market_catalog.rs` (PR-1.2).
 
 use super::HL_INFO_URL;
-use crate::adapters::market_catalog::{
-    funding_apr_pct, hyperliquid_tick_size, next_hour_utc_ms, num_field, str_field, MarketInfo,
-};
+use crate::core::market::{funding_apr_pct, next_hour_utc_ms, num_field, str_field, MarketInfo};
 use crate::core::symbol::normalize_base_symbol;
 
 pub async fn fetch_hyperliquid(
@@ -194,4 +192,26 @@ mod tests {
         assert_eq!(thin.bid_px, None);
         assert_eq!(thin.mid_px, None);
     }
+    #[test]
+    fn hyperliquid_tick_size_cases() {
+        // Live-verified: BTC ~$58k -> $1.00, ETH ~$1641 -> $0.10.
+        assert!((hyperliquid_tick_size(58_000.0, 5) - 1.0).abs() < 1e-12);
+        assert!((hyperliquid_tick_size(1641.0, 3) - 0.1).abs() < 1e-12);
+        assert!((hyperliquid_tick_size(143.0, 3) - 0.01).abs() < 1e-12);
+        // Non-positive price falls back to the decimals constraint:
+        // szDecimals 5 -> at most 1 price decimal -> tick 0.1.
+        assert!((hyperliquid_tick_size(0.0, 5) - 0.1).abs() < 1e-12);
+    }
+}
+
+/// Hyperliquid tick size: prices must satisfy <= 5 significant figures AND
+/// <= (6 - szDecimals) decimals, so the effective tick is the larger of the
+/// two constraints. Verified live: BTC ~$58k -> $1.00, ETH ~$1641 -> $0.10.
+pub(crate) fn hyperliquid_tick_size(mark_px: f64, sz_decimals: i64) -> f64 {
+    let decimals_tick = 10f64.powi(-(6 - sz_decimals) as i32);
+    if mark_px <= 0.0 {
+        return decimals_tick;
+    }
+    let sig_tick = 10f64.powi(mark_px.log10().floor() as i32 - 4);
+    sig_tick.max(decimals_tick)
 }

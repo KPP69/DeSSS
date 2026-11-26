@@ -10,9 +10,9 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use super::{LighterAdapter, LighterNetwork, Snapshot};
-use crate::adapters::types::{AccountLive, Balance, LivePosition, Order, OrderRequest, Position};
 use crate::adapters::{f64_from, now_ms, AdapterResult, ExchangeAdapter};
 use crate::bus::AppEvent;
+use crate::core::types::{AccountLive, Balance, LivePosition, Order, OrderRequest, Position};
 
 const POLL_INTERVAL: Duration = Duration::from_secs(10);
 
