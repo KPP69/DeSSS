@@ -241,6 +241,7 @@ async fn connect_account_inner(
         .unwrap_or(crate::adapters::types::AccountLive {
             account_id: id,
             adapter_id: row.exchange_id,
+            wallet_key: None,
             status: "connecting".to_string(),
             latency_ms: None,
             equity_usd: 0.0,
@@ -487,7 +488,10 @@ pub async fn place_order(
         &deps,
         crate::execution::PlaceIntent {
             account_id: input.account_id,
-            symbol: input.symbol.trim().to_uppercase(),
+            // No case rewrite here either: the execution layer looks
+            // the symbol up case-insensitively and uses the catalog
+            // row's symbol verbatim downstream (rule 2.2).
+            symbol: input.symbol.trim().to_string(),
             side: input.side,
             order_type: input.order_type,
             quantity: input.quantity,

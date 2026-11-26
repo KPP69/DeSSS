@@ -99,8 +99,7 @@ pub fn run() {
                     let mut tick = tokio::time::interval(Duration::from_secs(10));
                     loop {
                         tick.tick().await;
-                        let total: f64 =
-                            state.sync.live_states().iter().map(|s| s.equity_usd).sum();
+                        let total: f64 = state.sync.total_equity();
                         if total > 0.0 {
                             state.risk.record_equity(total);
                         }

@@ -183,6 +183,20 @@ struct AssetMeta {
     dex_offset: u32,
 }
 
+/// HIP-3 dex offset from the null-filtered `perpDexs` name list:
+/// the official SDK's rule (`hyperliquid/info.py`,
+/// `for i, perp_dex in enumerate(self.perp_dexs()[1:])` →
+/// `110000 + i * 10000`). `names` is that filtered list — the raw
+/// response's `[0]` is the null main slot, so the 0-based index here
+/// IS the SDK's `i`. (The old code subtracted 1 again and put `io`
+/// at 190000 instead of 200000.)
+fn dex_offset_for(names: &[String], dex: &str) -> Option<u32> {
+    names
+        .iter()
+        .position(|n| n == dex)
+        .map(|pos| 110_000 + pos as u32 * 10_000)
+}
+
 impl HyperliquidAdapter {
     pub fn new(
         id: &str,
@@ -244,6 +258,7 @@ impl HyperliquidAdapter {
         let live = AccountLive {
             account_id: self.account_id.clone(),
             adapter_id: self.id.clone(),
+            wallet_key: Some(self.address.clone()),
             status,
             latency_ms: self.latency_ms(),
             equity_usd: snap.equity_usd,
@@ -469,15 +484,6 @@ fn hl_side_to_side(s: &str) -> String {
     }
 }
 
-/// HIP-3 coins come back prefixed with the dex name (`io:BTC`);
-/// our symbols are bare, so the prefix is stripped.
-fn strip_dex_prefix(coin: &str) -> String {
-    coin.split_once(':')
-        .map(|(_, rest)| rest)
-        .unwrap_or(coin)
-        .to_string()
-}
-
 /// Map an `orderStatus` status string onto the canonical enum.
 /// Anything unrecognised stays Unresolved — a status we do not
 /// understand is never guessed into Filled or Canceled.
@@ -540,7 +546,7 @@ fn parse_order_status_response(
             .unwrap_or_else(|| cloid.to_string()),
         exchange_id: exchange_id.to_string(),
         account_id: account_id.to_string(),
-        symbol: strip_dex_prefix(o["coin"].as_str().unwrap_or("")),
+        symbol: o["coin"].as_str().unwrap_or("").to_string(),
         side: hl_side_to_side(o["side"].as_str().unwrap_or("B")),
         order_type: order_type.to_string(),
         status,
@@ -574,7 +580,7 @@ fn parse_open_orders(v: &Value, exchange_id: &str, account_id: &str) -> Result<V
                 client_order_id: o["cloid"].as_str().unwrap_or("").to_string(),
                 exchange_id: exchange_id.to_string(),
                 account_id: account_id.to_string(),
-                symbol: strip_dex_prefix(o["coin"].as_str().unwrap_or("")),
+                symbol: o["coin"].as_str().unwrap_or("").to_string(),
                 side: hl_side_to_side(o["side"].as_str().unwrap_or("B")),
                 order_type: "limit".to_string(),
                 quantity: f64_from(&o["sz"]),
@@ -607,7 +613,7 @@ fn parse_fills(
             order_id: oid.to_string(),
             client_order_id: cloid.to_string(),
             account_id: account_id.to_string(),
-            symbol: strip_dex_prefix(f["coin"].as_str().unwrap_or("")),
+            symbol: f["coin"].as_str().unwrap_or("").to_string(),
             side: hl_side_to_side(f["side"].as_str().unwrap_or("B")),
             price: f64_from(&f["px"]),
             quantity: f64_from(&f["sz"]),
@@ -691,10 +697,11 @@ impl HyperliquidAdapter {
             .map_err(|e| AdapterError::Other(format!("Hyperliquid 响应解析失败：{e}")))
     }
 
-    /// Resolve a symbol to its asset index, using the cached meta
-    /// universe (5 min TTL). Main dex: index in `meta.universe`;
-    /// Entropy: 110000 + index in the `io` universe (+10000 per
-    /// further HIP-3 dex, per the SDK's perpDexs offset rule).
+    /// Resolve a catalog symbol to its asset index, using the cached
+    /// meta universe (5 min TTL). The symbol is used verbatim
+    /// (`io:NVDA` for Entropy — the `io` universe names already
+    /// carry the prefix); the asset is `dex_offset + index in that
+    /// dex's universe`, with the offset from [`dex_offset_for`].
     async fn resolve_asset(&self, symbol: &str) -> Result<u32, AdapterError> {
         {
             let cache = self.asset_meta.lock().unwrap();
@@ -743,12 +750,9 @@ impl HyperliquidAdapter {
                         .collect()
                 })
                 .unwrap_or_default();
-            let pos = names.iter().position(|n| n == dex).ok_or_else(|| {
+            dex_offset = dex_offset_for(&names, dex).ok_or_else(|| {
                 AdapterError::Other(format!("交易所未返回 {dex} dex，无法解析交易对"))
             })?;
-            // perp_dexs()[0] is mainnet (""); builder dexes start at
-            // 110000, +10000 each.
-            dex_offset = 110_000 + (pos.saturating_sub(1) as u32) * 10_000;
         }
         let asset = universe
             .iter()
@@ -1332,7 +1336,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(info.status, OrderStatus::PartiallyFilled);
-        assert_eq!(info.symbol, "BTC", "the io: prefix is stripped");
+        assert_eq!(info.symbol, "io:BTC", "the exchange coin is kept verbatim");
         assert_eq!(info.side, "buy");
         assert!((info.filled_quantity - 0.006).abs() < 1e-9);
         assert!((info.remaining_quantity - 0.004).abs() < 1e-9);
@@ -1425,7 +1429,7 @@ mod tests {
     #[test]
     fn parse_open_orders_keeps_the_cloid() {
         let v = serde_json::json!([
-            {"coin": "BTC", "side": "B", "limitPx": "90000.0", "sz": "0.01",
+            {"coin": "io:NVDA", "side": "B", "limitPx": "90000.0", "sz": "0.01",
              "oid": 77_738_308, "timestamp": 1724361546700i64,
              "cloid": "0x1234567890abcdef1234567890abcdef"},
             {"coin": "ETH", "side": "A", "limitPx": "3000.0", "sz": "0.5",
@@ -1438,7 +1442,87 @@ mod tests {
             orders[0].client_order_id,
             "0x1234567890abcdef1234567890abcdef"
         );
+        // Rule 2.2: the exchange coin keeps its dex prefix.
+        assert_eq!(orders[0].symbol, "io:NVDA");
         assert_eq!(orders[1].order_id, "77738309");
         assert_eq!(orders[1].client_order_id, "");
+    }
+
+    /// F2 evidence (2026-11-26, real `perpDexs` fetches — the full raw
+    /// responses are archived under the goal workspace
+    /// `evidence/perpdexs-*-2026-11-26.json`; the fixtures keep the
+    /// name sequence, the only field the offset uses, in fetched
+    /// order, null included): the SDK enumerates `perpDexs()[1:]`,
+    /// so `io` — 10th raw, 9th after the null main slot — sits at
+    /// 200000. The old formula subtracted 1 again and put it at
+    /// 190000; on testnet (288 dexes) every dex past the first was
+    /// 10000 short.
+    const PERP_DEXS_MAINNET_JSON: &str =
+        r#"[null,"xyz","flx","vntl","hyna","km","abcd","cash","para","mkts","io"]"#;
+    const PERP_DEXS_TESTNET_JSON: &str = r#"[null,"test","unit","scam","felix","volmex","angry","TOON","VOLMEX","test21","pluto","zigg","i<3fl","KNETIQ",
+"knetiq","ddot","venone","tstdex","vntls","oracle","hb","sports","aura","hybet","orange","sekai","flow","x","t",
+"sekaw","gpu","qwerty","merrli","dex","olvb","nq","fx","nqz","btcx","woof","shiok","z","hbtwo","tndex","rrrrr",
+"hbhb","stocks","nunchi","sqtwr","y","hypodd","strat","zdex","crayon","walao","slpy","tsts","mbx","food","meng",
+"rawr","mmmg","msdx","wrld","hodd","xyz","flx","nmx","pyth","msda","ho","flsh","hyfl","csan","sedx","rbbt",
+"rbte","demo","flxn","bsx","loh","xvm","dydx","fzx","abdc","fam","gato","bart","sss","owal","gg","fdnk","trve",
+"odd","trv","qwrn","zzzz","gass","whtm","rip","sand","hmax","slob","hyfi","str","trov","erez","paef","mcd",
+"birb","plsh","cnst","trvv","trvo","tvr","torv","tvro","tvor","hyna","tdex","neo","bhpx","yldx","dpro","wa",
+"org","hfx","fxx","pmt","trva","trvb","perp","elxl","ddd","trvc","brd","axx","ddex","ab","etft","llll","nuts",
+"jdo","otcm","xmas","rub","avtr","wgts","vrse","gst","otc","bee","trvd","unc","dddd","dxn","egrl","nyc","bmx",
+"purr","vdex","narr","abcd","mox","angl","trvf","hnb","ggwp","plat","orma","ormb","ormc","ormd","orme","ormf",
+"ormg","ormh","tngs","ormi","brnt","yex","ez","rbit","ysh","moo","guac","osrs","moom","idx","scpe","mag","frce",
+"hodx","yoyo","cmdt","cmda","xoxo","idxx","cmdb","ycl","ohtn","zktx","soci","otni","nova","ani","soya","brs",
+"tenx","jack","myx","pmas","dude","rsge","hov","dlx","dxx","dyel","blob","mooo","rolo","sejp","sjhu","dolo",
+"sqxl","krzh","kwo","name","aha","tsst","neol","flxx","dd","vt","hfl","hkx","pew","magm","eepy","magk","ktob",
+"nxlb","dur","shm","mmmm","acmt","cna","bb","dmhs","lah","lob","vkjf","ignp","kjex","arg","cfbx","lon","par",
+"aix","parx","rrup","fcmt","nimb","sta","stt","pmew","tape","goy","eqde","one","pa","pas","lab","oxob","oxoc",
+"ppp","bit","mew","vmsj","kz","qosm","poep","qhte","vmse","prb","prs","otrk","qaz","div"]"#;
+
+    /// Parse a `perpDexs` fixture the way `resolve_asset` does:
+    /// drop the null slots, keep the names in order. Fixture entries
+    /// are bare names; real responses are objects with a `name`
+    /// field — both shapes are accepted.
+    fn perp_dex_names(json: &str) -> Vec<String> {
+        serde_json::from_str::<serde_json::Value>(json)
+            .expect("fixture")
+            .as_array()
+            .expect("array")
+            .iter()
+            .filter_map(|d| {
+                d.as_str()
+                    .or_else(|| d.get("name").and_then(|n| n.as_str()))
+                    .map(|s| s.to_string())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn dex_offsets_match_the_official_sdk() {
+        let names = perp_dex_names(PERP_DEXS_MAINNET_JSON);
+        assert_eq!(names.len(), 10);
+        assert_eq!(names.first().unwrap(), "xyz");
+        assert_eq!(names.last().unwrap(), "io");
+        assert_eq!(dex_offset_for(&names, "xyz"), Some(110_000));
+        assert_eq!(dex_offset_for(&names, "io"), Some(200_000));
+        // The old formula, for the record: io at 190000 (wrong).
+        let old_offset = |pos: usize| 110_000 + (pos.saturating_sub(1) as u32) * 10_000;
+        let io_pos = names.iter().position(|n| n == "io").unwrap();
+        assert_eq!(old_offset(io_pos), 190_000);
+        // Testnet: 289 raw entries, the single null at [0].
+        let testnet = perp_dex_names(PERP_DEXS_TESTNET_JSON);
+        assert_eq!(testnet.len(), 288);
+        assert_eq!(testnet.last().unwrap(), "div");
+        let div_pos = testnet.len() - 1;
+        assert_eq!(
+            dex_offset_for(&testnet, "div"),
+            Some(110_000 + div_pos as u32 * 10_000)
+        );
+        // Every dex past the first was exactly 10000 short.
+        for (pos, name) in testnet.iter().enumerate().skip(1) {
+            assert_eq!(
+                dex_offset_for(&testnet, name).unwrap() - old_offset(pos),
+                10_000
+            );
+        }
     }
 }

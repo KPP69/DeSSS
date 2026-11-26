@@ -210,11 +210,11 @@ pub async fn place_order(deps: &ExecDeps, intent: PlaceIntent) -> Result<OrderIn
         .ok_or_else(|| "账户未连接，请先在账户中心连接".to_string())?;
     let exchange_id = adapter.id().to_string();
 
-    // Normalize the symbol first: the Trading page accepts any case
-    // ("btc", "BTC"), the catalog stores the canonical form ("BTC"),
-    // and every comparison below is exact, so lowercase input would
-    // otherwise miss the row even when the catalog is loaded.
-    let symbol = intent.symbol.trim().to_uppercase();
+    // The catalog stores the canonical symbol ("BTC", "io:NVDA");
+    // the lookup below is case-insensitive, but everything
+    // downstream uses the catalog row's symbol verbatim (rule 2.2)
+    // — never the caller's spelling of it.
+    let query = intent.symbol.trim();
 
     // Cold start: the user may order without ever visiting the Data
     // page, so this exchange's catalog can be empty. Load just this
@@ -230,14 +230,16 @@ pub async fn place_order(deps: &ExecDeps, intent: PlaceIntent) -> Result<OrderIn
         deps.catalog.ensure_exchange_loaded(&exchange_id).await;
     }
 
-    // Tick / step from the catalog (exact symbol match). The order
-    // cannot be aligned without them.
+    // Tick / step from the catalog (case-insensitive symbol match).
+    // The order cannot be aligned without them.
     let row = deps
         .catalog
-        .search(&symbol, &[exchange_id.clone()])
+        .search(query, &[exchange_id.clone()])
         .into_iter()
-        .find(|r| r.symbol == symbol)
-        .ok_or_else(|| format!("{symbol} 不在 {exchange_id} 的品种目录中"))?;
+        .find(|r| r.symbol.eq_ignore_ascii_case(query))
+        .ok_or_else(|| format!("{query} 不在 {exchange_id} 的品种目录中"))?;
+    // Canonical symbol from here on: the row's, verbatim.
+    let symbol = row.symbol.clone();
     let tick = row
         .tick_size
         .map(to_decimal)

@@ -372,6 +372,13 @@ pub struct LivePosition {
 pub struct AccountLive {
     pub account_id: String,
     pub adapter_id: String,
+    /// Underlying wallet behind this live state, when the funds are
+    /// shared: the Hyperliquid master wallet address for HL/Entropy.
+    /// The 10s sampler counts each wallet once — both adapters
+    /// aggregate main + io + spot for the same wallet, so summing
+    /// both would double the equity. `None` falls back to the
+    /// account id (each account counted separately).
+    pub wallet_key: Option<String>,
     /// "connecting" | "connected" | "error" | "disconnected"
     pub status: String,
     /// Last measured single round-trip: the last REST request time.

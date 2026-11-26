@@ -56,6 +56,7 @@ enum StreamKind {
 /// Static dial plan for one key, resolved once when the task starts.
 /// A plan failure (unknown Lighter market id, unsupported exchange) is
 /// permanent: the task logs once and stops instead of retrying forever.
+#[derive(Debug)]
 struct Plan {
     kind: StreamKind,
     url: String,
@@ -192,26 +193,18 @@ impl RealtimeEngine {
     fn plan(&self, key: &StreamKey) -> Result<Plan, String> {
         let (exchange_id, symbol) = (&key.0, &key.1);
         match exchange_id.as_str() {
-            "hyperliquid" => Ok(Plan {
+            // Hyperliquid main and Entropy (HIP-3 dex `io`) share the
+            // socket. The catalog already stores the dex-prefixed
+            // symbol (`io:NVDA`), so the coin goes out exactly as
+            // stored — the old code prefixed it again here and the
+            // stream subscribed to the nonexistent `io:io:NVDA`.
+            "hyperliquid" | "entropy" => Ok(Plan {
                 kind: StreamKind::Hyperliquid,
                 url: "wss://api.hyperliquid.xyz/ws".to_string(),
                 subscribe: Some(
                     serde_json::json!({
                         "method": "subscribe",
                         "subscription": { "type": "l2Book", "coin": symbol }
-                    })
-                    .to_string(),
-                ),
-            }),
-            // Entropy is Hyperliquid's HIP-3 dex: same socket, the coin
-            // is namespaced `io:<symbol>`.
-            "entropy" => Ok(Plan {
-                kind: StreamKind::Hyperliquid,
-                url: "wss://api.hyperliquid.xyz/ws".to_string(),
-                subscribe: Some(
-                    serde_json::json!({
-                        "method": "subscribe",
-                        "subscription": { "type": "l2Book", "coin": format!("io:{symbol}") }
                     })
                     .to_string(),
                 ),
@@ -771,5 +764,47 @@ mod tests {
         assert_eq!(keys[0].exchange_id, "hyperliquid");
         assert_eq!(keys[0].symbol, "BTC");
         assert_eq!(keys[1].exchange_id, "entropy");
+    }
+
+    /// Rule 2.2: the catalog symbol goes out verbatim — no case
+    /// change, no prefix added, no prefix stripped. The Entropy row
+    /// is the regression guard: the catalog already stores `io:NVDA`,
+    /// so the old `io:{symbol}` prefixing subscribed to the
+    /// nonexistent `io:io:NVDA` and the stream silently never
+    /// produced a book (masked by the REST fallback).
+    #[test]
+    fn plan_keeps_the_catalog_symbol_verbatim() {
+        let bus = EventBus::new(16);
+        let catalog = Arc::new(MarketCatalog::new(bus.clone()));
+        let engine = RealtimeEngine::new(bus, catalog, None);
+        // (exchange, symbol, coin as sent on the wire)
+        for (exchange_id, symbol, want) in [
+            ("hyperliquid", "BTC", "BTC"),
+            ("entropy", "io:NVDA", "io:NVDA"),
+            ("arcus", "BTC-USD", "BTC-USD"),
+        ] {
+            let key: StreamKey = (exchange_id.to_string(), symbol.to_string());
+            let plan = engine.plan(&key).expect("plan");
+            let sub: serde_json::Value =
+                serde_json::from_str(plan.subscribe.as_ref().expect("subscribe")).expect("json");
+            let coin = match exchange_id {
+                "arcus" => sub["id"].as_str().unwrap(),
+                _ => sub["subscription"]["coin"].as_str().unwrap(),
+            };
+            assert_eq!(coin, want, "{exchange_id} {symbol}");
+        }
+        // AsterDEX encodes the stream in the URL itself.
+        let key: StreamKey = ("asterdex".to_string(), "BTCUSDT".to_string());
+        let plan = engine.plan(&key).expect("plan");
+        assert!(plan.subscribe.is_none());
+        assert_eq!(plan.url, "wss://fstream.asterdex.com/ws/btcusdt@bookTicker");
+        // Lighter needs the catalog market id; with an empty catalog
+        // the lookup fails on the verbatim symbol — never a rewritten
+        // one.
+        for exchange_id in ["lighter", "lighter_robinhood"] {
+            let key: StreamKey = (exchange_id.to_string(), "BTC-USDC".to_string());
+            let err = engine.plan(&key).expect_err("no catalog rows");
+            assert_eq!(err, "目录中没有 BTC-USDC 的市场编号");
+        }
     }
 }

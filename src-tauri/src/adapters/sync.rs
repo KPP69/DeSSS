@@ -10,7 +10,7 @@
 //! for HMAC signing only, and an Agent wallet's private key for V3 EIP-712
 //! signing only; neither is ever logged.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, RwLock};
 
 use serde_json::Value;
@@ -182,6 +182,19 @@ impl SyncManager {
             .read()
             .map(|m| m.values().cloned().collect())
             .unwrap_or_default()
+    }
+
+    /// Total equity across live accounts, counting each underlying
+    /// wallet once (see `AccountLive::wallet_key`): Hyperliquid main
+    /// and Entropy report the same aggregated wallet, so a plain sum
+    /// would double it. Used by the 10s drawdown sampler.
+    pub fn total_equity(&self) -> f64 {
+        let mut seen = HashSet::new();
+        self.live_states()
+            .iter()
+            .filter(|s| seen.insert(s.wallet_key.clone().unwrap_or_else(|| s.account_id.clone())))
+            .map(|s| s.equity_usd)
+            .sum()
     }
 
     pub fn is_running(&self, account_id: &str) -> bool {
@@ -405,6 +418,7 @@ mod tests {
         AccountLive {
             account_id: "acc-1".to_string(),
             adapter_id: "hyperliquid".to_string(),
+            wallet_key: None,
             status: "connected".to_string(),
             latency_ms: Some(120),
             equity_usd: 10000.0,
@@ -476,5 +490,28 @@ mod tests {
         assert!(!m.reconcile.in_grace("acc-1"));
         m.note_fill("acc-1");
         assert!(m.reconcile.in_grace("acc-1"));
+    }
+
+    #[test]
+    fn total_equity_counts_each_wallet_once() {
+        let m = SyncManager::new();
+        // Two accounts on the same wallet (HL main + Entropy): both
+        // report the aggregated 10000, counted once.
+        let mut main = live_with_positions();
+        main.account_id = "acc-hl".to_string();
+        main.wallet_key = Some("0xwallet".to_string());
+        let mut entropy = live_with_positions();
+        entropy.account_id = "acc-io".to_string();
+        entropy.wallet_key = Some("0xwallet".to_string());
+        // A third account with its own funds counts separately.
+        let mut other = live_with_positions();
+        other.account_id = "acc-arcus".to_string();
+        other.equity_usd = 5000.0;
+        if let Ok(mut map) = m.live.write() {
+            map.insert(main.account_id.clone(), main);
+            map.insert(entropy.account_id.clone(), entropy);
+            map.insert(other.account_id.clone(), other);
+        }
+        assert_eq!(m.total_equity(), 15000.0);
     }
 }

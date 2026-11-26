@@ -210,6 +210,7 @@ impl LighterAdapter {
         let live = AccountLive {
             account_id: self.account_id.clone(),
             adapter_id: self.id.clone(),
+            wallet_key: None,
             status,
             latency_ms: self.latency_ms(),
             equity_usd: snap.equity,
