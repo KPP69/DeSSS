@@ -258,7 +258,7 @@ impl HyperliquidAdapter {
         let live = AccountLive {
             account_id: self.account_id.clone(),
             adapter_id: self.id.clone(),
-            wallet_key: Some(self.address.clone()),
+            wallet_key: Some(self.address.to_lowercase()),
             status,
             latency_ms: self.latency_ms(),
             equity_usd: snap.equity_usd,
@@ -508,8 +508,8 @@ fn parse_order_status_response(
     cloid: &str,
     fills_avg: Option<f64>,
 ) -> Result<OrderInfo, String> {
-    if v["status"].as_str() == Some("unknownOid") {
-        return Err("unknownOid".to_string());
+    if v["status"].as_str() == Some(super::UNKNOWN_OID) {
+        return Err(super::UNKNOWN_OID.to_string());
     }
     let inner = &v["order"];
     let o = &inner["order"];
@@ -1524,5 +1524,32 @@ mod tests {
                 10_000
             );
         }
+    }
+
+    /// D8: the wallet key is the lowercased address, so the same
+    /// wallet saved with different cases dedupes to one entry.
+    #[test]
+    fn publish_live_lowercases_the_wallet_key() {
+        let live = Arc::new(RwLock::new(HashMap::new()));
+        let adapter = HyperliquidAdapter::new(
+            "hyperliquid",
+            None,
+            "0xAbC123".to_string(),
+            "acc-1".to_string(),
+            EventBus::new(16),
+            live.clone(),
+            Arc::new(ReconcileState::new()),
+            None,
+        );
+        adapter.publish_live();
+        assert_eq!(
+            live.read()
+                .unwrap()
+                .get("acc-1")
+                .unwrap()
+                .wallet_key
+                .as_deref(),
+            Some("0xabc123")
+        );
     }
 }

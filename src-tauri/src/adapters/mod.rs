@@ -26,6 +26,12 @@ pub enum AdapterError {
     Other(String),
 }
 
+/// The exchange's exact "no such order" signal (orderStatus
+/// `"status": "unknownOid"`). The single source of truth for the
+/// "this order does not exist" decision: producers return it,
+/// consumers match on it, and nothing else may invent the string.
+pub const UNKNOWN_OID: &str = "unknownOid";
+
 /// Account live status from REST health only (there is no market WS on
 /// an account anymore — account sync is REST polling, and public market
 /// data comes from the on-demand catalog):

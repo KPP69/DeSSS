@@ -226,6 +226,9 @@ pub struct RiskCheckContext {
     /// Account available balance, in USD.
     pub available_usd: Decimal,
     pub qty: Decimal,
+    /// Current net position in this symbol, signed (long +, short
+    /// -). Only the max-position check may exempt a reduce (F5).
+    pub position_qty_signed: f64,
     /// None for market orders (no limit price to align).
     pub price: Option<Decimal>,
     pub tick_size: Decimal,
@@ -399,7 +402,13 @@ impl RiskGateway {
             ));
         }
         let max_position = to_decimal(cfg.max_position_usd);
-        if ctx.current_position_notional_usd + ctx.notional_usd > max_position {
+        // F5: a reduce (side against the position, size within it)
+        // never grows the position, so the max-position cap does not
+        // apply to it. Nothing else is exempted.
+        let reducing = ((ctx.side == "buy" && ctx.position_qty_signed < 0.0)
+            || (ctx.side == "sell" && ctx.position_qty_signed > 0.0))
+            && ctx.qty <= to_decimal(ctx.position_qty_signed.abs());
+        if !reducing && ctx.current_position_notional_usd + ctx.notional_usd > max_position {
             return Err(format!(
                 "持仓名义将达到 ${}，超过上限 ${}",
                 ctx.current_position_notional_usd + ctx.notional_usd,
@@ -439,6 +448,7 @@ mod tests {
             current_position_notional_usd: dec!(0),
             available_usd: dec!(5000),
             qty: dec!(0.01),
+            position_qty_signed: 0.0,
             price: Some(dec!(100000)),
             tick_size: dec!(0.5),
             step_size: dec!(0.001),
@@ -526,6 +536,29 @@ mod tests {
         assert!(g2.check_order(&c2).is_err());
         c2.current_position_notional_usd = dec!(40000);
         assert!(g2.check_order(&c2).is_ok());
+    }
+
+    /// F5: selling within a long position skips ONLY the
+    /// max-position check; selling more, or buying into a long,
+    /// is still blocked by it.
+    #[test]
+    fn reduce_order_exempt_from_max_position_only() {
+        let g = gateway();
+        let mut c = ctx();
+        c.current_position_notional_usd = dec!(50000);
+        c.position_qty_signed = 0.5;
+        c.available_usd = dec!(100000);
+        c.side = "sell".to_string();
+        c.qty = dec!(0.05);
+        c.notional_usd = dec!(500);
+        assert!(g.check_order(&c).is_ok());
+        c.qty = dec!(0.6);
+        c.notional_usd = dec!(6000);
+        assert!(g.check_order(&c).is_err());
+        c.side = "buy".to_string();
+        c.qty = dec!(0.05);
+        c.notional_usd = dec!(500);
+        assert!(g.check_order(&c).is_err());
     }
 
     #[test]

@@ -187,6 +187,21 @@ impl RealtimeEngine {
             .and_then(|m| m.get(key).copied())
     }
 
+    /// Wait for the first frame of `key`, up to `timeout` (F6:
+    /// cold-start guard for place_order — a freshly subscribed
+    /// stream has no frame yet). Returns false on timeout; never
+    /// touches `STREAM_STALE_MS` or `is_stale`.
+    pub async fn wait_for_first_frame(&self, key: &StreamKey, timeout: Duration) -> bool {
+        let start = std::time::Instant::now();
+        while self.last_update_at(key).is_none() {
+            if start.elapsed() >= timeout {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        true
+    }
+
     /// Resolve the dial plan for a key. Lighter needs the numeric market
     /// id from the catalog (the row must already be cached — the Data
     /// page only streams symbols its search just returned).
@@ -806,5 +821,30 @@ mod tests {
             let err = engine.plan(&key).expect_err("no catalog rows");
             assert_eq!(err, "目录中没有 BTC-USDC 的市场编号");
         }
+    }
+
+    /// F6: the wait expires when no frame ever lands, and returns
+    /// at once once a frame timestamp exists. (The timestamp is
+    /// seeded directly; frame parsing is covered by the
+    /// `handle_frame` tests.)
+    #[tokio::test]
+    async fn wait_for_first_frame_waits_then_returns() {
+        let bus = EventBus::new(16);
+        let catalog = Arc::new(MarketCatalog::new(bus.clone()));
+        let engine = RealtimeEngine::new(bus, catalog, None);
+        let key: StreamKey = ("hyperliquid".to_string(), "BTC".to_string());
+        assert!(
+            !engine
+                .wait_for_first_frame(&key, Duration::from_millis(150))
+                .await
+        );
+        if let Ok(mut m) = engine.last_update.write() {
+            m.insert(key.clone(), now_ms());
+        }
+        assert!(
+            engine
+                .wait_for_first_frame(&key, Duration::from_secs(2))
+                .await
+        );
     }
 }

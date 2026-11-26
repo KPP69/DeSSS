@@ -35,7 +35,7 @@ use crate::adapters::hl_signing;
 use crate::adapters::market_catalog::MarketCatalog;
 use crate::adapters::sync::SyncManager;
 use crate::adapters::types::{Order, OrderInfo, OrderRequest, OrderStatus, TradeInfo};
-use crate::adapters::{AdapterError, ExchangeAdapter};
+use crate::adapters::{AdapterError, ExchangeAdapter, UNKNOWN_OID};
 use crate::bus::EventBus;
 use crate::data_engine::realtime::RealtimeEngine;
 use crate::risk::precision::{align_down, align_price_for_side, to_decimal};
@@ -59,6 +59,9 @@ pub struct ExecDeps {
 pub struct OrderStore {
     orders: RwLock<HashMap<String, OrderInfo>>,
     fills: RwLock<HashMap<String, Vec<TradeInfo>>>,
+    /// `unknownOid` strikes per cloid (F4): (count, last strike ms).
+    /// In-memory, cumulative, reset on restart.
+    unresolved_attempts: std::sync::Mutex<HashMap<String, (u32, i64)>>,
 }
 
 impl OrderStore {
@@ -66,6 +69,7 @@ impl OrderStore {
         Self {
             orders: RwLock::new(HashMap::new()),
             fills: RwLock::new(HashMap::new()),
+            unresolved_attempts: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
@@ -154,6 +158,35 @@ impl OrderStore {
             .map(|o| o.client_order_id.clone())
     }
 
+    /// Count one `unknownOid` for an Unresolved order (F4); returns
+    /// the running total. Only an explicit `unknownOid` reaches
+    /// here — transport / HTTP / parse failures never call it.
+    pub fn unknown_oid_strike(&self, cloid: &str, now_ms: i64) -> u32 {
+        if let Ok(mut m) = self.unresolved_attempts.lock() {
+            let e = m.entry(cloid.to_string()).or_insert((0, 0));
+            e.0 += 1;
+            e.1 = now_ms;
+            e.0
+        } else {
+            0
+        }
+    }
+
+    /// Forget the strike entry when an order leaves Unresolved (F4).
+    pub fn clear_unknown_oid(&self, cloid: &str) {
+        if let Ok(mut m) = self.unresolved_attempts.lock() {
+            m.remove(cloid);
+        }
+    }
+
+    /// Drop strike entries not updated for over 10 minutes (F4):
+    /// the table must not grow with runtime.
+    pub fn prune_unknown_oid_strikes(&self, now_ms: i64) {
+        if let Ok(mut m) = self.unresolved_attempts.lock() {
+            m.retain(|_, (_, ts)| now_ms - *ts <= 600_000);
+        }
+    }
+
     /// Apply an authoritative query result to the stored record
     /// (status + fills + quantities). The queried record wins; when
     /// the store has no such order (placed outside this app) it is
@@ -166,6 +199,11 @@ impl OrderStore {
                 let mut merged = queried.clone();
                 if merged.quantity == 0.0 {
                     merged.quantity = stored.quantity;
+                }
+                // F4: leaving Unresolved for a terminal state clears
+                // the strike entry, whatever path applied the update.
+                if stored.status == OrderStatus::Unresolved && merged.status.is_terminal() {
+                    self.clear_unknown_oid(&queried.client_order_id);
                 }
                 *stored = merged.clone();
                 return merged;
@@ -203,6 +241,11 @@ fn live_of(deps: &ExecDeps, account_id: &str) -> Option<crate::adapters::types::
 /// definite failures (gateway rejection, validation, exchange
 /// rejection) are `Err` with the reason.
 pub async fn place_order(deps: &ExecDeps, intent: PlaceIntent) -> Result<OrderInfo, String> {
+    // F6: the side is exactly "buy" or "sell" — anything else is an
+    // error, never silently converted to one of them.
+    if intent.side != "buy" && intent.side != "sell" {
+        return Err("下单方向只能是 buy 或 sell".to_string());
+    }
     let now = crate::adapters::now_ms();
     let adapter = deps
         .sync
@@ -309,6 +352,25 @@ pub async fn place_order(deps: &ExecDeps, intent: PlaceIntent) -> Result<OrderIn
     deps.streams
         .ensure_wanted((exchange_id.clone(), symbol.clone()));
 
+    // F6: cold start — a freshly subscribed stream has no frame
+    // yet. Wait up to 3s for the first one before the risk check
+    // (which would only see "stale"); on timeout the order is
+    // Rejected, never sent on an empty book.
+    if !deps
+        .streams
+        .wait_for_first_frame(
+            &(exchange_id.clone(), symbol.clone()),
+            std::time::Duration::from_secs(3),
+        )
+        .await
+    {
+        let err = "行情尚未就绪，请稍后重试".to_string();
+        info.transition(OrderStatus::Rejected, now).ok();
+        info.error = Some(err.clone());
+        deps.orders.insert(info.clone());
+        return Err(err);
+    }
+
     // Fresh equity sample for the drawdown check (the 10s sampler
     // covers the steady state; the order attempt samples now).
     let live = live_of(deps, &intent.account_id);
@@ -330,6 +392,14 @@ pub async fn place_order(deps: &ExecDeps, intent: PlaceIntent) -> Result<OrderIn
                 .sum()
         })
         .unwrap_or(Decimal::ZERO);
+    // F5: the signed net position of this symbol (long +, short -),
+    // matched by the native symbol (identical on both sides since
+    // F1), for the reduce exemption in the max-position check.
+    let position_qty_signed = live
+        .as_ref()
+        .and_then(|s| s.positions.iter().find(|p| p.symbol == symbol))
+        .map(|p| if p.side == "short" { -p.qty } else { p.qty })
+        .unwrap_or(0.0);
     let ctx = RiskCheckContext {
         account_connected: connected,
         book_stale: deps
@@ -340,6 +410,7 @@ pub async fn place_order(deps: &ExecDeps, intent: PlaceIntent) -> Result<OrderIn
         current_position_notional_usd: current_position_notional,
         available_usd: to_decimal(available),
         qty: aligned_qty,
+        position_qty_signed,
         price: Some(aligned_price),
         tick_size: tick,
         step_size: step,
@@ -535,7 +606,7 @@ async fn reconcile_order(
             }
             merged
         }
-        Err(AdapterError::Other(msg)) if msg == "unknownOid" => {
+        Err(AdapterError::Other(msg)) if msg == UNKNOWN_OID => {
             log(
                 deps,
                 "warn",
@@ -718,6 +789,50 @@ fn merge_open_orders(
     (live, missing)
 }
 
+/// Re-query Unresolved records older than 30s (F4): the 10s
+/// open-orders task calls this after the list sync. A terminal
+/// answer updates the record; each `unknownOid` is one strike and
+/// the 5th turns the record Failed — the duplicate guard then
+/// releases the same-params order on its own. Any other query
+/// failure is ignored (retried next cycle, never counted).
+async fn reconcile_unresolved(
+    deps: &ExecDeps,
+    adapter: &Arc<dyn ExchangeAdapter>,
+    account_id: &str,
+) {
+    let now = crate::adapters::now_ms();
+    deps.orders.prune_unknown_oid_strikes(now);
+    let stale: Vec<OrderInfo> = deps
+        .orders
+        .list()
+        .into_iter()
+        .filter(|o| {
+            o.account_id == account_id
+                && o.status == OrderStatus::Unresolved
+                && now - o.updated_at > 30_000
+        })
+        .collect();
+    for record in stale {
+        match query_order_latest(adapter, &record).await {
+            Ok(queried) if queried.status.is_terminal() => {
+                deps.orders.apply_query(&queried);
+                deps.orders.clear_unknown_oid(&record.client_order_id);
+            }
+            Ok(_) => {}
+            Err(AdapterError::Other(msg)) if msg == UNKNOWN_OID => {
+                if deps.orders.unknown_oid_strike(&record.client_order_id, now) >= 5 {
+                    let mut failed = record.clone();
+                    failed.transition(OrderStatus::Failed, now).ok();
+                    failed.error = Some("多次查询仍无此单，请人工核对".to_string());
+                    deps.orders.insert(failed);
+                    deps.orders.clear_unknown_oid(&record.client_order_id);
+                }
+            }
+            Err(_) => {}
+        }
+    }
+}
+
 /// Sync one account's open orders with the exchange (the periodic
 /// poll's job, and what the Trading page's refresh calls): the
 /// exchange's live list is the only source of truth. Local Open /
@@ -753,22 +868,52 @@ pub async fn sync_open_orders(deps: &ExecDeps, account_id: &str) -> Result<Vec<O
             );
         }
     }
+    reconcile_unresolved(deps, &adapter, account_id).await;
     Ok(live)
 }
 
-/// Live open orders from the exchange, merged with the store so the
-/// cloid (and our record) travels with each row. Every call syncs
-/// the account's open orders first (see `sync_open_orders`).
+/// Live open orders from the store only (F7): the 10s background
+/// task owns the exchange sync, so this never touches the network.
+/// The page may lag the exchange by up to 10s.
 pub async fn list_open_orders(deps: &ExecDeps, account_id: &str) -> Result<Vec<OrderInfo>, String> {
-    sync_open_orders(deps, account_id).await
+    Ok(deps
+        .orders
+        .list()
+        .into_iter()
+        .filter(|o| {
+            o.account_id == account_id
+                && matches!(
+                    o.status,
+                    OrderStatus::Open | OrderStatus::Submitted | OrderStatus::PartiallyFilled
+                )
+        })
+        .collect())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapters::market_catalog::MarketCatalog;
+    use crate::adapters::sync::SyncManager;
     use crate::adapters::types::{Balance, Position};
     use crate::adapters::AdapterResult;
+    use crate::bus::EventBus;
+    use crate::data_engine::realtime::RealtimeEngine;
+    use crate::risk::{RiskConfig, RiskGateway};
     use async_trait::async_trait;
+
+    fn deps_with(store: Arc<OrderStore>, sync: Arc<SyncManager>) -> ExecDeps {
+        let bus = EventBus::new(16);
+        let catalog = Arc::new(MarketCatalog::new(bus.clone()));
+        ExecDeps {
+            risk: Arc::new(RiskGateway::new(RiskConfig::default())),
+            orders: store,
+            sync,
+            streams: Arc::new(RealtimeEngine::new(bus.clone(), catalog.clone(), None)),
+            catalog,
+            bus,
+        }
+    }
 
     fn record(cloid: &str, status: OrderStatus) -> OrderInfo {
         OrderInfo {
@@ -918,6 +1063,28 @@ mod tests {
         }
     }
 
+    /// F6: an unknown side is rejected before anything else runs —
+    /// no adapter call, no record, no silent conversion to buy/sell.
+    #[tokio::test]
+    async fn place_order_rejects_unknown_side_without_fallback() {
+        let deps = deps_with(Arc::new(OrderStore::new()), Arc::new(SyncManager::new()));
+        let err = place_order(
+            &deps,
+            PlaceIntent {
+                account_id: "acc-1".to_string(),
+                symbol: "BTC".to_string(),
+                side: "hold".to_string(),
+                order_type: "limit".to_string(),
+                quantity: 0.01,
+                price: 90000.0,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("buy") && err.contains("sell"), "{err}");
+        assert!(deps.orders.list().is_empty());
+    }
+
     /// One exchange open-orders row, for the sync tests.
     fn exchange_order(oid: &str, cloid: &str) -> Order {
         Order {
@@ -988,12 +1155,20 @@ mod tests {
             _account_id: &str,
             cloid: &str,
         ) -> AdapterResult<OrderInfo> {
+            if cloid == "0xerr" {
+                // A read-path transport failure: realistic `Other`,
+                // deliberately NOT "unknownOid" — it must never
+                // strike (F4a).
+                return Err(AdapterError::Other(
+                    "Hyperliquid 查询失败：connection reset".to_string(),
+                ));
+            }
             self.by_cloid
                 .lock()
                 .unwrap()
                 .get(cloid)
                 .cloned()
-                .ok_or_else(|| AdapterError::Other("unknownOid".to_string()))
+                .ok_or_else(|| AdapterError::Other(UNKNOWN_OID.to_string()))
         }
         async fn query_order_by_oid(
             &self,
@@ -1005,7 +1180,7 @@ mod tests {
                 .unwrap()
                 .get(&oid)
                 .cloned()
-                .ok_or_else(|| AdapterError::Other("unknownOid".to_string()))
+                .ok_or_else(|| AdapterError::Other(UNKNOWN_OID.to_string()))
         }
     }
 
@@ -1113,5 +1288,91 @@ mod tests {
         assert_eq!(store.get("4").unwrap().status, OrderStatus::Open);
         // The other account's record was not touched.
         assert_eq!(store.get("0xddd").unwrap().status, OrderStatus::Open);
+    }
+
+    /// F4: an Unresolved record older than 30s is re-queried on the
+    /// 10s sync; 5 consecutive `unknownOid` strikes turn it Failed
+    /// (releasing the duplicate guard), a terminal answer updates
+    /// it, and a fresh Unresolved record is never touched.
+    #[tokio::test]
+    async fn unresolved_requery_five_strikes_turns_failed() {
+        let store = Arc::new(OrderStore::new());
+        let mut old = record("0xaaa", OrderStatus::Unresolved);
+        old.updated_at = crate::adapters::now_ms() - 31_000;
+        store.insert(old);
+        let mut fresh = record("0xbbb", OrderStatus::Unresolved);
+        fresh.side = "sell".to_string();
+        fresh.updated_at = crate::adapters::now_ms();
+        store.insert(fresh);
+        // A transport failure (not unknownOid) must never strike.
+        let mut err = record("0xerr", OrderStatus::Unresolved);
+        err.side = "sell".to_string();
+        err.updated_at = crate::adapters::now_ms() - 31_000;
+        store.insert(err);
+        let fake = Arc::new(FakeOrdersAdapter {
+            open: std::sync::Mutex::new(vec![]),
+            by_cloid: std::sync::Mutex::new(HashMap::new()),
+            by_oid: std::sync::Mutex::new(HashMap::new()),
+        });
+        let sync = Arc::new(SyncManager::new());
+        sync.insert("acc-1".to_string(), fake.clone());
+        let deps = deps_with(store.clone(), sync);
+        for _ in 0..4 {
+            sync_open_orders(&deps, "acc-1").await.expect("sync");
+            assert_eq!(store.get("0xaaa").unwrap().status, OrderStatus::Unresolved);
+        }
+        sync_open_orders(&deps, "acc-1").await.expect("sync");
+        let failed = store.get("0xaaa").unwrap();
+        assert_eq!(failed.status, OrderStatus::Failed);
+        assert_eq!(
+            failed.error.as_deref(),
+            Some("多次查询仍无此单，请人工核对")
+        );
+        // Fresh record untouched, transport-error record never
+        // struck, and the Failed one no longer blocks the
+        // same-params order.
+        assert_eq!(store.get("0xbbb").unwrap().status, OrderStatus::Unresolved);
+        assert_eq!(store.get("0xerr").unwrap().status, OrderStatus::Unresolved);
+        assert!(store
+            .has_unresolved_duplicate("acc-1", "BTC", "buy", 0.01, 90000.0)
+            .is_none());
+        // A terminal answer updates the record instead of striking.
+        let mut old2 = record("0xccc", OrderStatus::Unresolved);
+        old2.updated_at = crate::adapters::now_ms() - 31_000;
+        store.insert(old2);
+        fake.by_cloid
+            .lock()
+            .unwrap()
+            .insert("0xccc".to_string(), record("0xccc", OrderStatus::Canceled));
+        sync_open_orders(&deps, "acc-1").await.expect("sync");
+        assert_eq!(store.get("0xccc").unwrap().status, OrderStatus::Canceled);
+    }
+
+    /// F7: listing open orders is a pure store read — no adapter is
+    /// needed (or consulted), and only open-state records come back.
+    #[tokio::test]
+    async fn list_open_orders_reads_the_store_only() {
+        let store = Arc::new(OrderStore::new());
+        store.insert(record("0xaaa", OrderStatus::Open));
+        store.insert(record("0xbbb", OrderStatus::Unresolved));
+        store.insert(record("0xccc", OrderStatus::Filled));
+        let deps = deps_with(store, Arc::new(SyncManager::new()));
+        let open = list_open_orders(&deps, "acc-1").await.expect("list");
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].client_order_id, "0xaaa");
+    }
+
+    /// F4b: strikes clear explicitly on leaving Unresolved, and the
+    /// 10-minute sweep drops entries that stopped updating.
+    #[test]
+    fn unknown_oid_strikes_clear_and_prune() {
+        let store = OrderStore::new();
+        assert_eq!(store.unknown_oid_strike("0xaaa", 1000), 1);
+        assert_eq!(store.unknown_oid_strike("0xaaa", 2000), 2);
+        store.clear_unknown_oid("0xaaa");
+        assert_eq!(store.unknown_oid_strike("0xaaa", 3000), 1);
+        store.unknown_oid_strike("0xold", 0);
+        store.prune_unknown_oid_strikes(600_001);
+        assert_eq!(store.unknown_oid_strike("0xold", 600_002), 1);
     }
 }
