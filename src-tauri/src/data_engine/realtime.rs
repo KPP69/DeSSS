@@ -75,6 +75,18 @@ enum FrameAction {
     None,
 }
 
+/// One `(exchange_id, symbol)` pair from the `set_stream_symbols`
+/// command, exactly as the frontend sends it (`src/lib/tauri.ts`).
+/// Lives here — not in `commands/` — so the serde alignment test below
+/// runs in the scratch crate. The `rename_all` is load-bearing: without
+/// it serde expects `exchange_id` while the frontend sends `exchangeId`.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamKeyInput {
+    pub exchange_id: String,
+    pub symbol: String,
+}
+
 pub struct RealtimeEngine {
     bus: EventBus,
     catalog: Arc<MarketCatalog>,
@@ -744,5 +756,20 @@ mod tests {
         let key: StreamKey = ("hyperliquid".to_string(), "BTC".to_string());
         assert!(engine.is_stale(&key));
         assert_eq!(engine.last_update_at(&key), None);
+    }
+
+    /// Frontend/backend field alignment: the exact JSON `tauri.ts`
+    /// `setStreamSymbols` sends must deserialize (same class of bug as
+    /// the 2026-11-26 `place_order` "missing field `account_id`").
+    #[test]
+    fn stream_key_input_matches_frontend_payload() {
+        let keys: Vec<StreamKeyInput> = serde_json::from_str(
+            r#"[{"exchangeId":"hyperliquid","symbol":"BTC"},{"exchangeId":"entropy","symbol":"ETH"}]"#,
+        )
+        .expect("frontend payload must deserialize");
+        assert_eq!(keys.len(), 2);
+        assert_eq!(keys[0].exchange_id, "hyperliquid");
+        assert_eq!(keys[0].symbol, "BTC");
+        assert_eq!(keys[1].exchange_id, "entropy");
     }
 }

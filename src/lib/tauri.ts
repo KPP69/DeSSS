@@ -1,6 +1,52 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { AppInfo, AccountView, CredentialMap, OrderBook, AccountLive, LogEntry, RuntimeSnapshot, ProxyState, MarketInfo, CatalogRefresh, RiskConfig, DrawdownStatus, OrderInfo, TradeInfo } from "./types";
+
+// Tauri 框架级英文报错翻译成中文（实机事故 2026-11-26：下单失败只显示
+// "invalid args input for command place_order: missing field account_id"，
+// 用户看不懂）。业务错误（后端返回的中文，如风控拒绝、下单被拒）原样
+// 透传；只有框架级报错（参数解析、未知字段、命令不存在）才翻译。
+const FIELD_NAMES: Record<string, string> = {
+  accountId: "账户",
+  orderId: "订单号",
+  clientOrderId: "客户端订单号",
+  orderType: "订单类型",
+  exchangeId: "交易所",
+  symbol: "交易对",
+  quantity: "数量",
+  price: "价格",
+  side: "方向",
+  killSwitch: "风控总开关",
+};
+
+function describeInvokeError(command: string, err: unknown): string {
+  const msg = err instanceof Error ? err.message : String(err);
+  const missing = msg.match(/missing field `?([A-Za-z0-9_]+)`?/);
+  if (msg.includes("invalid args input for command") && missing) {
+    const field = missing[1];
+    const label = FIELD_NAMES[field] ?? field;
+    return `调用 ${command} 的参数不完整：缺少「${label}」（${field}）。请重试；如果一直出现，请把这条提示发给开发者`;
+  }
+  if (msg.includes("invalid args input for command")) {
+    return `调用 ${command} 的参数不正确，可能是前后端字段不一致。请重试；如果一直出现，请把这条提示发给开发者`;
+  }
+  const unknown = msg.match(/unknown field `?([A-Za-z0-9_]+)`?/);
+  if (unknown) {
+    return `调用 ${command} 时传了后端不认识的字段 ${unknown[1]}，请更新到最新版本后重试`;
+  }
+  if (msg.includes("command not found")) {
+    return `命令 ${command} 不存在，请更新到最新版本后重试`;
+  }
+  return msg;
+}
+
+async function invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+  try {
+    return await tauriInvoke<T>(command, args);
+  } catch (e) {
+    throw new Error(describeInvokeError(command, e));
+  }
+}
 
 export const api = {
   getAppInfo: () => invoke<AppInfo>("get_app_info"),

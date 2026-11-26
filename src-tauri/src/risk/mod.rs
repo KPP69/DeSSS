@@ -611,4 +611,24 @@ mod tests {
         assert_eq!(back.auto_pause_after_failures, 5);
         let _ = std::fs::remove_dir_all(&paths.data_dir);
     }
+
+    /// Frontend/backend field alignment: the exact JSON `tauri.ts`
+    /// `setRiskConfig` sends must deserialize, and serializing it back
+    /// must use the same camelCase keys (same class of bug as the
+    /// 2026-11-26 `place_order` "missing field `account_id`").
+    #[test]
+    fn risk_config_matches_frontend_payload() {
+        let cfg: RiskConfig = serde_json::from_str(
+            r#"{"killSwitch":true,"maxOrderNotionalUsd":2500.0,"maxPositionUsd":20000.0,"maxDrawdownPct":5.0,"allowedSides":"long_only","autoPauseAfterFailures":3}"#,
+        )
+        .expect("frontend payload must deserialize");
+        assert!(cfg.kill_switch);
+        assert_eq!(cfg.max_order_notional_usd, 2500.0);
+        assert_eq!(cfg.allowed_sides, AllowedSides::LongOnly);
+        assert_eq!(cfg.auto_pause_after_failures, 3);
+        let json = serde_json::to_string(&cfg).unwrap();
+        assert!(json.contains("\"killSwitch\":true"), "{json}");
+        assert!(json.contains("\"allowedSides\":\"long_only\""), "{json}");
+        assert!(!json.contains("kill_switch"), "{json}");
+    }
 }

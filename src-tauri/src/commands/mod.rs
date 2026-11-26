@@ -1,6 +1,22 @@
 use crate::AppState;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, State};
+
+// Frontend/backend field alignment — two rules, both load-bearing
+// (incident 2026-11-26: Trading 下单 failed with
+// "missing field `account_id`" because `PlaceOrderInput` lacked rule 2):
+//  1. Top-level command parameters: Tauri's `#[command]` macro looks
+//     arguments up by camelCase name by default, so a Rust parameter
+//     `account_id` matches the frontend's `accountId` — no rename
+//     needed, and no new parameter may use a name whose camelCase form
+//     collides with another parameter's.
+//  2. Struct fields sent over IPC: serde matches field names literally,
+//     so EVERY struct that crosses the boundary needs
+//     `#[serde(rename_all = "camelCase")]` — otherwise the frontend's
+//     camelCase payload fails with "missing field ...". Wire DTOs live
+//     in the module that owns them (`adapters::types`, `risk`,
+//     `data_engine::realtime`), NOT here, so their alignment tests run
+//     in the scratch crate (this file is not included there).
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppInfo {
@@ -374,15 +390,11 @@ pub async fn refresh_market_catalog(
 /// keys start streaming, removed keys are unsubscribed at once. Sync
 /// command — the engine diffs the set itself, so repeat calls with the
 /// same keys are no-ops.
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct StreamKeyInput {
-    pub exchange_id: String,
-    pub symbol: String,
-}
-
 #[tauri::command]
-pub fn set_stream_symbols(state: State<'_, Arc<AppState>>, keys: Vec<StreamKeyInput>) {
+pub fn set_stream_symbols(
+    state: State<'_, Arc<AppState>>,
+    keys: Vec<crate::data_engine::realtime::StreamKeyInput>,
+) {
     let keys: Vec<(String, String)> = keys
         .into_iter()
         .map(|k| (k.exchange_id, k.symbol))
@@ -462,25 +474,13 @@ fn exec_deps(state: &State<'_, Arc<AppState>>) -> crate::execution::ExecDeps {
     }
 }
 
-/// Manual order intent from the Trading page. `order_type` is
-/// "limit" (GTC) | "post_only" (ALO) | "ioc".
-#[derive(Debug, serde::Deserialize)]
-pub struct PlaceOrderInput {
-    pub account_id: String,
-    pub symbol: String,
-    pub side: String,
-    pub order_type: String,
-    pub quantity: f64,
-    pub price: f64,
-}
-
 /// Place one order. Returns the order record — Open / Filled /
 /// Unresolved are all Ok (Unresolved is a result the user must see,
 /// with the reason in `error`); definite failures are Err.
 #[tauri::command]
 pub async fn place_order(
     state: State<'_, Arc<AppState>>,
-    input: PlaceOrderInput,
+    input: crate::adapters::types::PlaceOrderInput,
 ) -> Result<crate::adapters::types::OrderInfo, String> {
     let deps = exec_deps(&state);
     crate::execution::place_order(

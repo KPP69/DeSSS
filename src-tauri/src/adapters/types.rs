@@ -46,6 +46,25 @@ pub struct OrderRequest {
     pub price: Option<f64>,
     pub client_order_id: Option<String>,
 }
+
+/// The `place_order` command's input, exactly as the Trading page sends
+/// it (`src/lib/tauri.ts` `placeOrder`). The `rename_all` is load-bearing:
+/// without it serde expects snake_case (`account_id`, `order_type`) while
+/// the frontend sends camelCase, and the command fails with
+/// "missing field `account_id`" (real-machine incident 2026-11-26).
+/// Wire DTOs live here — not in `commands/` — so the serde alignment
+/// tests below run in the scratch crate; see `commands/mod.rs` for the
+/// two alignment rules that every new command must follow.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaceOrderInput {
+    pub account_id: String,
+    pub symbol: String,
+    pub side: String,
+    pub order_type: String,
+    pub quantity: f64,
+    pub price: f64,
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Order {
@@ -514,5 +533,52 @@ mod tests {
             serde_json::to_string(&OrderStatus::PartiallyFilled).unwrap(),
             "\"partially_filled\""
         );
+    }
+
+    /// Frontend/backend field alignment (incident 2026-11-26): the exact
+    /// JSON `tauri.ts` `placeOrder` sends must deserialize. If this test
+    /// fails, the Trading page's 下单 button fails with
+    /// "missing field `account_id`" on the real machine.
+    #[test]
+    fn place_order_input_matches_frontend_payload() {
+        let input: PlaceOrderInput = serde_json::from_str(
+            r#"{"accountId":"acc-1","symbol":"BTC","side":"buy","orderType":"limit","quantity":0.01,"price":90000.0}"#,
+        )
+        .expect("frontend payload must deserialize");
+        assert_eq!(input.account_id, "acc-1");
+        assert_eq!(input.symbol, "BTC");
+        assert_eq!(input.side, "buy");
+        assert_eq!(input.order_type, "limit");
+        assert!((input.quantity - 0.01).abs() < 1e-12);
+        assert!((input.price - 90000.0).abs() < 1e-9);
+    }
+
+    /// Regression guard for the same incident: the old snake_case payload
+    /// must NOT deserialize — the contract is camelCase, and silently
+    /// accepting both would hide a frontend/backend drift.
+    #[test]
+    fn place_order_input_rejects_legacy_snake_case() {
+        let err = serde_json::from_str::<PlaceOrderInput>(
+            r#"{"account_id":"acc-1","symbol":"BTC","side":"buy","order_type":"limit","quantity":0.01,"price":90000.0}"#,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("missing field `accountId`"),
+            "{err}"
+        );
+    }
+
+    /// Response direction: an order record sent back to the frontend must
+    /// use camelCase keys, or the Trading page reads `undefined`.
+    #[test]
+    fn order_info_serializes_with_camel_case_keys() {
+        let json = serde_json::to_string(&info()).unwrap();
+        assert!(
+            json.contains("\"clientOrderId\":\"desss-test-1\""),
+            "{json}"
+        );
+        assert!(json.contains("\"filledQuantity\""), "{json}");
+        assert!(!json.contains("client_order_id"), "{json}");
+        assert!(!json.contains("filled_quantity"), "{json}");
     }
 }
