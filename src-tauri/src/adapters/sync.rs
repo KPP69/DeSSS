@@ -191,6 +191,20 @@ impl SyncManager {
             .unwrap_or(false)
     }
 
+    /// (account_id, exchange_id) of every connected account, for the
+    /// periodic open-orders sync (the background task in `lib.rs`
+    /// filters it to the order-capable exchanges).
+    pub fn connected_accounts(&self) -> Vec<(String, String)> {
+        self.running
+            .lock()
+            .map(|m| {
+                m.iter()
+                    .map(|(id, a)| (id.clone(), a.id().to_string()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     pub fn insert(&self, account_id: String, adapter: Arc<dyn ExchangeAdapter>) {
         if let Ok(mut m) = self.running.lock() {
             m.insert(account_id, adapter);

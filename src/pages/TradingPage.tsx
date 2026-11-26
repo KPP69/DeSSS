@@ -7,12 +7,14 @@ import { api } from "../lib/tauri";
 import type { OrderInfo, TradeInfo } from "../lib/types";
 
 /**
- * Trading page: real positions + the manual trading test area
- * (phase 5A §4). Orders go through the execution engine
- * (intent → risk → execution → adapter); results — success,
- * failure, Unresolved — are shown here and in the bottom console.
- * Only Hyperliquid / Entropy accounts can trade in this phase;
- * every other exchange answers "该交易所下单将在下一阶段接入".
+ * Trading page: real positions, live open orders (with cancel) and
+ * order / fill records. There is deliberately no manual order form
+ * here (phase 5A follow-up, 2026-11-26): the `place_order` pipeline,
+ * risk gateway, order state machine and signer stay in the backend
+ * for the Strategy module to call; this page only watches the
+ * exchange state and cancels. Open orders are synced with the
+ * exchange every 10s (backend poll + this page's refresh), so orders
+ * placed or canceled on the website show up here too.
  */
 
 const STATUS_LABEL: Record<string, string> = {
@@ -50,9 +52,6 @@ function statusTone(status: string): "up" | "down" | "warn" | "info" | "neutral"
   }
 }
 
-const inputCls =
-  "bg-ds-panel-2 border border-ds-line rounded-lg px-3 h-8 text-ds-text-1 outline-none focus:border-ds-accent num";
-
 export default function TradingPage() {
   const live = useLiveStore((s) => s.live);
   const accounts = useAccountStore((s) => s.accounts);
@@ -62,44 +61,25 @@ export default function TradingPage() {
   const labelOf = (accountId: string) =>
     accounts.find((a) => a.id === accountId)?.label ?? accountId;
 
-  // Manual trading test area: Hyperliquid / Entropy only.
+  // Open orders come from every connected Hyperliquid / Entropy
+  // account; the backend syncs each list with the exchange.
   const tradeAccounts = accounts.filter(
     (a) => a.exchangeId === "hyperliquid" || a.exchangeId === "entropy"
   );
-  const [accountId, setAccountId] = useState("");
-  const [symbol, setSymbol] = useState("BTC");
-  const [side, setSide] = useState<"buy" | "sell">("buy");
-  const [price, setPrice] = useState("");
-  const [qty, setQty] = useState("");
-  const [orderType, setOrderType] = useState("limit");
-  const [placing, setPlacing] = useState(false);
-  const [result, setResult] = useState<OrderInfo | null>(null);
-  const [placeError, setPlaceError] = useState<string | null>(null);
   const [openOrders, setOpenOrders] = useState<OrderInfo[]>([]);
   const [records, setRecords] = useState<OrderInfo[]>([]);
   const [fills, setFills] = useState<TradeInfo[]>([]);
   const [cancelingId, setCancelingId] = useState<string | null>(null);
-
-  const selectedAccount = tradeAccounts.find((a) => a.id === accountId);
-  const exchangeId = selectedAccount?.exchangeId ?? "";
-
-  // Keep the traded symbol's book live (the risk gateway refuses
-  // to order on a stale book); cleared when the page is left.
-  useEffect(() => {
-    const sym = symbol.trim().toUpperCase();
-    if (!exchangeId || !sym) return;
-    void api.setStreamSymbols([{ exchangeId, symbol: sym }]);
-  }, [exchangeId, symbol]);
-  useEffect(() => {
-    return () => {
-      void api.setStreamSymbols([]);
-    };
-  }, []);
+  const [cancelResult, setCancelResult] = useState<OrderInfo | null>(null);
+  const [cancelError, setCancelError] = useState<string | null>(null);
 
   const refreshLists = useCallback(async () => {
     try {
+      const ids = accounts
+        .filter((a) => a.exchangeId === "hyperliquid" || a.exchangeId === "entropy")
+        .map((a) => a.id);
       const [o, r, f] = await Promise.all([
-        accountId ? api.listOpenOrders(accountId) : Promise.resolve([] as OrderInfo[]),
+        Promise.all(ids.map((id) => api.listOpenOrders(id))).then((lists) => lists.flat()),
         api.listOrderRecords(),
         api.listOrderFills(),
       ]);
@@ -108,9 +88,9 @@ export default function TradingPage() {
       setFills(f);
     } catch {
       // Lists are best-effort; a failed refresh never hides the
-      // positions above or the last order result.
+      // positions above or the last cancel result.
     }
-  }, [accountId]);
+  }, [accounts]);
 
   useEffect(() => {
     void refreshLists();
@@ -118,37 +98,19 @@ export default function TradingPage() {
     return () => clearInterval(t);
   }, [refreshLists]);
 
-  const place = async () => {
-    if (!accountId || !symbol.trim() || !price || !qty) return;
-    setPlacing(true);
-    setPlaceError(null);
-    setResult(null);
-    try {
-      const info = await api.placeOrder({
-        accountId,
-        symbol: symbol.trim().toUpperCase(),
-        side,
-        orderType,
-        quantity: Number(qty),
-        price: Number(price),
-      });
-      setResult(info);
-    } catch (e) {
-      setPlaceError(String(e));
-    } finally {
-      setPlacing(false);
-      void refreshLists();
-    }
-  };
-
   const cancel = async (order: OrderInfo) => {
-    if (!accountId) return;
     setCancelingId(order.orderId || order.clientOrderId);
+    setCancelError(null);
+    setCancelResult(null);
     try {
-      const info = await api.cancelOrder(accountId, order.orderId || order.clientOrderId, order.symbol);
-      setResult(info);
+      const info = await api.cancelOrder(
+        order.accountId,
+        order.orderId || order.clientOrderId,
+        order.symbol
+      );
+      setCancelResult(info);
     } catch (e) {
-      setPlaceError(String(e));
+      setCancelError(String(e));
     } finally {
       setCancelingId(null);
       void refreshLists();
@@ -190,117 +152,12 @@ export default function TradingPage() {
         </div>
       )}
 
-      {/* Manual trading test area (HL / Entropy only) */}
-      <div className="font-semibold text-ds-text-1 mb-2 mt-6">手动下单测试 · Hyperliquid / Entropy</div>
+      {/* Open orders */}
+      <div className="font-semibold text-ds-text-1 mb-2 mt-6">委托挂单 · 与交易所实时同步</div>
       {tradeAccounts.length === 0 ? (
         <EmptyState>还没有 Hyperliquid 或 Entropy 账户 — 先在账户中心添加并连接。</EmptyState>
-      ) : (
-        <div className="rounded-lg border border-ds-line bg-ds-panel p-4 mb-4">
-          <div className="flex flex-wrap items-end gap-3">
-            <label className="flex flex-col gap-1">
-              <span className="text-xs text-ds-text-2">账户</span>
-              <select className={inputCls} value={accountId} onChange={(e) => setAccountId(e.target.value)}>
-                <option value="">选择账户</option>
-                {tradeAccounts.map((a) => (
-                  <option key={a.id} value={a.id}>
-                    {a.label}（{getExchange(a.exchangeId).name}）
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="flex flex-col gap-1">
-              <span className="text-xs text-ds-text-2">交易对</span>
-              <input
-                className={inputCls}
-                value={symbol}
-                onChange={(e) => setSymbol(e.target.value.toUpperCase())}
-                placeholder="BTC"
-              />
-            </label>
-            <div className="flex flex-col gap-1">
-              <span className="text-xs text-ds-text-2">方向</span>
-              <div className="flex gap-2">
-                <Button variant={side === "buy" ? "primary" : "ghost"} onClick={() => setSide("buy")}>
-                  买入
-                </Button>
-                <Button variant={side === "sell" ? "primary" : "ghost"} onClick={() => setSide("sell")}>
-                  卖出
-                </Button>
-              </div>
-            </div>
-            <label className="flex flex-col gap-1">
-              <span className="text-xs text-ds-text-2">价格</span>
-              <input
-                className={inputCls}
-                type="number"
-                min={0}
-                step="any"
-                value={price}
-                onChange={(e) => setPrice(e.target.value)}
-                placeholder="限价"
-              />
-            </label>
-            <label className="flex flex-col gap-1">
-              <span className="text-xs text-ds-text-2">数量</span>
-              <input
-                className={inputCls}
-                type="number"
-                min={0}
-                step="any"
-                value={qty}
-                onChange={(e) => setQty(e.target.value)}
-                placeholder="0.01"
-              />
-            </label>
-            <label className="flex flex-col gap-1">
-              <span className="text-xs text-ds-text-2">类型</span>
-              <select className={inputCls} value={orderType} onChange={(e) => setOrderType(e.target.value)}>
-                <option value="limit">限价 GTC</option>
-                <option value="post_only">Post-Only</option>
-                <option value="ioc">IOC</option>
-              </select>
-            </label>
-            <Button
-              variant="primary"
-              disabled={placing || !accountId || !symbol.trim() || !price || !qty}
-              onClick={() => void place()}
-            >
-              {placing ? "下单中…" : "下单"}
-            </Button>
-          </div>
-          <div className="mt-3 text-xs text-ds-text-2">
-            下单前经过风控网关（总开关、回撤、行情新鲜度、方向、单笔上限、仓位上限、可用资金）；价格/数量按品种步长对齐（买向下、卖向上）。请用最小数量测试。
-          </div>
-          {placeError && (
-            <div className="mt-3 text-[13px] text-ds-down">下单失败：{placeError}</div>
-          )}
-          {result && (
-            <div className="mt-3 flex flex-wrap items-center gap-3 text-[13px]">
-              <Badge tone={statusTone(result.status)}>{STATUS_LABEL[result.status] ?? result.status}</Badge>
-              <span className="num text-ds-text-1">
-                {result.symbol} {result.side === "buy" ? "买入" : "卖出"} {result.quantity}
-                {result.price != null ? ` @ ${result.price}` : ""}
-              </span>
-              {result.orderId && <span className="num text-ds-text-2">oid {result.orderId}</span>}
-              {result.filledQuantity > 0 && (
-                <span className="num text-ds-text-1">
-                  已成交 {result.filledQuantity}
-                  {result.averageFillPrice != null ? ` @ ${result.averageFillPrice}` : ""}
-                </span>
-              )}
-              {result.error && <span className="text-ds-warn">{result.error}</span>}
-              {result.status === "unresolved" && (
-                <span className="text-ds-warn">结果未知：已按 cloid 对账，请查看挂单与订单记录。</span>
-              )}
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Open orders */}
-      <div className="font-semibold text-ds-text-1 mb-2 mt-6">委托挂单</div>
-      {openOrders.length === 0 ? (
-        <EmptyState>当前无挂单 — 下单后，挂在盘上的订单会显示在这里（每 10 秒刷新）。</EmptyState>
+      ) : openOrders.length === 0 ? (
+        <EmptyState>当前无挂单 — 交易所的活动挂单会显示在这里（每 10 秒同步），在官网挂的单也会出现。</EmptyState>
       ) : (
         <div className="mb-6">
           <DataTable
@@ -328,6 +185,31 @@ export default function TradingPage() {
               </span>,
             ])}
           />
+        </div>
+      )}
+      {cancelError && (
+        <div className="mt-3 text-[13px] text-ds-down">撤单失败：{cancelError}</div>
+      )}
+      {cancelResult && (
+        <div className="mt-3 flex flex-wrap items-center gap-3 text-[13px]">
+          <Badge tone={statusTone(cancelResult.status)}>
+            {STATUS_LABEL[cancelResult.status] ?? cancelResult.status}
+          </Badge>
+          <span className="num text-ds-text-1">
+            {cancelResult.symbol} {cancelResult.side === "buy" ? "买入" : "卖出"} {cancelResult.quantity}
+            {cancelResult.price != null ? ` @ ${cancelResult.price}` : ""}
+          </span>
+          {cancelResult.orderId && <span className="num text-ds-text-2">oid {cancelResult.orderId}</span>}
+          {cancelResult.filledQuantity > 0 && (
+            <span className="num text-ds-text-1">
+              已成交 {cancelResult.filledQuantity}
+              {cancelResult.averageFillPrice != null ? ` @ ${cancelResult.averageFillPrice}` : ""}
+            </span>
+          )}
+          {cancelResult.error && <span className="text-ds-warn">{cancelResult.error}</span>}
+          {cancelResult.status === "unresolved" && (
+            <span className="text-ds-warn">结果未知：已按 cloid 对账，请查看挂单与订单记录。</span>
+          )}
         </div>
       )}
 

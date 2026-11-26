@@ -566,7 +566,12 @@ fn parse_open_orders(v: &Value, exchange_id: &str, account_id: &str) -> Result<V
             let oid = o["oid"].as_u64()?;
             Some(Order {
                 order_id: oid.to_string(),
-                client_order_id: String::new(),
+                // The exchange returns the cloid when the order was
+                // placed with one (null otherwise). It must be kept:
+                // without it a website / restarted-session order can
+                // only be cancelled by oid, and its post-cancel
+                // reconcile has no cloid to query by.
+                client_order_id: o["cloid"].as_str().unwrap_or("").to_string(),
                 exchange_id: exchange_id.to_string(),
                 account_id: account_id.to_string(),
                 symbol: strip_dex_prefix(o["coin"].as_str().unwrap_or("")),
@@ -611,6 +616,56 @@ fn parse_fills(
             timestamp: f["time"].as_i64().unwrap_or(0),
         })
         .collect()
+}
+
+/// The `cancel` action, exactly as the official Python SDK builds it
+/// (`Exchange.bulk_cancel`): short keys `a` (asset) / `o` (oid) — the
+/// same wire shorthand as the `order` action. NOTE the asymmetry:
+/// `cancelByCloid` uses the full names `asset` / `cloid` instead.
+/// Both forms were re-verified against the freshly installed official
+/// SDK on 2026-11-26 (msgpack bytes, action hash and r/s/v
+/// byte-identical for the test key 0x11…11, nonce 1700000000000);
+/// the tests below pin the adapter's construction to those vectors,
+/// so a future key-name drift fails loudly instead of silently
+/// leaving the order on the book.
+fn cancel_action_mp(asset: u32, oid: u64) -> Mp<'static> {
+    Mp::Map(vec![
+        ("type", Mp::Str("cancel")),
+        (
+            "cancels",
+            Mp::Array(vec![Mp::Map(vec![
+                ("a", Mp::UInt(asset as u64)),
+                ("o", Mp::UInt(oid)),
+            ])]),
+        ),
+    ])
+}
+
+fn cancel_action_json(asset: u32, oid: u64) -> Value {
+    serde_json::json!({
+        "type": "cancel",
+        "cancels": [{"a": asset, "o": oid}],
+    })
+}
+
+fn cancel_by_cloid_action_mp<'a>(asset: u32, cloid: &'a str) -> Mp<'a> {
+    Mp::Map(vec![
+        ("type", Mp::Str("cancelByCloid")),
+        (
+            "cancels",
+            Mp::Array(vec![Mp::Map(vec![
+                ("asset", Mp::UInt(asset as u64)),
+                ("cloid", Mp::Str(cloid)),
+            ])]),
+        ),
+    ])
+}
+
+fn cancel_by_cloid_action_json(asset: u32, cloid: &str) -> Value {
+    serde_json::json!({
+        "type": "cancelByCloid",
+        "cancels": [{"asset": asset, "cloid": cloid}],
+    })
 }
 
 impl HyperliquidAdapter {
@@ -756,6 +811,43 @@ impl HyperliquidAdapter {
         resp.json().await.map_err(|e| {
             AdapterError::UnknownOutcome(format!("交易所响应无法解析，订单状态未知：{e}"))
         })
+    }
+
+    /// One `orderStatus` lookup. `numeric` posts the id as a JSON
+    /// number (a real oid); otherwise it is posted as a string (a
+    /// cloid). The two forms must never be confused: the exchange
+    /// rejects a decimal oid sent as a string (verified live
+    /// 2026-11-26), and the parse below needs the id back as the
+    /// fallback `client_order_id` for orders the exchange reports
+    /// without one.
+    async fn query_order(&self, id: &str, numeric: bool) -> AdapterResult<OrderInfo> {
+        let oid_json = if numeric {
+            let n: u64 = id
+                .parse()
+                .map_err(|_| AdapterError::Other("订单号无法解析".to_string()))?;
+            serde_json::json!(n)
+        } else {
+            Value::String(id.to_string())
+        };
+        let v = self
+            .post_info(serde_json::json!({
+                "type": "orderStatus",
+                "user": self.address,
+                "oid": oid_json,
+            }))
+            .await?;
+        // Fill details need the oid + order time; fetch them first so
+        // the average price below is real, not the limit price.
+        let mut fills_avg = None;
+        if let Some(o) = v["order"]["order"].as_object() {
+            let oid = o["oid"].as_u64().unwrap_or(0);
+            let ts = o["timestamp"].as_i64().unwrap_or(0);
+            if oid != 0 && ts > 0 {
+                fills_avg = self.fills_avg(oid, ts).await;
+            }
+        }
+        parse_order_status_response(&v, &self.id, &self.account_id, id, fills_avg)
+            .map_err(AdapterError::Other)
     }
 
     /// Volume-weighted average fill price of one order, from
@@ -981,41 +1073,14 @@ impl ExchangeAdapter for HyperliquidAdapter {
         let asset = self.resolve_asset(symbol).await?;
         let (action_mp, action_json) = if order_id.starts_with("0x") {
             (
-                Mp::Map(vec![
-                    ("type", Mp::Str("cancelByCloid")),
-                    (
-                        "cancels",
-                        Mp::Array(vec![Mp::Map(vec![
-                            ("asset", Mp::UInt(asset as u64)),
-                            ("cloid", Mp::Str(order_id)),
-                        ])]),
-                    ),
-                ]),
-                serde_json::json!({
-                    "type": "cancelByCloid",
-                    "cancels": [{"asset": asset, "cloid": order_id}],
-                }),
+                cancel_by_cloid_action_mp(asset, order_id),
+                cancel_by_cloid_action_json(asset, order_id),
             )
         } else {
             let oid: u64 = order_id
                 .parse()
                 .map_err(|_| AdapterError::Other(format!("订单号格式不正确：{order_id}")))?;
-            (
-                Mp::Map(vec![
-                    ("type", Mp::Str("cancel")),
-                    (
-                        "cancels",
-                        Mp::Array(vec![Mp::Map(vec![
-                            ("a", Mp::UInt(asset as u64)),
-                            ("o", Mp::UInt(oid)),
-                        ])]),
-                    ),
-                ]),
-                serde_json::json!({
-                    "type": "cancel",
-                    "cancels": [{"a": asset, "o": oid}],
-                }),
-            )
+            (cancel_action_mp(asset, oid), cancel_action_json(asset, oid))
         };
         let nonce = NonceAllocator::next(&agent_addr);
         let v = self.post_exchange(action_json, &action_mp, nonce).await?;
@@ -1052,25 +1117,21 @@ impl ExchangeAdapter for HyperliquidAdapter {
         _account_id: &str,
         cloid: &str,
     ) -> AdapterResult<OrderInfo> {
-        let v = self
-            .post_info(serde_json::json!({
-                "type": "orderStatus",
-                "user": self.address,
-                "oid": cloid,
-            }))
-            .await?;
-        // Fill details need the oid + order time; fetch them first so
-        // the average price below is real, not the limit price.
-        let mut fills_avg = None;
-        if let Some(o) = v["order"]["order"].as_object() {
-            let oid = o["oid"].as_u64().unwrap_or(0);
-            let ts = o["timestamp"].as_i64().unwrap_or(0);
-            if oid != 0 && ts > 0 {
-                fills_avg = self.fills_avg(oid, ts).await;
+        // A decimal oid passed as a string is NOT a cloid: the
+        // exchange rejects it with "Failed to deserialize the JSON
+        // body into the target type" (verified live 2026-11-26), so
+        // the post-cancel reconcile of an oid-only order silently
+        // kept the old state. Route it to the numeric form instead.
+        if !cloid.starts_with("0x") {
+            if let Ok(oid) = cloid.parse::<u64>() {
+                return self.query_order_by_oid(_account_id, oid).await;
             }
         }
-        parse_order_status_response(&v, &self.id, &self.account_id, cloid, fills_avg)
-            .map_err(AdapterError::Other)
+        self.query_order(cloid, false).await
+    }
+
+    async fn query_order_by_oid(&self, _account_id: &str, oid: u64) -> AdapterResult<OrderInfo> {
+        self.query_order(&oid.to_string(), true).await
     }
 
     async fn query_fills(&self, _account_id: &str, cloid: &str) -> AdapterResult<Vec<TradeInfo>> {
@@ -1319,5 +1380,65 @@ mod tests {
         assert_eq!(decimal_to_wire(0.01).unwrap(), "0.01");
         assert_eq!(decimal_to_wire(100.50).unwrap(), "100.5");
         assert!(decimal_to_wire(0.0000000001).is_err());
+    }
+
+    /// The adapter's cancel actions, pinned to the official SDK's
+    /// vectors (re-generated from the freshly installed SDK on
+    /// 2026-11-26, test key 0x11…11, nonce 1700000000000 — same
+    /// fixtures as `hl_signing`'s golden-vector tests). This is the
+    /// link the old tests missed: the signing was verified, but
+    /// nothing checked that the adapter builds the same action the
+    /// signer was tested with.
+    #[test]
+    fn cancel_actions_match_the_official_sdk() {
+        let mut out = Vec::new();
+        hl_signing::encode_msgpack(&cancel_action_mp(0, 77_738_308), &mut out);
+        assert_eq!(
+            hex::encode(&out),
+            "82a474797065a663616e63656ca763616e63656c739182a16100a16fce04a23144"
+        );
+        let mut out = Vec::new();
+        hl_signing::encode_msgpack(
+            &cancel_by_cloid_action_mp(0, "0x1234567890abcdef1234567890abcdef"),
+            &mut out,
+        );
+        assert_eq!(
+            hex::encode(&out),
+            "82a474797065ad63616e63656c4279436c6f6964a763616e63656c739182a5617373657400a5636c6f6964d92230783132333435363738393061626364656631323334353637383930616263646566"
+        );
+        // The JSON action posted to /exchange must use the same keys.
+        assert_eq!(
+            cancel_action_json(0, 77_738_308),
+            serde_json::json!({"type": "cancel", "cancels": [{"a": 0, "o": 77738308}]})
+        );
+        assert_eq!(
+            cancel_by_cloid_action_json(0, "0x1234567890abcdef1234567890abcdef"),
+            serde_json::json!({"type": "cancelByCloid", "cancels": [{"asset": 0, "cloid": "0x1234567890abcdef1234567890abcdef"}]})
+        );
+    }
+
+    /// `openOrders` rows carry the cloid when the order was placed
+    /// with one (null for website orders). The parser must keep it:
+    /// without it a website / restarted-session order can only be
+    /// cancelled by oid, and its post-cancel reconcile has no cloid
+    /// to query by.
+    #[test]
+    fn parse_open_orders_keeps_the_cloid() {
+        let v = serde_json::json!([
+            {"coin": "BTC", "side": "B", "limitPx": "90000.0", "sz": "0.01",
+             "oid": 77_738_308, "timestamp": 1724361546700i64,
+             "cloid": "0x1234567890abcdef1234567890abcdef"},
+            {"coin": "ETH", "side": "A", "limitPx": "3000.0", "sz": "0.5",
+             "oid": 77_738_309, "timestamp": 1724361546700i64, "cloid": null}
+        ]);
+        let orders = parse_open_orders(&v, "hyperliquid", "acc-1").expect("parse");
+        assert_eq!(orders.len(), 2);
+        assert_eq!(orders[0].order_id, "77738308");
+        assert_eq!(
+            orders[0].client_order_id,
+            "0x1234567890abcdef1234567890abcdef"
+        );
+        assert_eq!(orders[1].order_id, "77738309");
+        assert_eq!(orders[1].client_order_id, "");
     }
 }

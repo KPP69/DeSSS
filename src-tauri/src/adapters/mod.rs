@@ -109,6 +109,20 @@ pub trait ExchangeAdapter: Send + Sync {
             "该交易所下单将在下一阶段接入".to_string(),
         ))
     }
+    /// Authoritative order state by numeric exchange oid
+    /// (orderStatus). Same `unknownOid` contract as
+    /// `query_order_by_cloid`. This is a separate method on purpose:
+    /// the `oid` field must be posted as a JSON **number** — a
+    /// decimal oid sent as a string is rejected by the exchange with
+    /// "Failed to deserialize the JSON body into the target type"
+    /// (verified live 2026-11-26), so the two id forms must never
+    /// share one code path. Default: the exchange does not support
+    /// ordering yet.
+    async fn query_order_by_oid(&self, _account_id: &str, _oid: u64) -> AdapterResult<OrderInfo> {
+        Err(AdapterError::Other(
+            "该交易所下单将在下一阶段接入".to_string(),
+        ))
+    }
     /// Fills of one order, by cloid (userFillsByTime matched by oid).
     /// Default: the exchange does not support ordering yet.
     async fn query_fills(&self, _account_id: &str, _cloid: &str) -> AdapterResult<Vec<TradeInfo>> {

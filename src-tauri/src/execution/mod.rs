@@ -25,7 +25,7 @@
 //!   a rejection is the gateway working, not an anomaly. Exchange
 //!   failures (UnknownOutcome, definite rejections) do.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
 use rust_decimal::prelude::ToPrimitive;
@@ -34,7 +34,7 @@ use rust_decimal::Decimal;
 use crate::adapters::hl_signing;
 use crate::adapters::market_catalog::MarketCatalog;
 use crate::adapters::sync::SyncManager;
-use crate::adapters::types::{OrderInfo, OrderRequest, OrderStatus, TradeInfo};
+use crate::adapters::types::{Order, OrderInfo, OrderRequest, OrderStatus, TradeInfo};
 use crate::adapters::{AdapterError, ExchangeAdapter};
 use crate::bus::EventBus;
 use crate::data_engine::realtime::RealtimeEngine;
@@ -410,7 +410,7 @@ pub async fn place_order(deps: &ExecDeps, intent: PlaceIntent) -> Result<OrderIn
                     // The response says filled; the authoritative
                     // record (fills + avg price) comes from the query.
                     deps.risk.record_order_outcome(true);
-                    Ok(reconcile_by_cloid(deps, &adapter, &info).await)
+                    Ok(reconcile_order(deps, &adapter, &info).await)
                 }
                 other => {
                     info.transition(other, crate::adapters::now_ms()).ok();
@@ -435,7 +435,7 @@ pub async fn place_order(deps: &ExecDeps, intent: PlaceIntent) -> Result<OrderIn
                 ),
             );
             deps.risk.record_order_outcome(false);
-            Ok(reconcile_by_cloid(deps, &adapter, &info).await)
+            Ok(reconcile_order(deps, &adapter, &info).await)
         }
         Err(AdapterError::Other(msg)) => {
             // A definite exchange rejection.
@@ -456,12 +456,37 @@ pub async fn place_order(deps: &ExecDeps, intent: PlaceIntent) -> Result<OrderIn
     }
 }
 
-/// Reconcile one order by cloid: query the exchange, apply the
-/// authoritative record, record fills once (delta only), update the
+/// Authoritative order state, by whatever id the record has: a cloid
+/// (`0x…`) goes to `query_order_by_cloid`, a numeric oid to
+/// `query_order_by_oid`. The two id forms must never be confused —
+/// the exchange rejects a decimal oid sent as a string, which used
+/// to make the post-cancel reconcile of an oid-only order silently
+/// keep the old state (real-machine incident 2026-11-26).
+async fn query_order_latest(
+    adapter: &Arc<dyn ExchangeAdapter>,
+    info: &OrderInfo,
+) -> Result<OrderInfo, AdapterError> {
+    if !info.client_order_id.is_empty() && info.client_order_id.starts_with("0x") {
+        adapter
+            .query_order_by_cloid(&info.account_id, &info.client_order_id)
+            .await
+    } else if let Ok(oid) = info.order_id.parse::<u64>() {
+        adapter.query_order_by_oid(&info.account_id, oid).await
+    } else if let Ok(oid) = info.client_order_id.parse::<u64>() {
+        adapter.query_order_by_oid(&info.account_id, oid).await
+    } else {
+        Err(AdapterError::Other(
+            "该订单没有可用的订单号，无法查询最新状态".to_string(),
+        ))
+    }
+}
+
+/// Reconcile one order against the exchange: query its authoritative
+/// state, apply it to the store (fills once, delta only), update the
 /// local position estimate and trigger a position reconciliation.
 /// Returns the merged record; on any query failure the order stays
 /// exactly as it was (Unresolved is never guessed away).
-async fn reconcile_by_cloid(
+async fn reconcile_order(
     deps: &ExecDeps,
     adapter: &Arc<dyn ExchangeAdapter>,
     info: &OrderInfo,
@@ -471,10 +496,7 @@ async fn reconcile_by_cloid(
         .get(&info.client_order_id)
         .map(|o| o.filled_quantity)
         .unwrap_or(0.0);
-    match adapter
-        .query_order_by_cloid(&info.account_id, &info.client_order_id)
-        .await
-    {
+    match query_order_latest(adapter, info).await {
         Ok(queried) => {
             let merged = deps.orders.apply_query(&queried);
             let delta = (merged.filled_quantity - prev_filled).max(0.0);
@@ -596,7 +618,7 @@ pub async fn cancel_order(
         Ok(()) | Err(AdapterError::UnknownOutcome(_)) => {
             // The cancel was accepted, or its outcome is unknown:
             // either way the order's fate is decided by the query.
-            Ok(reconcile_by_cloid(deps, &adapter, &info).await)
+            Ok(reconcile_order(deps, &adapter, &info).await)
         }
         Err(AdapterError::Other(msg)) => {
             // A cancel that was never attempted (no key, bad symbol,
@@ -611,60 +633,140 @@ pub async fn cancel_order(
             }
             // "already canceled, or filled" and friends: query to
             // find out which it was.
-            Ok(reconcile_by_cloid(deps, &adapter, &info).await)
+            Ok(reconcile_order(deps, &adapter, &info).await)
         }
         Err(AdapterError::NotConnected) => Err("账户未连接，无法撤单".to_string()),
     }
 }
 
-/// Live open orders from the exchange, merged with the store so the
-/// cloid (and our record) travels with each row.
-pub async fn list_open_orders(deps: &ExecDeps, account_id: &str) -> Result<Vec<OrderInfo>, String> {
+/// Merge the exchange's live open orders into the store (pure step,
+/// no network) and return the live list plus the local non-terminal
+/// records that are no longer on the exchange.
+///
+/// - Each exchange row is authoritative for open state: a stored
+///   record matching by oid is refreshed to Open; a row with no
+///   stored record (an order placed on the website, or before a
+///   restart) is inserted as an Open record, so it shows up and can
+///   be cancelled. A website order without a cloid is keyed by its
+///   oid string, exactly like the cancel flow's synthetic record.
+/// - Local records in Open / Submitted / PartiallyFilled with a real
+///   oid that are missing from the live list are returned for the
+///   caller to query — they may have been filled or canceled
+///   elsewhere. Terminal records and records without an oid (never
+///   sent) are never reported missing. Unresolved is deliberately
+///   excluded: it already has its own reconcile flow and must never
+///   be cleaned up by a list diff.
+fn merge_open_orders(
+    store: &OrderStore,
+    account_id: &str,
+    exchange: &[Order],
+) -> (Vec<OrderInfo>, Vec<OrderInfo>) {
+    let mut live = Vec::new();
+    let mut live_oids: HashSet<&str> = HashSet::new();
+    for o in exchange {
+        live_oids.insert(o.order_id.as_str());
+        let row = if let Some(mut stored) = store.get_by_oid(&o.order_id) {
+            // The exchange says it is open; our record may be stale
+            // (e.g. a cancel that raced). Trust the exchange.
+            stored
+                .transition(OrderStatus::Open, crate::adapters::now_ms())
+                .ok();
+            stored.updated_at = crate::adapters::now_ms();
+            stored
+        } else {
+            OrderInfo {
+                order_id: o.order_id.clone(),
+                client_order_id: if o.client_order_id.is_empty() {
+                    o.order_id.clone()
+                } else {
+                    o.client_order_id.clone()
+                },
+                exchange_id: o.exchange_id.clone(),
+                account_id: o.account_id.clone(),
+                symbol: o.symbol.clone(),
+                side: o.side.clone(),
+                order_type: o.order_type.clone(),
+                status: OrderStatus::Open,
+                price: o.price,
+                quantity: o.quantity,
+                filled_quantity: 0.0,
+                remaining_quantity: o.quantity,
+                average_fill_price: None,
+                error: None,
+                created_at: o.ts,
+                updated_at: o.ts,
+            }
+        };
+        store.insert(row.clone());
+        live.push(row);
+    }
+    let missing: Vec<OrderInfo> = store
+        .list()
+        .into_iter()
+        .filter(|r| {
+            r.account_id == account_id
+                && matches!(
+                    r.status,
+                    OrderStatus::Open | OrderStatus::Submitted | OrderStatus::PartiallyFilled
+                )
+                && !r.order_id.is_empty()
+                && !live_oids.contains(r.order_id.as_str())
+        })
+        .collect();
+    (live, missing)
+}
+
+/// Sync one account's open orders with the exchange (the periodic
+/// poll's job, and what the Trading page's refresh calls): the
+/// exchange's live list is the only source of truth. Local Open /
+/// Submitted / PartiallyFilled records that are gone from it are
+/// queried for their final state (Canceled / Filled / …) and
+/// updated; a failed query leaves the record untouched, never
+/// guessed. Website-placed orders are imported into the store by
+/// the merge, so they show up and can be cancelled.
+pub async fn sync_open_orders(deps: &ExecDeps, account_id: &str) -> Result<Vec<OrderInfo>, String> {
     let adapter = deps
         .sync
         .adapter(account_id)
         .ok_or_else(|| "账户未连接，请先在账户中心连接".to_string())?;
-    let orders = adapter
+    let exchange = adapter
         .get_open_orders(account_id)
         .await
         .map_err(|e| e.to_string())?;
-    Ok(orders
-        .into_iter()
-        .map(|o| {
-            if let Some(mut stored) = deps.orders.get_by_oid(&o.order_id) {
-                // The exchange says it is open; our record may be
-                // stale (e.g. a cancel that raced). Trust the query.
-                stored
-                    .transition(OrderStatus::Open, crate::adapters::now_ms())
-                    .ok();
-                stored
-            } else {
-                OrderInfo {
-                    order_id: o.order_id,
-                    client_order_id: o.client_order_id,
-                    exchange_id: o.exchange_id,
-                    account_id: o.account_id,
-                    symbol: o.symbol,
-                    side: o.side,
-                    order_type: o.order_type,
-                    status: OrderStatus::Open,
-                    price: o.price,
-                    quantity: o.quantity,
-                    filled_quantity: 0.0,
-                    remaining_quantity: o.quantity,
-                    average_fill_price: None,
-                    error: None,
-                    created_at: o.ts,
-                    updated_at: o.ts,
-                }
-            }
-        })
-        .collect())
+    let (live, missing) = merge_open_orders(&deps.orders, account_id, &exchange);
+    for record in missing {
+        // The exchange no longer lists this order: ask for its final
+        // state. `reconcile_order` keeps the record unchanged when
+        // the query fails (unknownOid / network), so this never
+        // deletes or guesses an order away.
+        let updated = reconcile_order(deps, &adapter, &record).await;
+        if updated.status != record.status {
+            log(
+                deps,
+                "info",
+                format!(
+                    "订单 {} 已不在 {} 挂单中，状态更新为 {:?}",
+                    record.client_order_id, record.exchange_id, updated.status
+                ),
+            );
+        }
+    }
+    Ok(live)
+}
+
+/// Live open orders from the exchange, merged with the store so the
+/// cloid (and our record) travels with each row. Every call syncs
+/// the account's open orders first (see `sync_open_orders`).
+pub async fn list_open_orders(deps: &ExecDeps, account_id: &str) -> Result<Vec<OrderInfo>, String> {
+    sync_open_orders(deps, account_id).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapters::types::{Balance, Position};
+    use crate::adapters::AdapterResult;
+    use async_trait::async_trait;
 
     fn record(cloid: &str, status: OrderStatus) -> OrderInfo {
         OrderInfo {
@@ -812,5 +914,202 @@ mod tests {
             assert_eq!(records.len(), 1);
             assert_eq!(records[0].symbol, "BTC");
         }
+    }
+
+    /// One exchange open-orders row, for the sync tests.
+    fn exchange_order(oid: &str, cloid: &str) -> Order {
+        Order {
+            order_id: oid.to_string(),
+            client_order_id: cloid.to_string(),
+            exchange_id: "hyperliquid".to_string(),
+            account_id: "acc-1".to_string(),
+            symbol: "BTC".to_string(),
+            side: "buy".to_string(),
+            order_type: "limit".to_string(),
+            quantity: 0.01,
+            price: Some(90000.0),
+            status: OrderStatus::Open,
+            ts: 1000,
+        }
+    }
+
+    /// Test double for the open-orders sync: a canned open-orders
+    /// list and canned order-status answers, no network.
+    struct FakeOrdersAdapter {
+        open: std::sync::Mutex<Vec<Order>>,
+        by_cloid: std::sync::Mutex<HashMap<String, OrderInfo>>,
+        by_oid: std::sync::Mutex<HashMap<u64, OrderInfo>>,
+    }
+
+    #[async_trait]
+    impl ExchangeAdapter for FakeOrdersAdapter {
+        fn id(&self) -> &str {
+            "hyperliquid"
+        }
+        fn name(&self) -> &str {
+            "Fake Hyperliquid"
+        }
+        async fn connect(&self) -> AdapterResult<()> {
+            Ok(())
+        }
+        async fn disconnect(&self) -> AdapterResult<()> {
+            Ok(())
+        }
+        async fn subscribe_ticks(&self, _symbols: Vec<String>) -> AdapterResult<()> {
+            Ok(())
+        }
+        async fn unsubscribe_ticks(&self, _symbols: Vec<String>) -> AdapterResult<()> {
+            Ok(())
+        }
+        async fn get_balances(&self, _account_id: &str) -> AdapterResult<Vec<Balance>> {
+            Ok(vec![])
+        }
+        async fn get_positions(&self, _account_id: &str) -> AdapterResult<Vec<Position>> {
+            Ok(vec![])
+        }
+        async fn get_open_orders(&self, _account_id: &str) -> AdapterResult<Vec<Order>> {
+            Ok(self.open.lock().unwrap().clone())
+        }
+        async fn place_order(&self, _req: OrderRequest) -> AdapterResult<Order> {
+            Err(AdapterError::Other("fake adapter cannot place".to_string()))
+        }
+        async fn cancel_order(
+            &self,
+            _account_id: &str,
+            _order_id: &str,
+            _symbol: &str,
+        ) -> AdapterResult<()> {
+            Ok(())
+        }
+        async fn query_order_by_cloid(
+            &self,
+            _account_id: &str,
+            cloid: &str,
+        ) -> AdapterResult<OrderInfo> {
+            self.by_cloid
+                .lock()
+                .unwrap()
+                .get(cloid)
+                .cloned()
+                .ok_or_else(|| AdapterError::Other("unknownOid".to_string()))
+        }
+        async fn query_order_by_oid(
+            &self,
+            _account_id: &str,
+            oid: u64,
+        ) -> AdapterResult<OrderInfo> {
+            self.by_oid
+                .lock()
+                .unwrap()
+                .get(&oid)
+                .cloned()
+                .ok_or_else(|| AdapterError::Other("unknownOid".to_string()))
+        }
+    }
+
+    #[test]
+    fn merge_open_orders_reports_missing_and_imports_external() {
+        let store = OrderStore::new();
+        let mut a = record("0xaaa", OrderStatus::Open);
+        a.order_id = "1".to_string();
+        store.insert(a);
+        let mut b = record("0xbbb", OrderStatus::Open);
+        b.order_id = "2".to_string();
+        store.insert(b);
+        let mut filled = record("0xeee", OrderStatus::Filled);
+        filled.order_id = "5".to_string();
+        store.insert(filled);
+        let mut unresolved = record("0xfff", OrderStatus::Unresolved);
+        unresolved.order_id = "6".to_string();
+        store.insert(unresolved);
+
+        let (live, missing) = merge_open_orders(
+            &store,
+            "acc-1",
+            &[exchange_order("2", "0xbbb"), exchange_order("3", "0xccc")],
+        );
+        assert_eq!(live.len(), 2);
+        assert_eq!(live[0].order_id, "2");
+        assert_eq!(live[1].order_id, "3");
+        assert_eq!(live[1].client_order_id, "0xccc");
+        // Only A is missing: the Filled record is terminal, and the
+        // Unresolved one is deliberately never cleaned up by a list
+        // diff.
+        assert_eq!(missing.len(), 1);
+        assert_eq!(missing[0].client_order_id, "0xaaa");
+        // The website order was imported into the store.
+        assert_eq!(store.get("0xccc").unwrap().status, OrderStatus::Open);
+    }
+
+    /// End-to-end sync (real-machine incident 2026-11-26): an order
+    /// canceled on the website must leave the store, and a
+    /// website-placed order must appear and be cancellable.
+    #[tokio::test]
+    async fn sync_open_orders_imports_external_and_cleans_up_missing() {
+        use crate::adapters::market_catalog::MarketCatalog;
+        use crate::adapters::sync::SyncManager;
+        use crate::bus::EventBus;
+        use crate::data_engine::realtime::RealtimeEngine;
+        use crate::risk::{RiskConfig, RiskGateway};
+
+        // Local records: A (oid "1", Open) will be missing from the
+        // exchange list — the fake query says Canceled. B (oid "2",
+        // Open) stays listed — stays Open.
+        let store = Arc::new(OrderStore::new());
+        let mut a = record("0xaaa", OrderStatus::Open);
+        a.order_id = "1".to_string();
+        store.insert(a);
+        let mut b = record("0xbbb", OrderStatus::Open);
+        b.order_id = "2".to_string();
+        store.insert(b);
+        // A record for another account must be untouched.
+        let mut other = record("0xddd", OrderStatus::Open);
+        other.account_id = "acc-2".to_string();
+        other.order_id = "9".to_string();
+        store.insert(other);
+
+        // Exchange list: B (still open) + C (oid "3", placed on the
+        // website with a cloid) + D (oid "4", website order, no cloid).
+        let fake = Arc::new(FakeOrdersAdapter {
+            open: std::sync::Mutex::new(vec![
+                exchange_order("2", "0xbbb"),
+                exchange_order("3", "0xccc"),
+                exchange_order("4", ""),
+            ]),
+            by_cloid: std::sync::Mutex::new(HashMap::from([("0xaaa".to_string(), {
+                let mut q = record("0xaaa", OrderStatus::Canceled);
+                q.order_id = "1".to_string();
+                q
+            })])),
+            by_oid: std::sync::Mutex::new(HashMap::new()),
+        });
+        let sync = Arc::new(SyncManager::new());
+        sync.insert("acc-1".to_string(), fake);
+        let bus = EventBus::new(16);
+        let catalog = Arc::new(MarketCatalog::new(bus.clone()));
+        let deps = ExecDeps {
+            risk: Arc::new(RiskGateway::new(RiskConfig::default())),
+            orders: store.clone(),
+            sync: sync.clone(),
+            streams: Arc::new(RealtimeEngine::new(bus.clone(), catalog.clone(), None)),
+            catalog: catalog.clone(),
+            bus: bus.clone(),
+        };
+        let live = sync_open_orders(&deps, "acc-1").await.expect("sync");
+        // Live list: B + C + D, in exchange order.
+        assert_eq!(live.len(), 3);
+        assert_eq!(live[0].order_id, "2");
+        assert_eq!(live[1].order_id, "3");
+        assert_eq!(live[1].client_order_id, "0xccc");
+        assert_eq!(live[2].order_id, "4");
+        assert_eq!(live[2].client_order_id, "4");
+        // A was queried and marked Canceled; B stayed Open; the
+        // website orders were imported into the store.
+        assert_eq!(store.get("0xaaa").unwrap().status, OrderStatus::Canceled);
+        assert_eq!(store.get("0xbbb").unwrap().status, OrderStatus::Open);
+        assert_eq!(store.get("0xccc").unwrap().status, OrderStatus::Open);
+        assert_eq!(store.get("4").unwrap().status, OrderStatus::Open);
+        // The other account's record was not touched.
+        assert_eq!(store.get("0xddd").unwrap().status, OrderStatus::Open);
     }
 }

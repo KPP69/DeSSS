@@ -78,6 +78,7 @@ pub fn run() {
     });
     let s2 = state.clone();
     let sampler_state = state.clone();
+    let sync_state = state.clone();
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(state)
@@ -102,6 +103,41 @@ pub fn run() {
                             state.sync.live_states().iter().map(|s| s.equity_usd).sum();
                         if total > 0.0 {
                             state.risk.record_equity(total);
+                        }
+                    }
+                });
+            }
+            // Open-orders sync (phase 5A §4 follow-up, real-machine
+            // 2026-11-26): every 10s, reconcile each connected
+            // Hyperliquid / Entropy account's open orders with the
+            // exchange (see `execution::sync_open_orders`). The
+            // exchange's live list is the only source of truth:
+            // orders canceled on the website disappear from the
+            // store, website-placed orders appear and become
+            // cancellable. Best-effort — a failure is retried next
+            // cycle, and the account poll loop already surfaces REST
+            // failures, so this task logs nothing itself. Same spawn
+            // rule as the sampler above: `tauri::async_runtime::spawn`
+            // inside `setup`, never `tokio::spawn`.
+            {
+                let state = sync_state.clone();
+                tauri::async_runtime::spawn(async move {
+                    let mut tick = tokio::time::interval(Duration::from_secs(10));
+                    loop {
+                        tick.tick().await;
+                        let deps = crate::execution::ExecDeps {
+                            risk: state.risk.clone(),
+                            orders: state.orders.clone(),
+                            sync: state.sync.clone(),
+                            streams: state.streams.clone(),
+                            catalog: state.catalog.clone(),
+                            bus: state.bus.clone(),
+                        };
+                        for (account_id, exchange_id) in state.sync.connected_accounts() {
+                            if exchange_id != "hyperliquid" && exchange_id != "entropy" {
+                                continue;
+                            }
+                            let _ = crate::execution::sync_open_orders(&deps, &account_id).await;
                         }
                     }
                 });
