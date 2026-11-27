@@ -1,4 +1,4 @@
-import React, { useEffect } from "react";
+import React, { useEffect, useLayoutEffect } from "react";
 import { Button, DataTable, MultiSelectDropdown, tdClsCompact, trCls } from "../components/ui";
 import PageState from "../components/PageState";
 import { useMarketSearch } from "../hooks/useMarketSearch";
@@ -221,7 +221,7 @@ export default function DataPage() {
   // update time on the right.
   const register = useShellActions((s) => s.register);
   const unregister = useShellActions((s) => s.unregister);
-  useEffect(() => {
+  useLayoutEffect(() => {
     register("data", {
       actions: (
         <>
@@ -277,7 +277,7 @@ export default function DataPage() {
                 if (e.key === "Enter") searchNow();
               }}
               placeholder="输入 BTC、ETH、SOL、NVDA 等标的名称，查询 6 所实时对比数据"
-              className="flex-1 min-w-0 bg-ds-panel-2 border border-ds-line rounded-lg px-3 h-8 text-ds-text-1 outline-none focus:border-ds-accent focus:ring-2 focus:ring-ds-focus-ring/50 disabled:bg-ds-bg-disabled disabled:text-ds-text-disabled num"
+              className="flex-1 min-w-0 bg-ds-panel-2 border border-ds-control-line rounded-lg px-3 h-8 text-ds-text-1 outline-none focus:border-ds-accent focus:ring-2 focus:ring-ds-focus-ring/50 disabled:bg-ds-bg-disabled disabled:text-ds-text-disabled num"
             />
             <div className="w-44 shrink-0">
               <MultiSelectDropdown

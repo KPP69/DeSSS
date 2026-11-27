@@ -117,8 +117,8 @@ export default function MultiSelectDropdown({
         aria-expanded={open}
         className={`w-full text-left h-8 px-3 rounded-lg border transition-colors focus:outline-none focus:ring-2 focus:ring-ds-focus-ring/50 ${
           disabled
-            ? "bg-ds-panel/50 border-ds-line text-ds-text-3 cursor-not-allowed"
-            : "bg-ds-panel border-ds-line text-ds-text-1 hover:border-ds-text-3"
+            ? "bg-ds-panel/50 border-ds-control-line text-ds-text-3 cursor-not-allowed"
+            : "bg-ds-panel border-ds-control-line text-ds-text-1 hover:border-ds-text-3"
         }`}
       >
         <span className="whitespace-nowrap">

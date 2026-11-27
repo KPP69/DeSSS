@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useLayoutEffect, useMemo, useState } from "react";
 import AccountModal from "../components/AccountModal";
 import { Badge, Button, ConfirmDialog, DataTable, StatCard, tdClsCompact, trCls } from "../components/ui";
 import { useVenueSchemas } from "../hooks/useVenueSchemas";
@@ -57,7 +57,7 @@ export default function AccountPage() {
   const register = useShellActions((s) => s.register);
   const unregister = useShellActions((s) => s.unregister);
   const connected = accounts.filter((a) => live[a.id]?.status === "connected").length;
-  useEffect(() => {
+  useLayoutEffect(() => {
     register("account", {
       actions: <Button onClick={openAdd}>添加账户</Button>,
       status: `${accounts.length} 账户 · ${connected} 已连接`,

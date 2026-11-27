@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useLayoutEffect, useState } from "react";
 import { Button } from "../components/ui";
 import ThemeSwitcher from "../components/ThemeSwitcher";
 import { useInvoke } from "../hooks/useInvoke";
@@ -50,7 +50,7 @@ export default function SystemPage() {
   // backend is frozen in F1 — so the status carries the version only.)
   const register = useShellActions((s) => s.register);
   const unregister = useShellActions((s) => s.unregister);
-  useEffect(() => {
+  useLayoutEffect(() => {
     register("system", {
       status: appInfo.data ? `v${appInfo.data.version}` : "—",
     });
@@ -77,7 +77,7 @@ export default function SystemPage() {
             value={input}
             onChange={(e) => setInput(e.target.value)}
             placeholder="http://127.0.0.1:7897"
-            className="flex-1 min-w-0 bg-ds-panel-2 border border-ds-line rounded-lg px-3 h-8 text-ds-text-1 outline-none focus:border-ds-accent focus:ring-2 focus:ring-ds-focus-ring/50 disabled:bg-ds-bg-disabled disabled:text-ds-text-disabled num"
+            className="flex-1 min-w-0 bg-ds-panel-2 border border-ds-control-line rounded-lg px-3 h-8 text-ds-text-1 outline-none focus:border-ds-accent focus:ring-2 focus:ring-ds-focus-ring/50 disabled:bg-ds-bg-disabled disabled:text-ds-text-disabled num"
           />
           <Button onClick={save} disabled={saving}>
             {saving ? "保存中…" : "保存"}

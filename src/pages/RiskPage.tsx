@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useLayoutEffect, useState } from "react";
 import { Button } from "../components/ui";
 import PageState from "../components/PageState";
 import { useInvoke } from "../hooks/useInvoke";
@@ -32,7 +32,7 @@ const CHECKS: { title: string; desc: string }[] = [
 ];
 
 const inputCls =
-  "w-40 bg-ds-panel-2 border border-ds-line rounded-lg px-3 h-8 text-ds-text-1 outline-none focus:border-ds-accent focus:ring-2 focus:ring-ds-focus-ring/50 disabled:bg-ds-bg-disabled disabled:text-ds-text-disabled num";
+  "w-40 bg-ds-panel-2 border border-ds-control-line rounded-lg px-3 h-8 text-ds-text-1 outline-none focus:border-ds-accent focus:ring-2 focus:ring-ds-focus-ring/50 disabled:bg-ds-bg-disabled disabled:text-ds-text-disabled num";
 
 export default function RiskPage() {
   // Config + drawdown both come from useInvoke (Phase 2, I11); the
@@ -105,7 +105,7 @@ export default function RiskPage() {
   // before the loading early-returns below, so the bar is never empty.
   const register = useShellActions((s) => s.register);
   const unregister = useShellActions((s) => s.unregister);
-  useEffect(() => {
+  useLayoutEffect(() => {
     register("risk", {
       actions: (
         <Button onClick={onSave} disabled={saving || !config}>
@@ -132,7 +132,7 @@ export default function RiskPage() {
         className={`mb-4 rounded-lg border p-4 ${
           config.killSwitch
             ? "border-ds-down/60 bg-ds-down/10"
-            : "border-ds-line bg-ds-panel"
+            : "border-ds-control-line bg-ds-panel"
         }`}
       >
         <div className="flex items-center justify-between gap-3">

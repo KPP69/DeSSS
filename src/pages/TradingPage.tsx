@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useLayoutEffect, useState } from "react";
 import { Badge, Button, ConfirmDialog, DataTable, EmptyState, Modal } from "../components/ui";
 import { useInvoke } from "../hooks/useInvoke";
 import { useVenueSchemas } from "../hooks/useVenueSchemas";
@@ -201,7 +201,7 @@ export default function TradingPage() {
   // Toolbar (F1): refresh action + position / open-order counts.
   const register = useShellActions((s) => s.register);
   const unregister = useShellActions((s) => s.unregister);
-  useEffect(() => {
+  useLayoutEffect(() => {
     register("trading", {
       actions: <Button onClick={() => lists.refresh()}>刷新</Button>,
       status: `持仓 ${positions.length} · 挂单 ${openOrders.length}`,
@@ -748,7 +748,7 @@ export default function TradingPage() {
             <label className="block">
               <span className="text-ds-text-2 text-[13px]">止盈价</span>
               <input
-                className="mt-1 w-full rounded border border-ds-line bg-ds-bg px-2 py-1.5 text-ds-text-1 num outline-none focus:border-ds-accent focus:ring-2 focus:ring-ds-focus-ring/50 disabled:bg-ds-bg-disabled disabled:text-ds-text-disabled"
+                className="mt-1 w-full rounded border border-ds-control-line bg-ds-bg px-2 py-1.5 text-ds-text-1 num outline-none focus:border-ds-accent focus:ring-2 focus:ring-ds-focus-ring/50 disabled:bg-ds-bg-disabled disabled:text-ds-text-disabled"
                 type="number"
                 inputMode="decimal"
                 placeholder="留空 = 不挂止盈"
@@ -760,7 +760,7 @@ export default function TradingPage() {
             <label className="block">
               <span className="text-ds-text-2 text-[13px]">止损价</span>
               <input
-                className="mt-1 w-full rounded border border-ds-line bg-ds-bg px-2 py-1.5 text-ds-text-1 num outline-none focus:border-ds-accent focus:ring-2 focus:ring-ds-focus-ring/50 disabled:bg-ds-bg-disabled disabled:text-ds-text-disabled"
+                className="mt-1 w-full rounded border border-ds-control-line bg-ds-bg px-2 py-1.5 text-ds-text-1 num outline-none focus:border-ds-accent focus:ring-2 focus:ring-ds-focus-ring/50 disabled:bg-ds-bg-disabled disabled:text-ds-text-disabled"
                 type="number"
                 inputMode="decimal"
                 placeholder="留空 = 不挂止损"

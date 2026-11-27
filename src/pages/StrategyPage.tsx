@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useLayoutEffect, useState } from "react";
 import { Badge, Button, DataTable, SelectDropdown } from "../components/ui";
 import PageState from "../components/PageState";
 import { useInvoke } from "../hooks/useInvoke";
@@ -21,7 +21,7 @@ import { useVenueStore } from "../store/useVenueStore";
  */
 
 const inputCls =
-  "w-full bg-ds-panel-2 border border-ds-line rounded-lg px-3 h-8 text-ds-text-1 outline-none focus:border-ds-accent focus:ring-2 focus:ring-ds-focus-ring/50 disabled:bg-ds-bg-disabled disabled:text-ds-text-disabled num";
+  "w-full bg-ds-panel-2 border border-ds-control-line rounded-lg px-3 h-8 text-ds-text-1 outline-none focus:border-ds-accent focus:ring-2 focus:ring-ds-focus-ring/50 disabled:bg-ds-bg-disabled disabled:text-ds-text-disabled num";
 
 function fmtClock(ms: number | null): string {
   if (ms == null) return "—";
@@ -86,7 +86,7 @@ export default function StrategyPage() {
   const register = useShellActions((s) => s.register);
   const unregister = useShellActions((s) => s.unregister);
   const running = instances.filter((v) => v.enabled).length;
-  useEffect(() => {
+  useLayoutEffect(() => {
     register("strategy", {
       actions: <Button onClick={openNew}>新建策略</Button>,
       status: `运行中 ${running} / 共 ${instances.length}`,

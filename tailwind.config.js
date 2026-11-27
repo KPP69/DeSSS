@@ -17,6 +17,7 @@ export default {
           "panel-2": rgb("panel-2"), // modal / popover / input background
           line: rgb("line"), // unified border
           "line-strong": rgb("line-strong"), // emphasized border
+          "control-line": rgb("control-line"), // form-control border (3.0–3.5:1 on panel)
           "text-1": rgb("text-1"), // primary text
           "text-2": rgb("text-2"), // secondary text
           "text-3": rgb("text-3"), // muted text

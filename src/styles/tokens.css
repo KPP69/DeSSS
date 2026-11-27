@@ -30,6 +30,9 @@
  * - `--ds-hover` / `--ds-hover-strong` / `--ds-active`: three tiers of
  *   interactive surface — row + ghost hover, secondary-button hover,
  *   pressed state.
+ * - `--ds-control-line`: form-control border only (inputs, dropdowns,
+ *   switches, checkboxes) — 3.0–3.5:1 on panel; tables, cards and
+ *   dividers keep the decorative `--ds-line`.
  * - `--ds-text-disabled` / `--ds-bg-disabled`: disabled foreground and
  *   background (never just opacity, so text stays legible).
  */
@@ -54,9 +57,10 @@
   --ds-panel-2: 243 237 224;
   --ds-line: 227 217 198;
   --ds-line-strong: 205 191 165;
+  --ds-control-line: 156 138 110;
   --ds-text-1: 46 38 32;
-  --ds-text-2: 110 95 77;
-  --ds-text-3: 154 138 114;
+  --ds-text-2: 92 78 63;
+  --ds-text-3: 119 104 79;
   --ds-accent: 154 106 47;
   --ds-accent-hover: 126 86 36;
   --ds-accent-soft: 154 106 47;
@@ -94,9 +98,10 @@
   --ds-panel-2: 243 237 224;
   --ds-line: 227 217 198;
   --ds-line-strong: 205 191 165;
+  --ds-control-line: 156 138 110;
   --ds-text-1: 46 38 32;
-  --ds-text-2: 110 95 77;
-  --ds-text-3: 154 138 114;
+  --ds-text-2: 92 78 63;
+  --ds-text-3: 119 104 79;
   --ds-accent: 154 106 47;
   --ds-accent-hover: 126 86 36;
   --ds-accent-soft: 154 106 47;
@@ -134,13 +139,14 @@
   --ds-panel-2: 26 32 41;
   --ds-line: 35 43 54;
   --ds-line-strong: 50 61 76;
+  --ds-control-line: 95 104 117;
   --ds-text-1: 232 237 243;
   --ds-text-2: 157 171 185;
-  --ds-text-3: 103 116 138;
+  --ds-text-3: 122 135 149;
   --ds-accent: 110 155 240;
   --ds-accent-hover: 143 178 245;
   --ds-accent-soft: 110 155 240;
-  --ds-accent-contrast: 255 255 255;
+  --ds-accent-contrast: 12 15 19;
   --ds-up: 52 211 153;
   --ds-up-hover: 91 222 172;
   --ds-up-soft: 52 211 153;
