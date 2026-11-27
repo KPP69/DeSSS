@@ -53,7 +53,7 @@ export default function DataTable({
         <tbody>
           {children}
           {rows?.map((cells, i) => (
-            <tr key={i} className="border-t border-ds-line hover:bg-ds-panel-2/50 transition-colors">
+            <tr key={i} className="border-t border-ds-line hover:bg-ds-hover transition-colors">
               {cells.map((cell, j) => (
                 <td
                   key={j}
@@ -82,6 +82,6 @@ export default function DataTable({
 
 /** Shared centered cell classes for hand-built rows inside DataTable. */
 export const tdCls = "text-center px-4 py-3 text-ds-text-1";
-export const trCls = "border-t border-ds-line hover:bg-ds-panel-2/50 transition-colors";
+export const trCls = "border-t border-ds-line hover:bg-ds-hover transition-colors";
 /** Compact variant: tighter padding and smaller text for dense lists. */
 export const tdClsCompact = "text-center px-3 py-1.5 text-[13px] text-ds-text-1";

@@ -1,18 +1,28 @@
 import { create } from "zustand";
 
-export type ThemeName = "light" | "warm" | "dark";
+export type ThemeName = "warm" | "dark";
 
 const KEY = "desss.theme";
 
-/** Read the persisted theme; default is dark (the look shipped so far). */
+/** Read the persisted theme; default is warm. A stored "light"
+ * (removed in F1) maps to warm and is written back, so the old
+ * value never resurfaces. */
 function readInitial(): ThemeName {
   try {
     const v = localStorage.getItem(KEY);
-    if (v === "light" || v === "warm" || v === "dark") return v;
+    if (v === "warm" || v === "dark") return v;
+    if (v === "light") {
+      try {
+        localStorage.setItem(KEY, "warm");
+      } catch {
+        // Keep the in-memory theme even if persistence fails.
+      }
+      return "warm";
+    }
   } catch {
     // Private mode / storage unavailable: fall through to the default.
   }
-  return "dark";
+  return "warm";
 }
 
 /** The single place that touches the DOM: the theme lives on

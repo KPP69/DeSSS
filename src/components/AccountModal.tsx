@@ -138,7 +138,7 @@ export default function AccountModal({ open, editing, onClose }: Props) {
   }
 
   const inputCls =
-    "w-full bg-ds-panel border border-ds-line rounded-lg px-3 h-8 text-ds-text-1 outline-none focus:border-ds-accent";
+    "w-full bg-ds-panel border border-ds-line rounded-lg px-3 h-8 text-ds-text-1 outline-none focus:border-ds-accent focus:ring-2 focus:ring-ds-focus-ring/50 disabled:bg-ds-bg-disabled disabled:text-ds-text-disabled";
   const labelCls = "block text-xs text-ds-text-2 mb-1";
 
   return (

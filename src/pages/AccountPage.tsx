@@ -6,6 +6,7 @@ import { useAccountStore } from "../store/useAccountStore";
 import type { AccountView } from "../lib/types";
 import { useAccountUiStore } from "../store/useAccountUiStore";
 import { useLiveStore, latencyTone } from "../store/useLiveStore";
+import { useShellActions } from "../store/useShellActions";
 import { useVenueStore } from "../store/useVenueStore";
 
 function fmt(n: number): string {
@@ -47,9 +48,23 @@ export default function AccountPage() {
 
   const modalOpen = useAccountUiStore((s) => s.modalOpen);
   const editing = useAccountUiStore((s) => s.editing);
+  const openAdd = useAccountUiStore((s) => s.openAdd);
   const openEdit = useAccountUiStore((s) => s.openEdit);
   const closeModal = useAccountUiStore((s) => s.close);
   const [pendingDelete, setPendingDelete] = useState<AccountView | null>(null);
+
+  // Toolbar (F1): add-account action + account / connected counts.
+  const register = useShellActions((s) => s.register);
+  const unregister = useShellActions((s) => s.unregister);
+  const connected = accounts.filter((a) => live[a.id]?.status === "connected").length;
+  useEffect(() => {
+    register("account", {
+      actions: <Button onClick={openAdd}>添加账户</Button>,
+      status: `${accounts.length} 账户 · ${connected} 已连接`,
+    });
+    return () => unregister("account");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [register, unregister, openAdd, accounts, live]);
 
   // Top overview: sum live equity / available / PnL across accounts.
   // Hyperliquid and Entropy share one master-wallet pool (the backend

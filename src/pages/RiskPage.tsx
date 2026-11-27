@@ -1,9 +1,11 @@
 import React, { useEffect, useState } from "react";
-import { Button, PageHeader } from "../components/ui";
+import { Button } from "../components/ui";
 import PageState from "../components/PageState";
 import { useInvoke } from "../hooks/useInvoke";
 import { api } from "../lib/tauri";
 import type { RiskConfig } from "../lib/types";
+import { useShellActions } from "../store/useShellActions";
+import { toast } from "../store/useToastStore";
 
 /**
  * Risk page (phase 5A §3): the kill switch toggle and the hard limits.
@@ -30,7 +32,7 @@ const CHECKS: { title: string; desc: string }[] = [
 ];
 
 const inputCls =
-  "w-40 bg-ds-panel-2 border border-ds-line rounded-lg px-3 h-8 text-ds-text-1 outline-none focus:border-ds-accent num";
+  "w-40 bg-ds-panel-2 border border-ds-line rounded-lg px-3 h-8 text-ds-text-1 outline-none focus:border-ds-accent focus:ring-2 focus:ring-ds-focus-ring/50 disabled:bg-ds-bg-disabled disabled:text-ds-text-disabled num";
 
 export default function RiskPage() {
   // Config + drawdown both come from useInvoke (Phase 2, I11); the
@@ -54,7 +56,6 @@ export default function RiskPage() {
   const [autoPause, setAutoPause] = useState("");
   const [saving, setSaving] = useState(false);
   const [toggling, setToggling] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const [savedAt, setSavedAt] = useState<number | null>(null);
 
   useEffect(() => {
@@ -69,12 +70,11 @@ export default function RiskPage() {
   const onToggle = async () => {
     if (!config || toggling) return;
     setToggling(true);
-    setError(null);
     try {
       await api.setKillSwitch(!config.killSwitch);
       cfg.refresh();
     } catch (e) {
-      setError(String(e));
+      toast.error(e instanceof Error ? e.message : String(e));
     } finally {
       setToggling(false);
     }
@@ -83,7 +83,6 @@ export default function RiskPage() {
   const onSave = async () => {
     if (!config || saving) return;
     setSaving(true);
-    setError(null);
     try {
       await api.setRiskConfig({
         killSwitch: config.killSwitch,
@@ -96,11 +95,28 @@ export default function RiskPage() {
       cfg.refresh();
       setSavedAt(Date.now());
     } catch (e) {
-      setError(String(e));
+      toast.error(e instanceof Error ? e.message : String(e));
     } finally {
       setSaving(false);
     }
   };
+
+  // Toolbar (F1): save-limits action + kill-switch state. Registered
+  // before the loading early-returns below, so the bar is never empty.
+  const register = useShellActions((s) => s.register);
+  const unregister = useShellActions((s) => s.unregister);
+  useEffect(() => {
+    register("risk", {
+      actions: (
+        <Button onClick={onSave} disabled={saving || !config}>
+          {saving ? "保存中…" : "保存限额"}
+        </Button>
+      ),
+      status: `总开关：${config == null ? "—" : config.killSwitch ? "开" : "关"}`,
+    });
+    return () => unregister("risk");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [register, unregister, config, maxOrder, maxPosition, maxDrawdown, allowedSides, autoPause, saving]);
 
   if (cfg.loading && !config) {
     return <PageState loading loadingText="加载风控配置…" />;
@@ -111,12 +127,6 @@ export default function RiskPage() {
 
   return (
     <div>
-      <PageHeader title="风控">
-        <Button onClick={onSave} disabled={saving}>
-          {saving ? "保存中…" : "保存限额"}
-        </Button>
-      </PageHeader>
-
       {/* Kill switch: one big toggle. Red = killing (no new orders). */}
       <div
         className={`mb-4 rounded-lg border p-4 ${
@@ -206,8 +216,7 @@ export default function RiskPage() {
             <span className="text-xs text-ds-text-3">0 = 不自动暂停</span>
           </label>
         </div>
-        {error && <div className="mt-3 text-xs text-ds-down">{error}</div>}
-        {savedAt != null && !error && (
+        {savedAt != null && (
           <div className="mt-3 text-xs text-ds-text-3">
             已保存 · {new Date(savedAt).toLocaleTimeString("zh-CN", { hour12: false })}
           </div>

@@ -1,11 +1,13 @@
 import React, { useEffect, useState } from "react";
-import { Badge, Button, DataTable, PageHeader, SelectDropdown } from "../components/ui";
+import { Badge, Button, DataTable, SelectDropdown } from "../components/ui";
 import PageState from "../components/PageState";
 import { useInvoke } from "../hooks/useInvoke";
 import { useVenueSchemas } from "../hooks/useVenueSchemas";
 import { api } from "../lib/tauri";
 import type { LegRef, SaveStrategyInput, SpreadParams, StrategyView } from "../lib/types";
 import { useAccountStore } from "../store/useAccountStore";
+import { useShellActions } from "../store/useShellActions";
+import { toast } from "../store/useToastStore";
 import { useVenueStore } from "../store/useVenueStore";
 
 /**
@@ -19,7 +21,7 @@ import { useVenueStore } from "../store/useVenueStore";
  */
 
 const inputCls =
-  "w-full bg-ds-panel-2 border border-ds-line rounded-lg px-3 h-8 text-ds-text-1 outline-none focus:border-ds-accent num";
+  "w-full bg-ds-panel-2 border border-ds-line rounded-lg px-3 h-8 text-ds-text-1 outline-none focus:border-ds-accent focus:ring-2 focus:ring-ds-focus-ring/50 disabled:bg-ds-bg-disabled disabled:text-ds-text-disabled num";
 
 function fmtClock(ms: number | null): string {
   if (ms == null) return "—";
@@ -80,6 +82,19 @@ export default function StrategyPage() {
   const tradable = (schemas ?? []).filter((s) => s.supportsTrading);
   const instances = list.data ?? [];
 
+  // Toolbar (F1): new-strategy action + running / total counts.
+  const register = useShellActions((s) => s.register);
+  const unregister = useShellActions((s) => s.unregister);
+  const running = instances.filter((v) => v.enabled).length;
+  useEffect(() => {
+    register("strategy", {
+      actions: <Button onClick={openNew}>新建策略</Button>,
+      status: `运行中 ${running} / 共 ${instances.length}`,
+    });
+    return () => unregister("strategy");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [register, unregister, instances, schemas]);
+
   const [formOpen, setFormOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [legA, setLegA] = useState<LegForm>({ exchangeId: "hyperliquid", accountId: "", symbol: "BTC" });
@@ -101,7 +116,6 @@ export default function StrategyPage() {
   const [togglingId, setTogglingId] = useState<string | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
   const [formWarning, setFormWarning] = useState<string | null>(null);
-  const [actionError, setActionError] = useState<string | null>(null);
 
   const openNew = () => {
     setEditingId(null);
@@ -187,7 +201,9 @@ export default function StrategyPage() {
       setFormOpen(false);
       setEditingId(null);
     } catch (e) {
-      setFormError(e instanceof Error ? e.message : String(e));
+      // Backend failure: toast the backend's own words (F1).
+      // formError stays for client-side validation only.
+      toast.error(e instanceof Error ? e.message : String(e));
     } finally {
       setSaving(false);
     }
@@ -196,12 +212,11 @@ export default function StrategyPage() {
   const onToggle = async (v: StrategyView) => {
     if (togglingId) return;
     setTogglingId(v.id);
-    setActionError(null);
     try {
       await api.setStrategyEnabled(v.id, !v.enabled);
       list.refresh();
     } catch (e) {
-      setActionError(e instanceof Error ? e.message : String(e));
+      toast.error(e instanceof Error ? e.message : String(e));
     } finally {
       setTogglingId(null);
     }
@@ -265,10 +280,6 @@ export default function StrategyPage() {
 
   return (
     <div>
-      <PageHeader title="策略">
-        <Button onClick={openNew}>新建策略</Button>
-      </PageHeader>
-
       {formOpen && (
         <div className="mb-5 rounded-xl border border-ds-line bg-ds-panel p-4">
           <div className="mb-4 text-[13px] font-semibold text-ds-text-1">
@@ -320,7 +331,6 @@ export default function StrategyPage() {
 
       {instances.length > 0 && (
         <div>
-          {actionError && <div className="mb-3 text-[13px] text-ds-down">{actionError}</div>}
           <DataTable
             headers={["状态", "A 腿", "B 腿", "参数", "最近评估", "最近错误", "累计下单", "操作"]}
             rows={instances.map((v) => [

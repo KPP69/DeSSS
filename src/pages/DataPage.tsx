@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useEffect } from "react";
 import { Button, DataTable, MultiSelectDropdown, tdClsCompact, trCls } from "../components/ui";
 import PageState from "../components/PageState";
 import { useMarketSearch } from "../hooks/useMarketSearch";
@@ -7,6 +7,7 @@ import { displaySymbol } from "../lib/symbol";
 import type { MarketInfo, OrderBook } from "../lib/types";
 import { useDataUiStore } from "../store/useDataUiStore";
 import { useLiveStore } from "../store/useLiveStore";
+import { useShellActions } from "../store/useShellActions";
 import { useVenueStore } from "../store/useVenueStore";
 
 /** A streamed book counts as live for 5s; older than that the row falls
@@ -19,8 +20,8 @@ const LIVE_MS = 5000;
  * file only renders. Books come from the live store — the App root is
  * the only subscriber (the page's own `market://book` subscription is
  * gone, the store already throttles frames to 150ms). The view toggle
- * lives in the AppShell secondary toolbar (App.tsx); the tool row below
- * is absolutely static — the cache time lives in the results footer,
+ * lives in this page's toolbar registration (useShellActions); the tool
+ * row below is absolutely static — the cache time lives in the results footer,
  * never in the row, so nothing ever shifts the controls.
  */
 
@@ -191,6 +192,7 @@ function MarketRows({
 
 export default function DataPage() {
   const view = useDataUiStore((s) => s.view);
+  const setView = useDataUiStore((s) => s.setView);
   const search = useMarketSearch();
   const books = useLiveStore((s) => s.books);
   const { schemas } = useVenueSchemas();
@@ -215,6 +217,47 @@ export default function DataPage() {
     onRefresh,
   } = search;
 
+  // Toolbar (F1): view toggle + refresh on the left, catalog
+  // update time on the right.
+  const register = useShellActions((s) => s.register);
+  const unregister = useShellActions((s) => s.unregister);
+  useEffect(() => {
+    register("data", {
+      actions: (
+        <>
+          <div className="flex rounded-lg border border-ds-line bg-ds-panel p-0.5">
+            <button
+              onClick={() => setView("signals")}
+              className={`px-3 py-1 rounded-md text-sm ${
+                view === "signals"
+                  ? "bg-ds-accent text-ds-accent-contrast"
+                  : "text-ds-text-2 hover:text-ds-text-1"
+              }`}
+            >
+              自定义信号
+            </button>
+            <button
+              onClick={() => setView("search")}
+              className={`px-3 py-1 rounded-md text-sm ${
+                view === "search"
+                  ? "bg-ds-accent text-ds-accent-contrast"
+                  : "text-ds-text-2 hover:text-ds-text-1"
+              }`}
+            >
+              标的查询
+            </button>
+          </div>
+          <Button onClick={onRefresh} disabled={refreshing}>
+            {refreshing ? "刷新中…" : "刷新"}
+          </Button>
+        </>
+      ),
+      status: `目录更新于 ${cacheUpdatedAt != null ? fmtClock(cacheUpdatedAt) : "—"}`,
+    });
+    return () => unregister("data");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [register, unregister, view, refreshing, cacheUpdatedAt, onRefresh, setView]);
+
   return (
     <div>
       {view === "signals" ? (
@@ -234,7 +277,7 @@ export default function DataPage() {
                 if (e.key === "Enter") searchNow();
               }}
               placeholder="输入 BTC、ETH、SOL、NVDA 等标的名称，查询 6 所实时对比数据"
-              className="flex-1 min-w-0 bg-ds-panel-2 border border-ds-line rounded-lg px-3 h-8 text-ds-text-1 outline-none focus:border-ds-accent num"
+              className="flex-1 min-w-0 bg-ds-panel-2 border border-ds-line rounded-lg px-3 h-8 text-ds-text-1 outline-none focus:border-ds-accent focus:ring-2 focus:ring-ds-focus-ring/50 disabled:bg-ds-bg-disabled disabled:text-ds-text-disabled num"
             />
             <div className="w-44 shrink-0">
               <MultiSelectDropdown

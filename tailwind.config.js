@@ -1,6 +1,6 @@
 /** @type {import('tailwindcss').Config} */
 // Every color is an RGB channel from src/styles/tokens.css, so the same
-// class works in all three themes (light / warm / dark) and at any alpha
+// class works in both themes (warm / dark) and at any alpha
 // (`bg-ds-accent-soft/10`, `border-ds-line/50`). Components must use
 // these semantic names, never raw hex.
 const rgb = (name) => `rgb(var(--ds-${name}) / <alpha-value>)`;
@@ -41,7 +41,12 @@ export default {
           "info-soft": rgb("info-soft"),
           "info-contrast": rgb("info-contrast"),
           overlay: rgb("overlay"), // modal scrim, use at /50–/60
-          ring: rgb("ring"), // focus ring
+          "focus-ring": rgb("focus-ring"), // 2px focus ring on controls
+          hover: rgb("hover"), // row + ghost hover surface
+          "hover-strong": rgb("hover-strong"), // secondary-button hover
+          active: rgb("active"), // pressed surface
+          "text-disabled": rgb("text-disabled"), // disabled foreground
+          "bg-disabled": rgb("bg-disabled"), // disabled background
         },
       },
       fontFamily: {

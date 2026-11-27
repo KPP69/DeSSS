@@ -3,6 +3,8 @@ import { Button } from "../components/ui";
 import ThemeSwitcher from "../components/ThemeSwitcher";
 import { useInvoke } from "../hooks/useInvoke";
 import { api } from "../lib/tauri";
+import { useShellActions } from "../store/useShellActions";
+import { toast } from "../store/useToastStore";
 import { useVenueStore } from "../store/useVenueStore";
 
 /**
@@ -18,6 +20,7 @@ import { useVenueStore } from "../store/useVenueStore";
 export default function SystemPage() {
   const proxy = useInvoke(() => api.getProxy(), []);
   const catalog = useInvoke(() => api.getCatalogStatus(), []);
+  const appInfo = useInvoke(() => api.getAppInfo(), []);
   const [input, setInput] = useState("");
   const [msg, setMsg] = useState("");
   const [saving, setSaving] = useState(false);
@@ -36,18 +39,31 @@ export default function SystemPage() {
       proxy.refresh();
       setMsg("已保存，重新连接账户后生效");
     } catch (e) {
-      setMsg(`保存失败：${String(e)}`);
+      toast.error(e instanceof Error ? e.message : String(e));
     } finally {
       setSaving(false);
     }
   };
+
+  // Toolbar (F1): no primary action; version on the right. (The log
+  // file count in the spec has no backend command behind it — the
+  // backend is frozen in F1 — so the status carries the version only.)
+  const register = useShellActions((s) => s.register);
+  const unregister = useShellActions((s) => s.unregister);
+  useEffect(() => {
+    register("system", {
+      status: appInfo.data ? `v${appInfo.data.version}` : "—",
+    });
+    return () => unregister("system");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [register, unregister, appInfo.data]);
 
   return (
     <div>
       <div className="bg-ds-panel border border-ds-line rounded-[10px] shadow-card p-4 mb-4 max-w-xl">
         <div className="font-semibold text-ds-text-1 mb-1">外观主题</div>
         <div className="text-xs text-ds-text-2 mb-3 leading-relaxed">
-          浅色 / 暖色 / 深色，切换后立即生效，保存在本机。
+          暖色 / 深色，切换后立即生效，保存在本机。
         </div>
         <ThemeSwitcher />
       </div>
@@ -61,7 +77,7 @@ export default function SystemPage() {
             value={input}
             onChange={(e) => setInput(e.target.value)}
             placeholder="http://127.0.0.1:7897"
-            className="flex-1 min-w-0 bg-ds-panel-2 border border-ds-line rounded-lg px-3 h-8 text-ds-text-1 outline-none focus:border-ds-accent num"
+            className="flex-1 min-w-0 bg-ds-panel-2 border border-ds-line rounded-lg px-3 h-8 text-ds-text-1 outline-none focus:border-ds-accent focus:ring-2 focus:ring-ds-focus-ring/50 disabled:bg-ds-bg-disabled disabled:text-ds-text-disabled num"
           />
           <Button onClick={save} disabled={saving}>
             {saving ? "保存中…" : "保存"}

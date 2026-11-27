@@ -4,10 +4,11 @@ import { create } from "zustand";
 export type DataView = "search" | "signals";
 
 /**
- * Data page view state lives here (not in DataPage) so the AppShell
- * toolbar owns the view toggle, like the account page's "添加账户"
- * button in the same slot. The search query and checked exchanges
- * live here too (PR-0.3), so switching pages never loses the search.
+ * Data page view state lives here (not in DataPage) so the toolbar
+ * toggle registered via useShellActions reads it, like the account
+ * page's "添加账户" button in the same slot. The search query and
+ * checked exchanges live here too (PR-0.3), so switching pages never
+ * loses the search.
  *
  * `checked` starts empty and is filled with every schema id on the
  * first venue-schema load (Phase 2, I10): a venue added later is

@@ -22,6 +22,13 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
+/* Theme preview swatches (sidebar switcher): plain classes, not
+   Tailwind arbitrary values, so no `rgb(` appears in components. */
+.sw-warm-panel { background: rgb(var(--preview-warm-panel)); }
+.sw-warm-bg { background: rgb(var(--preview-warm-bg)); }
+.sw-dark-panel { background: rgb(var(--preview-dark-panel)); }
+.sw-dark-bg { background: rgb(var(--preview-dark-bg)); }
+
 /* All numeric readouts (amounts, prices, quantities, latency) use the
    system monospace stack + tabular figures so live updates never jitter
    horizontally. */

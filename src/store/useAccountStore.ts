@@ -3,6 +3,7 @@ import { api } from "../lib/tauri";
 import type { AccountView, CredentialMap } from "../lib/types";
 import { useConsoleStore } from "./useConsoleStore";
 import { useLiveStore } from "./useLiveStore";
+import { toast } from "./useToastStore";
 
 /**
  * Account metadata only. Credentials are never stored here — they exist
@@ -14,9 +15,10 @@ import { useLiveStore } from "./useLiveStore";
  * for the add/edit modal, which shows it inside the dialog.
  *
  * Live sync lives here too (Phase 2, I11): hydrate + auto-connect run
- * with the list load, so the page only reads state. Connect failures
- * are logged to the console by the backend; nothing is shown here so
- * the list never shifts.
+ * with the list load, so the page only reads state. A manual connect /
+ * disconnect failure toasts the backend's own words (F1); the
+ * background auto-connect stays silent so a bad credential does not
+ * pop a toast on every load.
  */
 type AccountState = {
   accounts: AccountView[];
@@ -31,7 +33,7 @@ type AccountState = {
     credentials: CredentialMap | null
   ) => Promise<boolean>;
   remove: (id: string) => Promise<boolean>;
-  connect: (id: string) => Promise<void>;
+  connect: (id: string, silent?: boolean) => Promise<void>;
   disconnect: (id: string) => Promise<void>;
   hydrateLive: () => Promise<void>;
 };
@@ -63,7 +65,7 @@ export const useAccountStore = create<AccountState>((set, get) => {
       if (!a.credentialConfigured) continue;
       if (live[a.id] || connectTried.has(a.id)) continue;
       connectTried.add(a.id);
-      void get().connect(a.id);
+      void get().connect(a.id, true);
     }
   };
 
@@ -125,16 +127,23 @@ export const useAccountStore = create<AccountState>((set, get) => {
         return false;
       }
     },
-    connect: async (id) => {
+    connect: async (id, silent = false) => {
       try {
         const a = await api.connectAccount(id);
         useLiveStore.getState().setLive(a);
-      } catch {
-        // Backend logs the failure; the list never shifts.
+      } catch (e) {
+        // Backend logs the failure too; the manual button toasts it
+        // (auto-connect passes silent so a bad credential does not
+        // pop a toast on every list load).
+        if (!silent) toast.error(errText(e));
       }
     },
     disconnect: async (id) => {
-      await api.disconnectAccount(id).catch(() => {});
+      try {
+        await api.disconnectAccount(id);
+      } catch (e) {
+        toast.error(errText(e));
+      }
       useLiveStore.getState().removeLive(id);
     },
     hydrateLive: async () => {

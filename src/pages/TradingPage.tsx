@@ -7,6 +7,8 @@ import { api } from "../lib/tauri";
 import type { OrderBook, OrderInfo } from "../lib/types";
 import { useAccountStore } from "../store/useAccountStore";
 import { useLiveStore } from "../store/useLiveStore";
+import { useShellActions } from "../store/useShellActions";
+import { toast } from "../store/useToastStore";
 import { useVenueStore } from "../store/useVenueStore";
 
 /**
@@ -196,6 +198,18 @@ export default function TradingPage() {
   const records = lists.data?.records ?? [];
   const fills = lists.data?.fills ?? [];
 
+  // Toolbar (F1): refresh action + position / open-order counts.
+  const register = useShellActions((s) => s.register);
+  const unregister = useShellActions((s) => s.unregister);
+  useEffect(() => {
+    register("trading", {
+      actions: <Button onClick={() => lists.refresh()}>刷新</Button>,
+      status: `持仓 ${positions.length} · 挂单 ${openOrders.length}`,
+    });
+    return () => unregister("trading");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [register, unregister, positions.length, openOrders.length]);
+
   useEffect(() => {
     const t = setInterval(() => lists.refresh(), 10_000);
     return () => clearInterval(t);
@@ -308,7 +322,7 @@ export default function TradingPage() {
       setCloseTarget(null);
       lists.refresh();
     } catch (e) {
-      setActionError(`平仓失败：${String(e)}`);
+      toast.error(e instanceof Error ? e.message : String(e));
       setCloseTarget(null);
     } finally {
       setClosing(false);
@@ -343,6 +357,9 @@ export default function TradingPage() {
     setActionError(null);
     const { accountId, symbol, side, qty } = protectTarget;
     const closeSide = side === "long" ? "sell" : "buy";
+    // How many old protection orders were already cancelled when a
+    // later step fails — the catch reports it, they never come back.
+    let cancelled = 0;
     try {
       // "改" = 撤旧 + 建新：先撤该仓位所有手动触发单，再按输入重建。
       const manual = openOrders.filter(
@@ -354,6 +371,7 @@ export default function TradingPage() {
       );
       for (const o of manual) {
         await api.cancelOrder(accountId, o.orderId || o.clientOrderId, symbol);
+        cancelled++;
       }
       const placed: string[] = [];
       for (const [px, tpsl] of [
@@ -385,7 +403,10 @@ export default function TradingPage() {
       setProtectTarget(null);
       lists.refresh();
     } catch (e) {
-      setProtectError(`保存失败：${String(e)}（已撤的旧单不会自动恢复，可重试）`);
+      toast.error(e instanceof Error ? e.message : String(e));
+      if (cancelled > 0) {
+        setProtectError(`已撤 ${cancelled} 笔旧单，不会自动恢复，可重试`);
+      }
     } finally {
       setProtectBusy(false);
     }
@@ -393,11 +414,9 @@ export default function TradingPage() {
 
   const [cancelingId, setCancelingId] = useState<string | null>(null);
   const [cancelResult, setCancelResult] = useState<OrderInfo | null>(null);
-  const [cancelError, setCancelError] = useState<string | null>(null);
 
   const cancel = async (order: OrderInfo) => {
     setCancelingId(order.orderId || order.clientOrderId);
-    setCancelError(null);
     setCancelResult(null);
     try {
       const info = await api.cancelOrder(
@@ -407,7 +426,7 @@ export default function TradingPage() {
       );
       setCancelResult(info);
     } catch (e) {
-      setCancelError(String(e));
+      toast.error(e instanceof Error ? e.message : String(e));
     } finally {
       setCancelingId(null);
       lists.refresh();
@@ -577,9 +596,6 @@ export default function TradingPage() {
           />
         </div>
       )}
-      {cancelError && (
-        <div className="mt-3 text-[13px] text-ds-down">撤单失败：{cancelError}</div>
-      )}
       {cancelResult && (
         <div className="mt-3 flex flex-wrap items-center gap-3 text-[13px]">
           <Badge tone={statusTone(cancelResult.status)}>
@@ -732,7 +748,7 @@ export default function TradingPage() {
             <label className="block">
               <span className="text-ds-text-2 text-[13px]">止盈价</span>
               <input
-                className="mt-1 w-full rounded border border-ds-border bg-ds-bg px-2 py-1.5 text-ds-text-1 num"
+                className="mt-1 w-full rounded border border-ds-line bg-ds-bg px-2 py-1.5 text-ds-text-1 num outline-none focus:border-ds-accent focus:ring-2 focus:ring-ds-focus-ring/50 disabled:bg-ds-bg-disabled disabled:text-ds-text-disabled"
                 type="number"
                 inputMode="decimal"
                 placeholder="留空 = 不挂止盈"
@@ -744,7 +760,7 @@ export default function TradingPage() {
             <label className="block">
               <span className="text-ds-text-2 text-[13px]">止损价</span>
               <input
-                className="mt-1 w-full rounded border border-ds-border bg-ds-bg px-2 py-1.5 text-ds-text-1 num"
+                className="mt-1 w-full rounded border border-ds-line bg-ds-bg px-2 py-1.5 text-ds-text-1 num outline-none focus:border-ds-accent focus:ring-2 focus:ring-ds-focus-ring/50 disabled:bg-ds-bg-disabled disabled:text-ds-text-disabled"
                 type="number"
                 inputMode="decimal"
                 placeholder="留空 = 不挂止损"

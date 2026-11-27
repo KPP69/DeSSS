@@ -1,13 +1,20 @@
 /**
- * DeSSS design tokens — three themes, one variable scheme.
+ * DeSSS design tokens — two themes, one variable scheme.
  *
  * Every color is an RGB channel triplet (no alpha baked in); Tailwind maps
  * them with `rgb(var(--ds-*) / <alpha-value>)`, so any token can be used
  * at any opacity (`bg-ds-accent-soft/10`, `border-ds-line/50`, ...).
  *
- * Theme is selected with `:root[data-theme="light" | "warm" | "dark"]`
- * (see src/store/useThemeStore.ts). Plain `:root` carries the dark values
- * as a fallback so the first paint is never unstyled.
+ * Theme is selected with `:root[data-theme="warm" | "dark"]`
+ * (see src/store/useThemeStore.ts). Plain `:root` carries the warm
+ * values as a fallback so the first paint is never unstyled.
+ *
+ * warm (default): warm paper — brightness layers separate the surfaces
+ * (page < recessed < card < modal/input), lines are warm sand, and
+ * depth comes from a very faint shadow only.
+ *
+ * dark: ink — three background layers (page < recessed < card) with
+ * 1px lines; no shadow anywhere (`--ds-shadow-card: none`).
  *
  * 90/10 rule: 90% of the UI is neutral bg / panel / text; the remaining
  * 10% is accent (primary actions, selected state, focus) and up/down
@@ -17,145 +24,145 @@
  * `-soft` channels reuse the base hue and are used at low alpha
  * (e.g. selected-row / badge backgrounds). `-contrast` is the text color
  * on a filled surface of that hue. `--ds-overlay` is the modal scrim.
+ *
+ * Interaction tokens (buttons, rows, inputs share them):
+ * - `--ds-focus-ring`: the 2px focus ring (same hue as the accent).
+ * - `--ds-hover` / `--ds-hover-strong` / `--ds-active`: three tiers of
+ *   interactive surface — row + ghost hover, secondary-button hover,
+ *   pressed state.
+ * - `--ds-text-disabled` / `--ds-bg-disabled`: disabled foreground and
+ *   background (never just opacity, so text stays legible).
  */
 
-/* ---- Fallback: dark (also the value before the store applies) ---- */
+/* ---- Theme preview swatches (static, theme-independent) ----
+ * The sidebar switcher shows a miniature of each theme; these are
+ * the only non-`--ds-*` color values in the file. */
 :root {
-  --ds-bg: 11 15 20;
-  --ds-bg-2: 16 22 30;
-  --ds-panel: 17 24 34;
-  --ds-panel-2: 23 32 44;
-  --ds-line: 34 48 63;
-  --ds-line-strong: 49 66 83;
-  --ds-text-1: 232 238 246;
-  --ds-text-2: 159 174 190;
-  --ds-text-3: 108 122 138;
-  --ds-accent: 91 141 239;
-  --ds-accent-hover: 122 165 245;
-  --ds-accent-soft: 91 141 239;
-  --ds-accent-contrast: 255 255 255;
-  --ds-up: 46 211 160;
-  --ds-up-hover: 74 223 178;
-  --ds-up-soft: 46 211 160;
-  --ds-up-contrast: 5 46 34;
-  --ds-down: 255 107 107;
-  --ds-down-hover: 255 133 133;
-  --ds-down-soft: 255 107 107;
-  --ds-down-contrast: 42 10 10;
-  --ds-warn: 245 181 68;
-  --ds-warn-hover: 247 194 100;
-  --ds-warn-soft: 245 181 68;
-  --ds-warn-contrast: 46 32 4;
-  --ds-info: 86 199 216;
-  --ds-info-hover: 116 211 224;
-  --ds-info-soft: 86 199 216;
-  --ds-info-contrast: 4 42 48;
-  --ds-overlay: 0 0 0;
-  --ds-ring: 91 141 239;
-  --ds-shadow-card: 0 1px 2px rgb(0 0 0 / 0.4), 0 4px 12px rgb(0 0 0 / 0.35);
+  --preview-warm-bg: 247 243 236;
+  --preview-warm-panel: 255 253 248;
+  --preview-warm-accent: 154 106 47;
+  --preview-dark-bg: 12 15 19;
+  --preview-dark-panel: 21 26 33;
+  --preview-dark-accent: 110 155 240;
 }
 
-:root[data-theme="light"] {
-  --ds-bg: 244 246 249;
-  --ds-bg-2: 238 242 247;
-  --ds-panel: 255 255 255;
-  --ds-panel-2: 247 249 252;
-  --ds-line: 220 227 236;
-  --ds-line-strong: 198 208 221;
-  --ds-text-1: 16 24 40;
-  --ds-text-2: 71 84 103;
-  --ds-text-3: 122 134 153;
-  --ds-accent: 46 95 232;
-  --ds-accent-hover: 37 79 209;
-  --ds-accent-soft: 46 95 232;
+/* ---- Fallback: warm (also the value before the store applies) ---- */
+:root {
+  --ds-bg: 247 243 236;
+  --ds-bg-2: 239 233 220;
+  --ds-panel: 255 253 248;
+  --ds-panel-2: 243 237 224;
+  --ds-line: 227 217 198;
+  --ds-line-strong: 205 191 165;
+  --ds-text-1: 46 38 32;
+  --ds-text-2: 110 95 77;
+  --ds-text-3: 154 138 114;
+  --ds-accent: 154 106 47;
+  --ds-accent-hover: 126 86 36;
+  --ds-accent-soft: 154 106 47;
   --ds-accent-contrast: 255 255 255;
-  --ds-up: 8 127 91;
-  --ds-up-hover: 6 107 76;
-  --ds-up-soft: 8 127 91;
+  --ds-up: 46 125 82;
+  --ds-up-hover: 37 107 69;
+  --ds-up-soft: 46 125 82;
   --ds-up-contrast: 255 255 255;
-  --ds-down: 201 42 31;
-  --ds-down-hover: 169 35 24;
-  --ds-down-soft: 201 42 31;
+  --ds-down: 178 58 46;
+  --ds-down-hover: 154 50 39;
+  --ds-down-soft: 178 58 46;
   --ds-down-contrast: 255 255 255;
-  --ds-warn: 181 71 8;
-  --ds-warn-hover: 150 64 10;
-  --ds-warn-soft: 181 71 8;
+  --ds-warn: 154 116 20;
+  --ds-warn-hover: 126 95 16;
+  --ds-warn-soft: 154 116 20;
   --ds-warn-contrast: 255 255 255;
-  --ds-info: 14 112 144;
-  --ds-info-hover: 11 92 118;
-  --ds-info-soft: 14 112 144;
+  --ds-info: 39 107 102;
+  --ds-info-hover: 31 87 83;
+  --ds-info-soft: 39 107 102;
   --ds-info-contrast: 255 255 255;
-  --ds-overlay: 16 24 40;
-  --ds-ring: 46 95 232;
-  --ds-shadow-card: 0 1px 2px rgb(16 24 40 / 0.05), 0 1px 3px rgb(16 24 40 / 0.08);
+  --ds-overlay: 46 38 32;
+  --ds-focus-ring: 154 106 47;
+  --ds-hover: 240 233 218;
+  --ds-hover-strong: 233 224 204;
+  --ds-active: 226 214 188;
+  --ds-text-disabled: 183 169 143;
+  --ds-bg-disabled: 239 233 220;
+  --ds-shadow-card: 0 1px 2px rgb(46 38 32 / 0.05), 0 2px 8px rgb(46 38 32 / 0.06);
 }
 
 :root[data-theme="warm"] {
-  --ds-bg: 245 240 230;
-  --ds-bg-2: 239 232 218;
-  --ds-panel: 255 252 245;
-  --ds-panel-2: 246 240 227;
-  --ds-line: 226 214 194;
-  --ds-line-strong: 205 189 164;
-  --ds-text-1: 42 33 24;
-  --ds-text-2: 106 89 71;
-  --ds-text-3: 153 136 114;
-  --ds-accent: 140 90 43;
-  --ds-accent-hover: 117 74 34;
-  --ds-accent-soft: 140 90 43;
+  --ds-bg: 247 243 236;
+  --ds-bg-2: 239 233 220;
+  --ds-panel: 255 253 248;
+  --ds-panel-2: 243 237 224;
+  --ds-line: 227 217 198;
+  --ds-line-strong: 205 191 165;
+  --ds-text-1: 46 38 32;
+  --ds-text-2: 110 95 77;
+  --ds-text-3: 154 138 114;
+  --ds-accent: 154 106 47;
+  --ds-accent-hover: 126 86 36;
+  --ds-accent-soft: 154 106 47;
   --ds-accent-contrast: 255 255 255;
-  --ds-up: 46 125 79;
-  --ds-up-hover: 37 104 64;
-  --ds-up-soft: 46 125 79;
+  --ds-up: 46 125 82;
+  --ds-up-hover: 37 107 69;
+  --ds-up-soft: 46 125 82;
   --ds-up-contrast: 255 255 255;
   --ds-down: 178 58 46;
-  --ds-down-hover: 150 46 36;
+  --ds-down-hover: 154 50 39;
   --ds-down-soft: 178 58 46;
   --ds-down-contrast: 255 255 255;
-  --ds-warn: 152 106 18;
-  --ds-warn-hover: 126 87 15;
-  --ds-warn-soft: 152 106 18;
+  --ds-warn: 154 116 20;
+  --ds-warn-hover: 126 95 16;
+  --ds-warn-soft: 154 116 20;
   --ds-warn-contrast: 255 255 255;
-  --ds-info: 20 108 99;
-  --ds-info-hover: 15 87 77;
-  --ds-info-soft: 20 108 99;
+  --ds-info: 39 107 102;
+  --ds-info-hover: 31 87 83;
+  --ds-info-soft: 39 107 102;
   --ds-info-contrast: 255 255 255;
-  --ds-overlay: 42 33 24;
-  --ds-ring: 140 90 43;
-  --ds-shadow-card: 0 1px 2px rgb(42 33 24 / 0.06), 0 1px 3px rgb(42 33 24 / 0.09);
+  --ds-overlay: 46 38 32;
+  --ds-focus-ring: 154 106 47;
+  --ds-hover: 240 233 218;
+  --ds-hover-strong: 233 224 204;
+  --ds-active: 226 214 188;
+  --ds-text-disabled: 183 169 143;
+  --ds-bg-disabled: 239 233 220;
+  --ds-shadow-card: 0 1px 2px rgb(46 38 32 / 0.05), 0 2px 8px rgb(46 38 32 / 0.06);
 }
 
 :root[data-theme="dark"] {
-  --ds-bg: 11 15 20;
-  --ds-bg-2: 16 22 30;
-  --ds-panel: 17 24 34;
-  --ds-panel-2: 23 32 44;
-  --ds-line: 34 48 63;
-  --ds-line-strong: 49 66 83;
-  --ds-text-1: 232 238 246;
-  --ds-text-2: 159 174 190;
-  --ds-text-3: 108 122 138;
-  --ds-accent: 91 141 239;
-  --ds-accent-hover: 122 165 245;
-  --ds-accent-soft: 91 141 239;
+  --ds-bg: 12 15 19;
+  --ds-bg-2: 18 22 28;
+  --ds-panel: 21 26 33;
+  --ds-panel-2: 26 32 41;
+  --ds-line: 35 43 54;
+  --ds-line-strong: 50 61 76;
+  --ds-text-1: 232 237 243;
+  --ds-text-2: 157 171 185;
+  --ds-text-3: 103 116 138;
+  --ds-accent: 110 155 240;
+  --ds-accent-hover: 143 178 245;
+  --ds-accent-soft: 110 155 240;
   --ds-accent-contrast: 255 255 255;
-  --ds-up: 46 211 160;
-  --ds-up-hover: 74 223 178;
-  --ds-up-soft: 46 211 160;
-  --ds-up-contrast: 5 46 34;
-  --ds-down: 255 107 107;
-  --ds-down-hover: 255 133 133;
-  --ds-down-soft: 255 107 107;
-  --ds-down-contrast: 42 10 10;
-  --ds-warn: 245 181 68;
-  --ds-warn-hover: 247 194 100;
-  --ds-warn-soft: 245 181 68;
-  --ds-warn-contrast: 46 32 4;
-  --ds-info: 86 199 216;
-  --ds-info-hover: 116 211 224;
-  --ds-info-soft: 86 199 216;
-  --ds-info-contrast: 4 42 48;
+  --ds-up: 52 211 153;
+  --ds-up-hover: 91 222 172;
+  --ds-up-soft: 52 211 153;
+  --ds-up-contrast: 4 42 30;
+  --ds-down: 244 112 112;
+  --ds-down-hover: 246 140 140;
+  --ds-down-soft: 244 112 112;
+  --ds-down-contrast: 45 10 10;
+  --ds-warn: 242 184 75;
+  --ds-warn-hover: 245 199 104;
+  --ds-warn-soft: 242 184 75;
+  --ds-warn-contrast: 45 30 4;
+  --ds-info: 86 200 216;
+  --ds-info-hover: 121 211 224;
+  --ds-info-soft: 86 200 216;
+  --ds-info-contrast: 4 40 46;
   --ds-overlay: 0 0 0;
-  --ds-ring: 91 141 239;
-  --ds-shadow-card: 0 1px 2px rgb(0 0 0 / 0.4), 0 4px 12px rgb(0 0 0 / 0.35);
+  --ds-focus-ring: 110 155 240;
+  --ds-hover: 27 33 43;
+  --ds-hover-strong: 33 41 54;
+  --ds-active: 38 47 61;
+  --ds-text-disabled: 74 85 104;
+  --ds-bg-disabled: 23 28 36;
+  --ds-shadow-card: none;
 }
