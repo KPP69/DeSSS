@@ -134,6 +134,11 @@ export default function AccountPage() {
                       : ""}
                   </Badge>
                 )}
+                {lv && lv.degraded && (
+                  <span className="block w-full truncate text-[11px] text-ds-text-3">
+                    数据降级：REST 兜底
+                  </span>
+                )}
               </div>
             </td>
             <td className={`${tdClsCompact} leading-tight`}>{venueName(a.exchangeId)}</td>

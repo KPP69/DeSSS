@@ -56,6 +56,7 @@ async fn connect_account_inner(
         state.bus.clone(),
         state.sync.live_map(),
         state.sync.reconcile_state(),
+        state.orders.clone(),
     )?;
     state.bus.log(
         "info",
@@ -109,6 +110,8 @@ async fn connect_account_inner(
             pnl_usd: None,
             currency: String::new(),
             positions: vec![],
+            source: "rest".to_string(),
+            degraded: false,
             error: None,
             ts: chrono::Utc::now().timestamp_millis(),
         }))

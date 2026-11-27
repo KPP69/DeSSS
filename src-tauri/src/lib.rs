@@ -121,21 +121,25 @@ pub fn run() {
                 });
             }
             // Open-orders sync (phase 5A §4 follow-up, real-machine
-            // 2026-11-26): every 10s, reconcile each connected
-            // Hyperliquid / Entropy account's open orders with the
-            // exchange (see `execution::sync_open_orders`). The
-            // exchange's live list is the only source of truth:
-            // orders canceled on the website disappear from the
-            // store, website-placed orders appear and become
-            // cancellable. Best-effort — a failure is retried next
-            // cycle, and the account poll loop already surfaces REST
-            // failures, so this task logs nothing itself. Same spawn
-            // rule as the sampler above: `tauri::async_runtime::spawn`
+            // 2026-11-26): reconcile each connected Hyperliquid /
+            // Entropy account's open orders with the exchange (see
+            // `execution::sync_open_orders`). The exchange's live list
+            // is the only source of truth: orders canceled on the
+            // website disappear from the store, website-placed orders
+            // appear and become cancellable. Best-effort — a failure
+            // is retried next cycle, and the account poll loop already
+            // surfaces REST failures, so this task logs nothing itself.
+            // Phase 3.3 cadence: degraded → every 10s (REST fallback);
+            // healthy → every 60s (pure reconciliation — the account
+            // WS merges its openOrders frames live). Same spawn rule
+            // as the sampler above: `tauri::async_runtime::spawn`
             // inside `setup`, never `tokio::spawn`.
             {
                 let state = sync_state.clone();
                 tauri::async_runtime::spawn(async move {
                     let mut tick = tokio::time::interval(Duration::from_secs(10));
+                    let mut last_sync: std::collections::HashMap<String, std::time::Instant> =
+                        std::collections::HashMap::new();
                     loop {
                         tick.tick().await;
                         let deps = crate::execution::ExecDeps {
@@ -150,7 +154,20 @@ pub fn run() {
                             if exchange_id != "hyperliquid" && exchange_id != "entropy" {
                                 continue;
                             }
+                            let degraded = state
+                                .sync
+                                .adapter(&account_id)
+                                .map(|a| a.ws_degraded())
+                                .unwrap_or(false);
+                            let due = last_sync
+                                .get(&account_id)
+                                .map(|t| t.elapsed() >= Duration::from_secs(60))
+                                .unwrap_or(true);
+                            if !degraded && !due {
+                                continue;
+                            }
                             let _ = crate::execution::sync_open_orders(&deps, &account_id).await;
+                            last_sync.insert(account_id, std::time::Instant::now());
                         }
                     }
                 });

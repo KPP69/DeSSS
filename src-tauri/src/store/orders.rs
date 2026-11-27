@@ -2,10 +2,10 @@
 //! them; the exchange is the source of truth, and the store is
 //! rebuilt from it on demand). Nothing here is persisted.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::RwLock;
 
-use crate::core::types::{OrderInfo, OrderStatus, TradeInfo};
+use crate::core::types::{Order, OrderInfo, OrderStatus, TradeInfo};
 
 /// In-memory order store: the execution engine owns it. Orders are
 /// keyed by client order id (cloid); fills are kept per cloid.
@@ -85,6 +85,108 @@ impl OrderStore {
         if let Ok(mut m) = self.fills.write() {
             m.insert(cloid.to_string(), fills);
         }
+    }
+
+    /// Append fills for one order, keyed by trade id: the WS
+    /// userFills channel sends a snapshot on subscribe and then
+    /// live fills, so the same fill can arrive twice — a second
+    /// copy must never duplicate the record (Phase 3.3).
+    pub fn append_fills(&self, cloid: &str, fills: Vec<TradeInfo>) {
+        if fills.is_empty() {
+            return;
+        }
+        if let Ok(mut m) = self.fills.write() {
+            let entry = m.entry(cloid.to_string()).or_default();
+            for f in fills {
+                if !entry.iter().any(|e| e.trade_id == f.trade_id) {
+                    entry.push(f);
+                }
+            }
+        }
+    }
+
+    /// Merge the exchange's live open orders into the store (pure step,
+    /// no network) and return the live list plus the local non-terminal
+    /// records that are no longer on the exchange. Moved here from
+    /// `execution` (Phase 3.3): the account WS applies its openOrders
+    /// frames through the same merge, and the store owns the merge.
+    ///
+    /// - Each exchange row is authoritative for open state: a stored
+    ///   record matching by oid is refreshed to Open; a row with no
+    ///   stored record (an order placed on the website, or before a
+    ///   restart) is inserted as an Open record, so it shows up and can
+    ///   be cancelled. A website order without a cloid is keyed by its
+    ///   oid string, exactly like the cancel flow's synthetic record.
+    /// - Local records in Open / Submitted / PartiallyFilled with a real
+    ///   oid that are missing from the live list are returned for the
+    ///   caller to query — they may have been filled or canceled
+    ///   elsewhere. Terminal records and records without an oid (never
+    ///   sent) are never reported missing. Unresolved is deliberately
+    ///   excluded: it already has its own reconcile flow and must never
+    ///   be cleaned up by a list diff.
+    pub fn merge_open_orders(
+        &self,
+        account_id: &str,
+        exchange: &[Order],
+    ) -> (Vec<OrderInfo>, Vec<OrderInfo>) {
+        let mut live = Vec::new();
+        let mut live_oids: HashSet<&str> = HashSet::new();
+        for o in exchange {
+            live_oids.insert(o.order_id.as_str());
+            let row = if let Some(mut stored) = self.get_by_oid(&o.order_id) {
+                // The exchange says it is open; our record may be stale
+                // (e.g. a cancel that raced). Trust the exchange.
+                stored
+                    .transition(OrderStatus::Open, crate::core::util::now_ms())
+                    .ok();
+                stored.updated_at = crate::core::util::now_ms();
+                stored
+            } else {
+                OrderInfo {
+                    order_id: o.order_id.clone(),
+                    client_order_id: if o.client_order_id.is_empty() {
+                        o.order_id.clone()
+                    } else {
+                        o.client_order_id.clone()
+                    },
+                    exchange_id: o.exchange_id.clone(),
+                    account_id: o.account_id.clone(),
+                    symbol: o.symbol.clone(),
+                    side: o.side.clone(),
+                    order_type: o.order_type.clone(),
+                    status: OrderStatus::Open,
+                    price: o.price,
+                    quantity: o.quantity,
+                    filled_quantity: 0.0,
+                    remaining_quantity: o.quantity,
+                    average_fill_price: None,
+                    error: None,
+                    trigger_px: o.trigger_px,
+                    tpsl: o.tpsl.clone(),
+                    // Imported from the exchange (e.g. placed on the
+                    // website): a human order, never a strategy order.
+                    origin: "manual".to_string(),
+                    created_at: o.ts,
+                    updated_at: o.ts,
+                }
+            };
+            self.insert(row.clone());
+            live.push(row);
+        }
+        let missing: Vec<OrderInfo> = self
+            .list()
+            .into_iter()
+            .filter(|r| {
+                r.account_id == account_id
+                    && matches!(
+                        r.status,
+                        OrderStatus::Open | OrderStatus::Submitted | OrderStatus::PartiallyFilled
+                    )
+                    && !r.order_id.is_empty()
+                    && !live_oids.contains(r.order_id.as_str())
+            })
+            .collect();
+        (live, missing)
     }
 
     /// True when an order with the same account + symbol + side +

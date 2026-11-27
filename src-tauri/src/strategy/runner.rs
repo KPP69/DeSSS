@@ -21,8 +21,16 @@ use super::{load_strategies, set_strategy_enabled, LegRef, StrategyInstance, Str
 /// A book older than this is stale for the runner (same 5s as the
 /// evaluator's rule).
 const BOOK_STALE_MS: i64 = 5_000;
-/// A position snapshot older than this is stale.
-const POSITION_STALE_MS: i64 = 15_000;
+/// A position snapshot older than this is stale (Phase 3.3: 3s —
+///
+/// under the account WS the snapshot is at most a 1s heartbeat old,
+/// so anything older means the live feed is gone).
+const POSITION_STALE_MS: i64 = 3_000;
+/// A protection order younger than this is left alone by the cleanup
+/// below: it may predate the position snapshot, which can lag a fresh
+/// fill by up to one 10s poll. Split from POSITION_STALE_MS in Phase
+/// 3.3 — the two numbers mean different things now.
+const PROTECTION_STALE_MS: i64 = 15_000;
 /// Warm-up: an exchange with no successful runner request inside
 /// this window gets one light read before any order is placed.
 const WARMUP_IDLE_MS: i64 = 60_000;
@@ -307,7 +315,7 @@ async fn place_protection(
 /// positionTpsl orders when the position closes, but the official
 /// docs do not state it, so the runner cancels explicitly (belt and
 /// braces; cancelling an already-gone order is a benign error,
-/// logged, never fatal). Only orders older than POSITION_STALE_MS
+/// logged, never fatal). Only orders older than PROTECTION_STALE_MS
 /// are touched: a younger order may predate the position snapshot,
 /// which can lag a fresh fill by up to one 10s poll.
 async fn cleanup_protection(deps: &RunnerDeps, inst: &StrategyInstance, now: i64) {
@@ -328,7 +336,7 @@ async fn cleanup_protection(deps: &RunnerDeps, inst: &StrategyInstance, now: i64
                 || o.symbol != leg.symbol
                 || o.trigger_px.is_none()
                 || o.status.is_terminal()
-                || now - o.created_at <= POSITION_STALE_MS
+                || now - o.created_at <= PROTECTION_STALE_MS
             {
                 continue;
             }
@@ -451,11 +459,15 @@ async fn run_instance(deps: &RunnerDeps, inst: &StrategyInstance, now: i64) {
     if now - book_b.ts > BOOK_STALE_MS {
         return skip(deps, inst, "B 腿盘口陈旧");
     }
-    // (b) position snapshots fresh (≤15s) and (c) neither leg's
-    // exchange down / rate-limited. There is no separate venue-health
-    // registry: the account's live status is the signal — the
-    // adapter poll loop reports "error" when its REST fails,
-    // including 429s — so "connected" is the gate.
+    // (b) position snapshots fresh (≤3s, Phase 3.3) and (c) neither
+    // leg's exchange down / rate-limited. There is no separate
+    // venue-health registry: the account's live status is the signal —
+    // the adapter poll loop reports "error" when its REST fails,
+    // including 429s — so "connected" is the gate. (Phase 3.3) A
+    // degraded leg (WS down or silent) never opens a new position:
+    // the snapshot is REST fallback, not live. Existing positions are
+    // untouched — the cleanup above already ran, and only new fires
+    // are gated here.
     let Some(live_a) = live_of(deps, &inst.leg_a.account_id) else {
         return skip(deps, inst, "A 腿账户未连接");
     };
@@ -467,6 +479,12 @@ async fn run_instance(deps: &RunnerDeps, inst: &StrategyInstance, now: i64) {
     }
     if live_b.status != "connected" {
         return skip(deps, inst, &format!("B 腿账户状态 {}", live_b.status));
+    }
+    if live_a.degraded {
+        return skip(deps, inst, "A 腿账户数据降级，不开新仓");
+    }
+    if live_b.degraded {
+        return skip(deps, inst, "B 腿账户数据降级，不开新仓");
     }
     if now - live_a.ts > POSITION_STALE_MS {
         return skip(deps, inst, "A 腿持仓快照陈旧");
@@ -743,6 +761,8 @@ mod tests {
             pnl_usd: Some(0.0),
             currency: "USDC".to_string(),
             positions: vec![],
+            source: "rest".to_string(),
+            degraded: false,
             error: None,
             ts: now,
         }
@@ -1621,5 +1641,66 @@ mod tests {
                 "round gap {gap:?} outside 200ms ±50ms"
             );
         }
+    }
+
+    /// Flip one leg's degraded flag in the harness live map.
+    fn set_live_degraded(deps: &RunnerDeps, account_id: &str, degraded: bool) {
+        let map = deps.exec.sync.live_map();
+        let mut m = map.write().unwrap();
+        m.get_mut(account_id).unwrap().degraded = degraded;
+    }
+
+    /// Move one leg's live timestamp (freshness is `now - ts`).
+    fn set_live_ts(deps: &RunnerDeps, account_id: &str, ts: i64) {
+        let map = deps.exec.sync.live_map();
+        let mut m = map.write().unwrap();
+        m.get_mut(account_id).unwrap().ts = ts;
+    }
+
+    fn last_skip(deps: &RunnerDeps, inst_id: &str) -> String {
+        deps.stats
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(inst_id)
+            .and_then(|s| s.last_skip.clone())
+            .unwrap_or_default()
+    }
+
+    /// Phase 3.3 §10: a degraded leg blocks new fires — the snapshot
+    /// is REST fallback, not live — but the instance stays enabled,
+    /// and recovery lets the next round fire again.
+    #[tokio::test]
+    async fn degraded_leg_blocks_new_fire_but_keeps_instance_enabled() {
+        let now = now_ms();
+        let h = harness(now).await;
+        set_live_degraded(&h.deps, "acc-a", true);
+        run_round(&h.deps, now).await;
+        assert!(placed(&h.fake_a).is_empty(), "degraded leg must not fire");
+        assert!(placed(&h.fake_b).is_empty());
+        assert!(instance_enabled(&h.deps, &h.inst_id));
+        let skip = last_skip(&h.deps, &h.inst_id);
+        assert!(skip.contains("数据降级"), "skip was: {skip}");
+        // Recovery: the next round fires again.
+        set_live_degraded(&h.deps, "acc-a", false);
+        run_round(&h.deps, now).await;
+        assert_eq!(placed(&h.fake_a).len(), 1);
+    }
+
+    /// Phase 3.3 §10: the position-freshness rule is 3s now (was 15s).
+    #[tokio::test]
+    async fn position_snapshot_older_than_3s_skips() {
+        let now = now_ms();
+        let h = harness(now).await;
+        set_live_ts(&h.deps, "acc-a", now - 4_000);
+        set_live_ts(&h.deps, "acc-b", now - 4_000);
+        run_round(&h.deps, now).await;
+        assert!(
+            placed(&h.fake_a).is_empty(),
+            "4s-old snapshot must not fire"
+        );
+        set_live_ts(&h.deps, "acc-a", now - 2_000);
+        set_live_ts(&h.deps, "acc-b", now - 2_000);
+        run_round(&h.deps, now).await;
+        assert_eq!(placed(&h.fake_a).len(), 1, "2s-old snapshot must fire");
     }
 }

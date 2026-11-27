@@ -65,6 +65,12 @@ impl SyncManager {
     /// remains the source of truth: the next post-grace poll overwrites
     /// this estimate with confirmed positions. Equity / available are
     /// left to that poll — they need the exchange's margin math.
+    ///
+    /// Phase 3.3 §6: while the account WS is healthy the estimate is
+    /// SKIPPED — the WS full snapshot carries every fill, and applying
+    /// the same fill twice would double-count the position. The grace
+    /// window still starts (it only gates REST polls). The estimate
+    /// runs only while degraded, where no snapshot is coming.
     pub fn apply_fill(
         &self,
         account_id: &str,
@@ -74,6 +80,13 @@ impl SyncManager {
         fill_price: f64,
     ) {
         self.reconcile.note_fill(account_id);
+        if self
+            .adapter(account_id)
+            .map(|a| a.ws_healthy())
+            .unwrap_or(false)
+        {
+            return;
+        }
         let Ok(mut live) = self.live.write() else {
             return;
         };
@@ -279,6 +292,7 @@ pub fn build_adapter(
     bus: EventBus,
     live: Arc<RwLock<HashMap<String, AccountLive>>>,
     reconcile: Arc<ReconcileState>,
+    orders: Arc<crate::store::orders::OrderStore>,
 ) -> Result<Arc<dyn ExchangeAdapter>, String> {
     let account_id = row.id.clone();
     let Some(v) = crate::venues::all()
@@ -294,6 +308,7 @@ pub fn build_adapter(
             bus: bus.clone(),
             live: Arc::clone(&live),
             reconcile: Arc::clone(&reconcile),
+            orders,
         },
     )
 }
@@ -322,6 +337,8 @@ mod tests {
                 mark_price: 91000.0,
                 unrealized_pnl: 100.0,
             }],
+            source: "rest".to_string(),
+            degraded: false,
             error: None,
             ts: 0,
         }
@@ -365,6 +382,7 @@ mod tests {
             EventBus::new(16),
             Arc::new(RwLock::new(HashMap::new())),
             Arc::new(ReconcileState::new()),
+            Arc::new(crate::store::orders::OrderStore::new()),
         ) {
             Ok(_) => panic!("api-mode build must fail"),
             Err(e) => e,
@@ -381,6 +399,7 @@ mod tests {
             EventBus::new(16),
             Arc::new(RwLock::new(HashMap::new())),
             Arc::new(ReconcileState::new()),
+            Arc::new(crate::store::orders::OrderStore::new()),
         ) {
             Ok(_) => panic!("agent-mode build without fields must fail"),
             Err(e) => e,
@@ -427,6 +446,101 @@ mod tests {
         m.apply_fill("acc-1", "ETH", "buy", 1.0, 3000.0);
         let live = m.live_states().into_iter().next().unwrap();
         assert_eq!(live.positions.len(), 2);
+    }
+
+    /// Minimal stub adapter whose WS health is configurable, for the
+    /// Phase 3.3 §6 gate test. Everything else is unsupported — the
+    /// gate only ever calls `ws_healthy`.
+    struct WsStubAdapter {
+        healthy: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl ExchangeAdapter for WsStubAdapter {
+        fn id(&self) -> &str {
+            "hyperliquid"
+        }
+        fn name(&self) -> &str {
+            "Hyperliquid"
+        }
+        async fn connect(&self) -> crate::core::error::VenueResult<()> {
+            Ok(())
+        }
+        async fn disconnect(&self) -> crate::core::error::VenueResult<()> {
+            Ok(())
+        }
+        async fn subscribe_ticks(
+            &self,
+            _symbols: Vec<String>,
+        ) -> crate::core::error::VenueResult<()> {
+            Ok(())
+        }
+        async fn unsubscribe_ticks(
+            &self,
+            _symbols: Vec<String>,
+        ) -> crate::core::error::VenueResult<()> {
+            Ok(())
+        }
+        async fn get_balances(
+            &self,
+            _account_id: &str,
+        ) -> crate::core::error::VenueResult<Vec<crate::core::types::Balance>> {
+            unimplemented!()
+        }
+        async fn get_positions(
+            &self,
+            _account_id: &str,
+        ) -> crate::core::error::VenueResult<Vec<crate::core::types::Position>> {
+            unimplemented!()
+        }
+        async fn get_open_orders(
+            &self,
+            _account_id: &str,
+        ) -> crate::core::error::VenueResult<Vec<crate::core::types::Order>> {
+            unimplemented!()
+        }
+        async fn place_order(
+            &self,
+            _req: crate::core::types::OrderRequest,
+        ) -> crate::core::error::VenueResult<crate::core::types::Order> {
+            unimplemented!()
+        }
+        async fn cancel_order(
+            &self,
+            _account_id: &str,
+            _order_id: &str,
+            _symbol: &str,
+        ) -> crate::core::error::VenueResult<()> {
+            unimplemented!()
+        }
+        fn ws_healthy(&self) -> bool {
+            self.healthy
+        }
+    }
+
+    /// Phase 3.3 §6: while the account WS is healthy the local fill
+    /// estimate is skipped (the WS snapshot carries the fill — one
+    /// fill, counted once); while degraded it still applies. The
+    /// grace window starts in both cases.
+    #[test]
+    fn fill_estimate_skipped_while_ws_healthy() {
+        let m = manager_with_live();
+        m.insert(
+            "acc-1".to_string(),
+            Arc::new(WsStubAdapter { healthy: true }),
+        );
+        m.apply_fill("acc-1", "BTC", "buy", 0.1, 92000.0);
+        let live = m.live_states().into_iter().next().unwrap();
+        assert!((live.positions[0].qty - 0.1).abs() < 1e-12);
+        assert!(m.reconcile.in_grace("acc-1"), "grace still starts");
+        let m2 = manager_with_live();
+        m2.insert(
+            "acc-1".to_string(),
+            Arc::new(WsStubAdapter { healthy: false }),
+        );
+        m2.apply_fill("acc-1", "BTC", "buy", 0.1, 92000.0);
+        let live = m2.live_states().into_iter().next().unwrap();
+        assert!((live.positions[0].qty - 0.2).abs() < 1e-12);
     }
 
     #[test]

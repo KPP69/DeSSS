@@ -446,7 +446,24 @@ pub struct AccountLive {
     pub currency: String,
     pub positions: Vec<LivePosition>,
     pub error: Option<String>,
+    /// Where the numbers in this snapshot came from: "ws" (a private
+    /// account-WS frame) or "rest" (a REST poll). Phase 3.3: only the
+    /// Hyperliquid / Entropy adapters ever report "ws"; every other
+    /// venue is always "rest".
+    #[serde(default = "default_source_rest")]
+    pub source: String,
+    /// True while the account WS is down or silent (no frame for 10s):
+    /// the numbers are REST fallback, not live. Phase 3.3: the
+    /// strategy runner refuses to open new positions while degraded,
+    /// and the UI shows the fallback line. Always false for venues
+    /// without an account WS.
+    #[serde(default)]
+    pub degraded: bool,
     pub ts: i64,
+}
+
+fn default_source_rest() -> String {
+    "rest".to_string()
 }
 
 #[cfg(test)]

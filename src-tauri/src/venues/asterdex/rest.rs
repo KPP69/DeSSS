@@ -162,6 +162,8 @@ impl AsterdexAdapter {
             pnl_usd: Some(snap.pnl_usd),
             currency: snap.currency,
             positions: snap.positions,
+            source: "rest".to_string(),
+            degraded: false,
             error,
             ts: now_ms(),
         };

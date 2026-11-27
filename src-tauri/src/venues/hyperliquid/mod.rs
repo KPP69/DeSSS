@@ -21,6 +21,7 @@
 //!   account read always aggregates all three, so the Hyperliquid and
 //!   Entropy adapters publish identical numbers for the same wallet.
 
+pub mod account_ws;
 pub mod catalog;
 pub mod order;
 pub mod rest;
@@ -38,8 +39,11 @@ use crate::bus::EventBus;
 use crate::core::market::MarketInfo;
 use crate::core::types::{AccountLive, LivePosition};
 use crate::market::reconcile::ReconcileState;
+use crate::store::orders::OrderStore;
 use crate::venues::ExchangeAdapter;
 use crate::venues::{CredentialField, CredentialKind, StreamPlan, Venue, VenueCtx};
+
+use account_ws::{WsLegs, WsState};
 
 pub const HL_INFO_URL: &str = "https://api.hyperliquid.xyz/info";
 pub const HL_EXCHANGE_URL: &str = "https://api.hyperliquid.xyz/exchange";
@@ -92,6 +96,22 @@ pub struct HyperliquidAdapter {
     /// Cached asset-index universe for order placement (meta +
     /// perpDexs offset for HIP-3). Refreshed lazily, 5 min TTL.
     asset_meta: Mutex<Option<AssetMeta>>,
+    /// Order store (Phase 3.3): the account WS applies orderUpdates /
+    /// openOrders / userFills frames to it. Shared with the execution
+    /// layer — the store is the single record of orders and fills.
+    orders: Arc<OrderStore>,
+    /// Per-dex account snapshots for the WS merge (Phase 3.3): the
+    /// clearinghouseState channel pushes one dex at a time, and the
+    /// published snapshot is main + io + spot, exactly like the REST
+    /// aggregation in `fetch_account_state`.
+    ws_legs: Mutex<WsLegs>,
+    /// Account-WS connection state (Phase 3.3): socket up/down, last
+    /// frame time, degraded flag. The single source for
+    /// `AccountLive.source` / `degraded` and for the REST cadence.
+    ws_state: Mutex<WsState>,
+    /// Last REST poll that actually fetched (not a grace skip): the
+    /// 60s healthy cadence counts from here.
+    last_poll: Mutex<Option<Instant>>,
 }
 
 /// Cached `meta` universe for one dex: symbol order IS the asset
@@ -105,6 +125,10 @@ struct AssetMeta {
 }
 
 impl HyperliquidAdapter {
+    // A constructor threading nine dependencies (the adapter owns its
+    // stores, bus handle and both WS legs); splitting it would only
+    // move the arity elsewhere.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: &str,
         dex: Option<&str>,
@@ -114,10 +138,11 @@ impl HyperliquidAdapter {
         live: Arc<RwLock<HashMap<String, AccountLive>>>,
         reconcile: Arc<ReconcileState>,
         agent_secret: Option<[u8; 32]>,
+        orders: Arc<OrderStore>,
     ) -> Self {
         let agent_address = agent_secret
             .as_ref()
-            .map(|s| crate::venues::asterdex::sign::address_from_secret(s));
+            .map(crate::venues::asterdex::sign::address_from_secret);
         Self {
             id: id.to_string(),
             dex: dex.map(|d| d.to_string()),
@@ -136,6 +161,10 @@ impl HyperliquidAdapter {
             agent_secret,
             agent_address,
             asset_meta: Mutex::new(None),
+            orders,
+            ws_legs: Mutex::new(WsLegs::default()),
+            ws_state: Mutex::new(WsState::default()),
+            last_poll: Mutex::new(None),
         }
     }
 
@@ -253,6 +282,7 @@ impl Venue for HyperliquidVenue {
             ctx.live.clone(),
             ctx.reconcile.clone(),
             agent_secret,
+            ctx.orders.clone(),
         )))
     }
 

@@ -418,6 +418,9 @@ export default function TradingPage() {
     <div>
       {/* Real positions */}
       <div className="font-semibold text-ds-text-1 mb-2">当前持仓 · 来自已连接账户的只读同步</div>
+      {Object.values(live).some((a) => a.degraded) && (
+        <div className="text-xs text-ds-text-3 mb-2">数据降级：REST 兜底</div>
+      )}
       {positions.length === 0 ? (
         <EmptyState>暂无真实持仓 — 连接账户后，交易所同步到的当前持仓会显示在这里。</EmptyState>
       ) : (

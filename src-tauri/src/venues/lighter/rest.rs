@@ -123,6 +123,8 @@ impl LighterAdapter {
             pnl_usd: snap.pnl,
             currency: self.network.currency().to_string(),
             positions: snap.positions,
+            source: "rest".to_string(),
+            degraded: false,
             error,
             ts: now_ms(),
         };

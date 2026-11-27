@@ -89,11 +89,16 @@ pub fn check_number_bounds(value: i64, field: &CredentialField) -> Option<Number
 /// arguments of `SyncManager::build_adapter` today, so the PR-1.2
 /// move is a re-route, not a redesign.
 #[derive(Clone)]
+/// What a venue needs to build one adapter: the account id, the bus,
+/// the shared live map, the reconciliation state, and the order store
+/// (Phase 3.3: the Hyperliquid account WS applies orderUpdates /
+/// openOrders / userFills frames to the store; other venues ignore it).
 pub struct VenueCtx {
     pub account_id: String,
     pub bus: EventBus,
     pub live: Arc<RwLock<HashMap<String, AccountLive>>>,
     pub reconcile: Arc<ReconcileState>,
+    pub orders: Arc<crate::store::orders::OrderStore>,
 }
 
 /// A market stream's dial plan for one symbol: where to connect, what
@@ -221,6 +226,23 @@ pub trait ExchangeAdapter: Send + Sync {
     /// Long-running read loop (WS + REST polling). Default is a no-op; real
     /// adapters override it. The caller spawns it once after connect().
     async fn run(&self) {}
+
+    /// True while this adapter's account WS is live (socket up and
+    /// frames flowing): the execution layer must NOT apply local fill
+    /// estimates to positions then — the WS full snapshot carries
+    /// every fill, and applying both would double-count (Phase 3.3
+    /// §6). Default false: venues without an account WS keep the
+    /// local estimate.
+    fn ws_healthy(&self) -> bool {
+        false
+    }
+
+    /// True while this adapter's account data is degraded (WS down or
+    /// silent): REST is the fallback. Default false: venues without
+    /// an account WS are never "WS-degraded".
+    fn ws_degraded(&self) -> bool {
+        false
+    }
 
     /// Wake the poll loop for an immediate account sync (position
     /// reconciliation). Default is a no-op; adapters with a REST loop

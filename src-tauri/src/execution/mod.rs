@@ -25,7 +25,6 @@
 //!   a rejection is the gateway working, not an anomaly. Exchange
 //!   failures (UnknownOutcome, definite rejections) do.
 
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use rust_decimal::prelude::ToPrimitive;
@@ -35,7 +34,7 @@ use crate::bus::EventBus;
 use crate::core::error::{VenueError, UNKNOWN_OID};
 use crate::core::precision::{align_down, align_price_for_side, to_decimal};
 use crate::core::signing;
-use crate::core::types::{Order, OrderInfo, OrderRequest, OrderStatus};
+use crate::core::types::{OrderInfo, OrderRequest, OrderStatus};
 use crate::data_engine::realtime::RealtimeEngine;
 use crate::market::catalog::MarketCatalog;
 use crate::market::sync::SyncManager;
@@ -156,7 +155,7 @@ pub async fn place_order(deps: &ExecDeps, intent: PlaceIntent) -> Result<OrderIn
     // The order cannot be aligned without them.
     let row = deps
         .catalog
-        .search(query, &[exchange_id.clone()])
+        .search(query, std::slice::from_ref(&exchange_id))
         .into_iter()
         .find(|r| r.symbol.eq_ignore_ascii_case(query))
         .ok_or_else(|| format!("{query} 不在 {exchange_id} 的品种目录中"))?;
@@ -628,88 +627,6 @@ pub async fn cancel_order(
     }
 }
 
-/// Merge the exchange's live open orders into the store (pure step,
-/// no network) and return the live list plus the local non-terminal
-/// records that are no longer on the exchange.
-///
-/// - Each exchange row is authoritative for open state: a stored
-///   record matching by oid is refreshed to Open; a row with no
-///   stored record (an order placed on the website, or before a
-///   restart) is inserted as an Open record, so it shows up and can
-///   be cancelled. A website order without a cloid is keyed by its
-///   oid string, exactly like the cancel flow's synthetic record.
-/// - Local records in Open / Submitted / PartiallyFilled with a real
-///   oid that are missing from the live list are returned for the
-///   caller to query — they may have been filled or canceled
-///   elsewhere. Terminal records and records without an oid (never
-///   sent) are never reported missing. Unresolved is deliberately
-///   excluded: it already has its own reconcile flow and must never
-///   be cleaned up by a list diff.
-fn merge_open_orders(
-    store: &OrderStore,
-    account_id: &str,
-    exchange: &[Order],
-) -> (Vec<OrderInfo>, Vec<OrderInfo>) {
-    let mut live = Vec::new();
-    let mut live_oids: HashSet<&str> = HashSet::new();
-    for o in exchange {
-        live_oids.insert(o.order_id.as_str());
-        let row = if let Some(mut stored) = store.get_by_oid(&o.order_id) {
-            // The exchange says it is open; our record may be stale
-            // (e.g. a cancel that raced). Trust the exchange.
-            stored
-                .transition(OrderStatus::Open, crate::core::util::now_ms())
-                .ok();
-            stored.updated_at = crate::core::util::now_ms();
-            stored
-        } else {
-            OrderInfo {
-                order_id: o.order_id.clone(),
-                client_order_id: if o.client_order_id.is_empty() {
-                    o.order_id.clone()
-                } else {
-                    o.client_order_id.clone()
-                },
-                exchange_id: o.exchange_id.clone(),
-                account_id: o.account_id.clone(),
-                symbol: o.symbol.clone(),
-                side: o.side.clone(),
-                order_type: o.order_type.clone(),
-                status: OrderStatus::Open,
-                price: o.price,
-                quantity: o.quantity,
-                filled_quantity: 0.0,
-                remaining_quantity: o.quantity,
-                average_fill_price: None,
-                error: None,
-                trigger_px: o.trigger_px,
-                tpsl: o.tpsl.clone(),
-                // Imported from the exchange (e.g. placed on the
-                // website): a human order, never a strategy order.
-                origin: "manual".to_string(),
-                created_at: o.ts,
-                updated_at: o.ts,
-            }
-        };
-        store.insert(row.clone());
-        live.push(row);
-    }
-    let missing: Vec<OrderInfo> = store
-        .list()
-        .into_iter()
-        .filter(|r| {
-            r.account_id == account_id
-                && matches!(
-                    r.status,
-                    OrderStatus::Open | OrderStatus::Submitted | OrderStatus::PartiallyFilled
-                )
-                && !r.order_id.is_empty()
-                && !live_oids.contains(r.order_id.as_str())
-        })
-        .collect();
-    (live, missing)
-}
-
 /// Re-query Unresolved records older than 30s (F4): the 10s
 /// open-orders task calls this after the list sync. A terminal
 /// answer updates the record; each `unknownOid` is one strike and
@@ -771,7 +688,7 @@ pub async fn sync_open_orders(deps: &ExecDeps, account_id: &str) -> Result<Vec<O
         .get_open_orders(account_id)
         .await
         .map_err(|e| e.to_string())?;
-    let (live, missing) = merge_open_orders(&deps.orders, account_id, &exchange);
+    let (live, missing) = deps.orders.merge_open_orders(account_id, &exchange);
     for record in missing {
         // The exchange no longer lists this order: ask for its final
         // state. `reconcile_order` keeps the record unchanged when
@@ -816,7 +733,7 @@ mod tests {
     use super::*;
     use crate::bus::EventBus;
     use crate::core::error::VenueResult;
-    use crate::core::types::{Balance, Position};
+    use crate::core::types::{Balance, Order, Position};
     use crate::data_engine::realtime::RealtimeEngine;
     use crate::market::catalog::MarketCatalog;
     use crate::market::sync::SyncManager;
@@ -944,6 +861,7 @@ mod tests {
             sync.live_map(),
             sync.reconcile_state(),
             None,
+            Arc::new(crate::store::orders::OrderStore::new()),
         ));
         sync.insert("acc-1".to_string(), adapter);
         let deps = ExecDeps {
@@ -1082,6 +1000,8 @@ mod tests {
                         mark_price: 91000.0,
                         unrealized_pnl: 10.0,
                     }],
+                    source: "rest".to_string(),
+                    degraded: false,
                     error: None,
                     ts: now,
                 },
@@ -1350,8 +1270,7 @@ mod tests {
         unresolved.order_id = "6".to_string();
         store.insert(unresolved);
 
-        let (live, missing) = merge_open_orders(
-            &store,
+        let (live, missing) = store.merge_open_orders(
             "acc-1",
             &[exchange_order("2", "0xbbb"), exchange_order("3", "0xccc")],
         );

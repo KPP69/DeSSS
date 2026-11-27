@@ -34,7 +34,7 @@ fn decimal_to_wire(v: f64) -> Result<String, String> {
 
 /// `openOrders` / `frontendOpenOrders` side: "A" is the ask (sell),
 /// "B" is the bid (buy).
-fn hl_side_to_side(s: &str) -> String {
+pub(crate) fn hl_side_to_side(s: &str) -> String {
     if s == "A" {
         "sell".to_string()
     } else {
@@ -75,7 +75,7 @@ fn tpsl_from_order_type(order_type: &str) -> Option<String> {
     }
 }
 
-fn parse_order_status_response(
+pub(crate) fn parse_order_status_response(
     v: &Value,
     exchange_id: &str,
     account_id: &str,
@@ -160,7 +160,11 @@ fn parse_order_status_response(
 }
 
 /// Parse an `openOrders` response into wire orders.
-fn parse_open_orders(v: &Value, exchange_id: &str, account_id: &str) -> Result<Vec<Order>, String> {
+pub(crate) fn parse_open_orders(
+    v: &Value,
+    exchange_id: &str,
+    account_id: &str,
+) -> Result<Vec<Order>, String> {
     let arr = v
         .as_array()
         .ok_or_else(|| "挂单列表响应无法解析".to_string())?;
@@ -761,10 +765,26 @@ impl ExchangeAdapter for HyperliquidAdapter {
     }
 
     async fn run(&self) {
-        // Account sync is REST polling only: no market WS is opened for
-        // an account (public market data comes from the on-demand
-        // catalog, never from a per-account connection).
-        self.rest_loop().await;
+        // Account sync is the REST poll loop plus the per-account
+        // private WS (Phase 3.3): both run until the adapter stops.
+        // Public market data still comes from the on-demand catalog,
+        // never from a per-account connection.
+        tokio::join!(self.rest_loop(), self.ws_loop());
+    }
+
+    /// Phase 3.3 §6: the local fill estimate is skipped while the
+    /// account WS is live — the full snapshot carries every fill.
+    fn ws_healthy(&self) -> bool {
+        !self.ws_degraded()
+    }
+
+    /// Phase 3.3 §8: degraded is the stored WS flag (socket down or
+    /// 10s without a frame).
+    fn ws_degraded(&self) -> bool {
+        self.ws_state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .degraded
     }
 
     fn wake_sync(&self) {

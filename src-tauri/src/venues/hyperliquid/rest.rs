@@ -16,7 +16,7 @@ use crate::venues::ExchangeAdapter;
 
 /// One spot balance row from `spotClearinghouseState`.
 #[derive(Clone, Debug)]
-struct SpotBalance {
+pub(crate) struct SpotBalance {
     coin: String,
     total: f64,
     hold: f64,
@@ -49,7 +49,7 @@ fn parse_spot_balances(v: &Value) -> Vec<SpotBalance> {
 /// margin. Total equity = perp account value + spot USDC + spot holdings
 /// valued at the live book mid (or entry notional when no book is known);
 /// available = perp withdrawable + free spot USDC.
-fn merge_spot(
+pub(crate) fn merge_spot(
     perp: Snapshot,
     spot: &[SpotBalance],
     mark: &dyn Fn(&str) -> Option<f64>,
@@ -90,12 +90,52 @@ fn merge_spot(
 
 /// Add one perp snapshot into another (same master wallet, different
 /// dex): equity, available margin and PnL sum, positions concatenate.
-fn merge_perp(mut dst: Snapshot, src: Snapshot) -> Snapshot {
+pub(crate) fn merge_perp(mut dst: Snapshot, src: Snapshot) -> Snapshot {
     dst.equity_usd += src.equity_usd;
     dst.available_usd += src.available_usd;
     dst.pnl_usd += src.pnl_usd;
     dst.positions.extend(src.positions);
     dst
+}
+
+/// Parse one `clearinghouseState` object (REST response or WS
+/// `clearinghouseState` frame — the shapes are identical) into a
+/// snapshot. Pure, so the account WS reuses it (Phase 3.3).
+pub(crate) fn parse_clearinghouse_state(v: &Value) -> Snapshot {
+    let margin = &v["marginSummary"];
+    let equity = f64_from(&margin["accountValue"]);
+    let withdrawable = f64_from(&v["withdrawable"]);
+    let mut positions = Vec::new();
+    let mut pnl = 0.0;
+    if let Some(list) = v["assetPositions"].as_array() {
+        for item in list {
+            let p = &item["position"];
+            if p.is_null() {
+                continue;
+            }
+            let upnl = f64_from(&p["unrealizedPnl"]);
+            pnl += upnl;
+            let szi = f64_from(&p["szi"]);
+            positions.push(LivePosition {
+                symbol: p["coin"].as_str().unwrap_or("").to_string(),
+                side: if szi >= 0.0 {
+                    "long".to_string()
+                } else {
+                    "short".to_string()
+                },
+                qty: szi.abs(),
+                entry_price: f64_from(&p["entryPx"]),
+                mark_price: f64_from(&p["positionValue"]) / szi.abs().max(1e-12),
+                unrealized_pnl: upnl,
+            });
+        }
+    }
+    Snapshot {
+        equity_usd: equity,
+        available_usd: withdrawable,
+        pnl_usd: pnl,
+        positions,
+    }
 }
 
 impl HyperliquidAdapter {
@@ -110,11 +150,11 @@ impl HyperliquidAdapter {
     }
 
     /// One console log line for the in-app drawer.
-    fn log(&self, level: &str, message: String) {
+    pub(crate) fn log(&self, level: &str, message: String) {
         self.bus.log(level, self.name(), message);
     }
 
-    fn publish_live(&self) {
+    pub(crate) fn publish_live(&self, source: &'static str) {
         let snap = self
             .snapshot
             .lock()
@@ -144,6 +184,12 @@ impl HyperliquidAdapter {
             pnl_usd: Some(snap.pnl_usd),
             currency: "USDC".to_string(),
             positions: snap.positions,
+            source: source.to_string(),
+            degraded: self
+                .ws_state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .degraded,
             error,
             ts: now_ms(),
         };
@@ -159,7 +205,7 @@ impl HyperliquidAdapter {
         if let Some(r) = rtt {
             *self.last_rest_rtt.lock().unwrap_or_else(|e| e.into_inner()) = Some(r);
         }
-        self.publish_live();
+        self.publish_live("rest");
     }
 
     /// One REST read of clearinghouseState for one dex (`None` = mainnet
@@ -182,48 +228,15 @@ impl HyperliquidAdapter {
             .json()
             .await
             .map_err(|e| format!("账户响应解析失败：{e}"))?;
-        let margin = &v["marginSummary"];
-        let equity = f64_from(&margin["accountValue"]);
-        let withdrawable = f64_from(&v["withdrawable"]);
-        let mut positions = Vec::new();
-        let mut pnl = 0.0;
-        if let Some(list) = v["assetPositions"].as_array() {
-            for item in list {
-                let p = &item["position"];
-                if p.is_null() {
-                    continue;
-                }
-                let upnl = f64_from(&p["unrealizedPnl"]);
-                pnl += upnl;
-                let szi = f64_from(&p["szi"]);
-                positions.push(LivePosition {
-                    symbol: p["coin"].as_str().unwrap_or("").to_string(),
-                    side: if szi >= 0.0 {
-                        "long".to_string()
-                    } else {
-                        "short".to_string()
-                    },
-                    qty: szi.abs(),
-                    entry_price: f64_from(&p["entryPx"]),
-                    mark_price: f64_from(&p["positionValue"]) / szi.abs().max(1e-12),
-                    unrealized_pnl: upnl,
-                });
-            }
-        }
-        let snap = Snapshot {
-            equity_usd: equity,
-            available_usd: withdrawable,
-            pnl_usd: pnl,
-            positions,
-        };
+        let snap = parse_clearinghouse_state(&v);
         let balance = Balance {
             adapter_id: self.id.clone(),
             account_id: self.account_id.clone(),
             asset: "USDC".to_string(),
-            free: withdrawable,
-            locked: (equity - withdrawable).max(0.0),
-            total: equity,
-            equity_usd: equity,
+            free: snap.available_usd,
+            locked: (snap.equity_usd - snap.available_usd).max(0.0),
+            total: snap.equity_usd,
+            equity_usd: snap.equity_usd,
             ts: now_ms(),
         };
         Ok((snap, balance))
@@ -263,6 +276,20 @@ impl HyperliquidAdapter {
             self.fetch_spot_state(),
         );
         let (mut snap, _) = main?;
+        // Phase 3.3: keep the per-leg snapshots for the WS merge —
+        // a WS frame replaces one dex leg, the other legs stay as the
+        // last REST poll left them. A failed leg keeps its old value,
+        // never a zeroed one.
+        {
+            let mut legs = self.ws_legs.lock().unwrap_or_else(|e| e.into_inner());
+            legs.main = Some(snap.clone());
+            if let Ok((io_snap, _)) = &io {
+                legs.io = Some(io_snap.clone());
+            }
+            if let Ok(rows) = &spot {
+                legs.spot = Some(rows.clone());
+            }
+        }
         match io {
             Ok((io_snap, _)) => snap = merge_perp(snap, io_snap),
             Err(e) => {
@@ -293,13 +320,16 @@ impl HyperliquidAdapter {
         Ok((snap, balance))
     }
 
-    async fn poll_account(&self) {
+    pub(crate) async fn poll_account(&self) {
         // Post-fill grace (spec §3): a poll landing inside the window
         // would return a pre-fill snapshot and overwrite the fresh
         // local estimate — skip the round entirely.
         if self.reconcile.in_grace(&self.account_id) {
             return;
         }
+        // Phase 3.3: the 60s healthy cadence counts from the last
+        // fetch that actually ran, not from a grace skip.
+        *self.last_poll.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
         let started = Instant::now();
         match self.fetch_account_state().await {
             Ok((snap, balance)) => {
@@ -314,9 +344,12 @@ impl HyperliquidAdapter {
         }
     }
 
-    /// REST poll loop: as long as REST works, equity and positions keep
-    /// showing. The first poll also fills the snapshot that dex symbol
-    /// resolution needs (current holdings' coins).
+    /// REST poll loop (Phase 3.3 cadence): degraded → every 10s
+    /// (the REST fallback carries the account); healthy → every 60s
+    /// (pure reconciliation — the WS frames carry the live state).
+    /// A wake (post-fill reconcile, WS reconnect snapshot) always
+    /// polls at once. The first poll also fills the snapshot that
+    /// dex symbol resolution needs (current holdings' coins).
     pub(crate) async fn rest_loop(&self) {
         self.poll_account().await;
         let mut tick = tokio::time::interval(POLL_INTERVAL);
@@ -324,15 +357,28 @@ impl HyperliquidAdapter {
         while self.running.load(Ordering::SeqCst) {
             // Either the 10s tick or an out-of-cycle wake (position
             // reconciliation) triggers the next poll.
-            tokio::select! {
-                _ = tick.tick() => {}
-                _ = self.wake.notified() => {}
-            }
+            let woken = tokio::select! {
+                _ = tick.tick() => false,
+                _ = self.wake.notified() => true,
+            };
             if !self.running.load(Ordering::SeqCst) {
                 break;
             }
-            self.poll_account().await;
+            if woken || self.ws_degraded() || self.rest_poll_due() {
+                self.poll_account().await;
+            }
         }
+    }
+
+    /// True when the last REST fetch is 60s or older (healthy
+    /// cadence). The WS reconnect snapshot and post-fill wakes
+    /// bypass this — they poll at once.
+    fn rest_poll_due(&self) -> bool {
+        self.last_poll
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .map(|t| t.elapsed() >= Duration::from_secs(60))
+            .unwrap_or(true)
     }
 
     /// One `/info` read (read-only: retry-once via `send_read`).
@@ -456,8 +502,9 @@ mod tests {
             live.clone(),
             Arc::new(ReconcileState::new()),
             None,
+            Arc::new(crate::store::orders::OrderStore::new()),
         );
-        adapter.publish_live();
+        adapter.publish_live("rest");
         assert_eq!(
             live.read()
                 .unwrap()

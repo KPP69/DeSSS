@@ -75,6 +75,10 @@ export type AccountLive = {
   currency: string;
   positions: LivePosition[];
   error: string | null;
+  /** "ws" | "rest" — where this snapshot came from (Phase 3.3) */
+  source: "ws" | "rest";
+  /** true while the account WS is down or silent: REST fallback (Phase 3.3) */
+  degraded: boolean;
   ts: number;
 };
 
