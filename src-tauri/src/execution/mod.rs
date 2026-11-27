@@ -204,6 +204,14 @@ pub async fn place_order(deps: &ExecDeps, intent: PlaceIntent) -> Result<OrderIn
     // Align first (buy rounds down, sell rounds up); the gateway
     // re-verifies alignment, so a bug here is caught, not shipped.
     let aligned_price = align_price_for_side(price_dec, tick, intent.side == "buy");
+    // (3.1.2) a trigger price is a price too: align it the same way,
+    // so a computed (or typed) trigger like 90072.18 on a tick-1
+    // market is not rejected by the exchange. The stored trigger_px
+    // is the aligned value. This also fixes the manual TP/SL flow,
+    // which used to send the typed trigger unaligned.
+    let aligned_trigger_px = intent
+        .trigger_px
+        .map(|tp| align_price_for_side(to_decimal(tp), tick, intent.side == "buy"));
     let aligned_qty = align_down(qty_dec, step);
     if aligned_qty <= Decimal::ZERO {
         return Err("数量对齐步长后为 0（数量小于最小步长）".to_string());
@@ -235,7 +243,7 @@ pub async fn place_order(deps: &ExecDeps, intent: PlaceIntent) -> Result<OrderIn
         remaining_quantity: aligned_qty.to_f64().unwrap_or(0.0),
         average_fill_price: None,
         error: None,
-        trigger_px: intent.trigger_px,
+        trigger_px: aligned_trigger_px.map(|d| d.to_f64().unwrap_or(0.0)),
         tpsl: intent.tpsl.clone(),
         origin: intent.origin.clone(),
         created_at: now,
@@ -344,7 +352,7 @@ pub async fn place_order(deps: &ExecDeps, intent: PlaceIntent) -> Result<OrderIn
         price: Some(aligned_price.to_f64().unwrap_or(0.0)),
         client_order_id: Some(cloid.clone()),
         reduce_only: intent.reduce_only,
-        trigger_px: intent.trigger_px,
+        trigger_px: aligned_trigger_px.map(|d| d.to_f64().unwrap_or(0.0)),
         tpsl: intent.tpsl.clone(),
         is_market: intent.is_market,
     };

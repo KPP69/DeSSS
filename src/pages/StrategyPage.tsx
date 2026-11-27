@@ -37,6 +37,8 @@ const DEFAULT_PARAMS: SpreadParams = {
   maxNotionalUsd: 5000,
   feeBpsA: 0,
   feeBpsB: 0,
+  tpBps: 0,
+  slBps: 0,
 };
 
 function legCell(
@@ -91,6 +93,8 @@ export default function StrategyPage() {
     maxNotionalUsd: "5000",
     feeBpsA: "0",
     feeBpsB: "0",
+    tpBps: "0",
+    slBps: "0",
   });
   const [enabled, setEnabled] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -112,6 +116,8 @@ export default function StrategyPage() {
       maxNotionalUsd: String(DEFAULT_PARAMS.maxNotionalUsd),
       feeBpsA: String(DEFAULT_PARAMS.feeBpsA),
       feeBpsB: String(DEFAULT_PARAMS.feeBpsB),
+      tpBps: String(DEFAULT_PARAMS.tpBps),
+      slBps: String(DEFAULT_PARAMS.slBps),
     });
     setEnabled(true);
     setFormError(null);
@@ -132,6 +138,8 @@ export default function StrategyPage() {
       maxNotionalUsd: String(v.params.maxNotionalUsd),
       feeBpsA: String(v.params.feeBpsA),
       feeBpsB: String(v.params.feeBpsB),
+      tpBps: String(v.params.tpBps),
+      slBps: String(v.params.slBps),
     });
     setEnabled(v.enabled);
     setFormError(null);
@@ -158,6 +166,10 @@ export default function StrategyPage() {
         return;
       }
       parsed[k] = n;
+    }
+    if (parsed.tpBps < 0 || parsed.slBps < 0) {
+      setFormError("止盈/止损 bps 不能为负数（0 表示不挂）。");
+      return;
     }
     const input: SaveStrategyInput = {
       id: editingId,
@@ -275,6 +287,8 @@ export default function StrategyPage() {
             {paramField("maxNotionalUsd", "最大名义 USD")}
             {paramField("feeBpsA", "A 腿费率 bps")}
             {paramField("feeBpsB", "B 腿费率 bps")}
+            {paramField("tpBps", "止盈 bps（0 不挂）")}
+            {paramField("slBps", "止损 bps（0 不挂）")}
           </div>
           <label className="mt-4 flex items-center gap-2 text-[13px] text-ds-text-1">
             <input

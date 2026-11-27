@@ -42,6 +42,10 @@ pub struct SpreadParams {
     pub max_notional_usd: f64,
     pub fee_bps_a: f64,
     pub fee_bps_b: f64,
+    /// Take-profit / stop-loss distance from the fill price, in bps.
+    /// 0 = disabled (no protection order for that side).
+    pub tp_bps: f64,
+    pub sl_bps: f64,
 }
 
 /// One persisted strategy instance.
@@ -158,6 +162,9 @@ fn validate_params(p: &SpreadParams) -> Result<(), String> {
     }
     if p.fee_bps_a < 0.0 || p.fee_bps_b < 0.0 {
         return Err("费率不能小于 0".to_string());
+    }
+    if p.tp_bps < 0.0 || p.sl_bps < 0.0 {
+        return Err("止盈/止损 bps 不能小于 0（0 表示不挂）".to_string());
     }
     Ok(())
 }
@@ -430,8 +437,13 @@ pub(crate) mod testkit {
             let fraction = self.fraction(&req.account_id);
             // Any fill drives the engine's reconcile path (which is
             // what reports the filled quantity); a resting order
-            // stays Open.
-            let status = if fraction > 0.0 {
+            // stays Open. A trigger order always rests on placement
+            // — it never fills at once, whatever the fraction says
+            // (filling one would also corrupt the live position
+            // snapshot via the reconcile path).
+            let status = if req.trigger_px.is_some() {
+                OrderStatus::Open
+            } else if fraction > 0.0 {
                 OrderStatus::Filled
             } else {
                 OrderStatus::Open
@@ -476,8 +488,14 @@ pub(crate) mod testkit {
                 ));
             };
             let fraction = self.fraction(account_id);
-            let filled = req.quantity * fraction;
-            let status = if fraction >= 1.0 {
+            let filled = if req.trigger_px.is_some() {
+                0.0
+            } else {
+                req.quantity * fraction
+            };
+            let status = if req.trigger_px.is_some() {
+                OrderStatus::Open
+            } else if fraction >= 1.0 {
                 OrderStatus::Filled
             } else if fraction > 0.0 {
                 OrderStatus::PartiallyFilled
@@ -559,6 +577,8 @@ pub(crate) mod testkit {
             max_notional_usd: 5000.0,
             fee_bps_a: 0.0,
             fee_bps_b: 0.0,
+            tp_bps: 0.0,
+            sl_bps: 0.0,
         }
     }
 
@@ -630,7 +650,7 @@ mod tests {
         // One mutation per illegal parameter (fn pointers so the
         // cases share one type).
         type ParamCase = (fn(&mut SpreadParams), &'static str);
-        let cases: [ParamCase; 7] = [
+        let cases: [ParamCase; 9] = [
             (|p: &mut SpreadParams| p.upper_bps = 0.0, "upper 0"),
             (|p: &mut SpreadParams| p.lower_bps = -1.0, "lower -1"),
             (|p: &mut SpreadParams| p.persist_sec = -1.0, "persist -1"),
@@ -641,6 +661,8 @@ mod tests {
                 "notional 0",
             ),
             (|p: &mut SpreadParams| p.fee_bps_a = -1.0, "fee -1"),
+            (|p: &mut SpreadParams| p.tp_bps = -1.0, "tp -1"),
+            (|p: &mut SpreadParams| p.sl_bps = -1.0, "sl -1"),
         ];
         for (mutate, why) in cases {
             let mut input = testkit::input();

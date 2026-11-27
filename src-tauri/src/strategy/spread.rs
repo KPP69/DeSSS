@@ -108,6 +108,32 @@ enum Dir {
     BuyA,
 }
 
+/// Protection trigger prices from a leg's fill price (3.1.2).
+/// Long (the leg bought): TP above the fill, SL below. Short: the
+/// reverse. A 0 bps side is disabled (`None`). Negative bps never
+/// reach here (save_strategy rejects them) and are treated as
+/// disabled too. The caller (execution::place_order) tick-aligns
+/// the trigger and applies the D8 stop-loss slippage buffer to `p`.
+pub fn protection_triggers(
+    fill_px: f64,
+    is_long: bool,
+    tp_bps: f64,
+    sl_bps: f64,
+) -> (Option<f64>, Option<f64>) {
+    let at = |bps: f64, above: bool| {
+        if bps <= 0.0 {
+            None
+        } else {
+            Some(fill_px * (1.0 + if above { bps } else { -bps } / 10_000.0))
+        }
+    };
+    if is_long {
+        (at(tp_bps, true), at(sl_bps, false))
+    } else {
+        (at(tp_bps, false), at(sl_bps, true))
+    }
+}
+
 /// Both premiums in bps: (sell-A, buy-A). `None` on a side whose
 /// top-of-book is missing.
 pub fn premiums(a: &BookSnapshot, b: &BookSnapshot) -> (Option<f64>, Option<f64>) {
@@ -381,6 +407,26 @@ mod tests {
 
     fn params() -> SpreadParams {
         testkit::params()
+    }
+
+    #[test]
+    fn protection_triggers_long_and_short() {
+        // Long: TP above, SL below the fill.
+        assert_eq!(
+            protection_triggers(90000.0, true, 100.0, 200.0),
+            (Some(90900.0), Some(88200.0))
+        );
+        // Short: reversed.
+        assert_eq!(
+            protection_triggers(90000.0, false, 100.0, 200.0),
+            (Some(89100.0), Some(91800.0))
+        );
+        // 0 bps disables that side; negative is treated as disabled.
+        assert_eq!(protection_triggers(90000.0, true, 0.0, 0.0), (None, None));
+        assert_eq!(
+            protection_triggers(90000.0, true, -5.0, 100.0),
+            (None, Some(89100.0))
+        );
     }
 
     #[test]

@@ -203,6 +203,8 @@ export type SpreadParams = {
   maxNotionalUsd: number;
   feeBpsA: number;
   feeBpsB: number;
+  tpBps: number;
+  slBps: number;
 };
 
 export type StrategyInstance = {

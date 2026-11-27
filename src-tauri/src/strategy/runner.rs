@@ -130,6 +130,11 @@ fn has_inflight_order(deps: &RunnerDeps, inst_id: &str) -> bool {
     let origin = format!("strategy:{inst_id}");
     deps.exec.orders.list().iter().any(|o| {
         o.origin == origin
+            // (3.1.2) resting protection (trigger) orders do not block
+            // firing: they are exits, not entries. Without this, the
+            // first protected position would deadlock the strategy —
+            // it could never close or reopen while TP/SL rests.
+            && o.trigger_px.is_none()
             && matches!(
                 o.status,
                 OrderStatus::Pending
@@ -199,11 +204,159 @@ fn to_exec_intent(
         quantity: intent.quantity,
         price: intent.price,
         reduce_only,
-        // The strategy never places trigger orders: no TP/SL legs.
+        // Entry / balance intents only — protection orders are built
+        // by place_protection, which sets the trigger fields.
         trigger_px: None,
         tpsl: None,
         is_market: None,
         origin: origin.to_string(),
+    }
+}
+
+/// (3.1.2) Place the TP/SL pair for one leg after an opening
+/// fill. `fill_px` is the leg's average fill price, `qty` the matched
+/// quantity. A side is placed only when its bps > 0 and no strategy
+/// trigger order with the same tpsl and (nearly) the same trigger
+/// price is already open for the leg — placing twice would double
+/// the protection. The orders are reduce-only, positionTpsl (the
+/// adapter derives the grouping from the trigger variant), market
+/// after trigger; the D8 stop-loss buffer is applied inside
+/// place_order. Returns false when any protection order failed: the
+/// position is then unprotected, which is logged and recorded, but
+/// does not disable the instance (the position still needs managing).
+#[allow(clippy::too_many_arguments)]
+async fn place_protection(
+    deps: &RunnerDeps,
+    inst: &StrategyInstance,
+    leg: &LegRef,
+    spec: &MarketSpec,
+    fill_px: f64,
+    qty: f64,
+    is_long: bool,
+    origin: &str,
+) -> bool {
+    let mut ok = true;
+    let (tp, sl) =
+        spread::protection_triggers(fill_px, is_long, inst.params.tp_bps, inst.params.sl_bps);
+    // The protection order closes the position: opposite side.
+    let side = if is_long { "sell" } else { "buy" };
+    for (trigger_px, tpsl) in [(tp, "tp"), (sl, "sl")] {
+        let Some(trigger_px) = trigger_px else {
+            continue;
+        };
+        let tol = spec.tick_size.max(trigger_px * 1e-9);
+        let exists = deps.exec.orders.list().iter().any(|o| {
+            o.origin == origin
+                && o.account_id == leg.account_id
+                && o.symbol == leg.symbol
+                && o.tpsl.as_deref() == Some(tpsl)
+                && !o.status.is_terminal()
+                && o.trigger_px
+                    .map(|t| (t - trigger_px).abs() <= tol)
+                    .unwrap_or(false)
+        });
+        if exists {
+            log(
+                deps,
+                "info",
+                format!("策略 {} {} 腿已有 {tpsl} 保护单，跳过", inst.id, leg.symbol),
+            );
+            continue;
+        }
+        let intent = ExecIntent {
+            account_id: leg.account_id.clone(),
+            symbol: leg.symbol.clone(),
+            side: side.to_string(),
+            order_type: "trigger".to_string(),
+            quantity: qty,
+            price: trigger_px,
+            reduce_only: true,
+            trigger_px: Some(trigger_px),
+            tpsl: Some(tpsl.to_string()),
+            is_market: Some(true),
+            origin: origin.to_string(),
+        };
+        match execution::place_order(&deps.exec, intent).await {
+            Ok(info) => log(
+                deps,
+                "info",
+                format!(
+                    "策略 {} {} 腿挂 {tpsl} 保护单：trigger {trigger_px}（oid {}）",
+                    inst.id, leg.symbol, info.order_id
+                ),
+            ),
+            Err(e) => {
+                ok = false;
+                let msg = format!("{} 腿挂 {tpsl} 保护单失败：{e}", leg.symbol);
+                {
+                    let mut stats = deps.stats.lock().unwrap_or_else(|e| e.into_inner());
+                    if let Some(entry) = stats.get_mut(&inst.id) {
+                        entry.last_error = Some(msg.clone());
+                    }
+                }
+                log(deps, "error", format!("策略 {} {msg}", inst.id));
+            }
+        }
+    }
+    ok
+}
+
+/// (3.1.2, item 4 fallback) Cancel stale strategy protection: a leg
+/// whose position is gone must not keep trigger orders — they could
+/// fire against a later position. The exchange is reported to cancel
+/// positionTpsl orders when the position closes, but the official
+/// docs do not state it, so the runner cancels explicitly (belt and
+/// braces; cancelling an already-gone order is a benign error,
+/// logged, never fatal). Only orders older than POSITION_STALE_MS
+/// are touched: a younger order may predate the position snapshot,
+/// which can lag a fresh fill by up to one 10s poll.
+async fn cleanup_protection(deps: &RunnerDeps, inst: &StrategyInstance, now: i64) {
+    let origin = format!("strategy:{}", inst.id);
+    for leg in [&inst.leg_a, &inst.leg_b] {
+        let Some(live) = live_of(deps, &leg.account_id) else {
+            continue;
+        };
+        let Some(spec) = spec_for(deps, leg) else {
+            continue;
+        };
+        if net_qty(&live, &leg.symbol).abs() >= spec.step_size {
+            continue;
+        }
+        for o in deps.exec.orders.list() {
+            if o.origin != origin
+                || o.account_id != leg.account_id
+                || o.symbol != leg.symbol
+                || o.trigger_px.is_none()
+                || o.status.is_terminal()
+                || now - o.created_at <= POSITION_STALE_MS
+            {
+                continue;
+            }
+            let Some(adapter) = deps.exec.sync.adapter(&leg.account_id) else {
+                continue;
+            };
+            match adapter
+                .cancel_order(&leg.account_id, &o.client_order_id, &leg.symbol)
+                .await
+            {
+                Ok(()) => log(
+                    deps,
+                    "info",
+                    format!(
+                        "策略 {} 清除 {} 腿过期保护单 {}",
+                        inst.id, leg.symbol, o.client_order_id
+                    ),
+                ),
+                Err(e) => log(
+                    deps,
+                    "info",
+                    format!(
+                        "策略 {} 清除 {} 腿保护单 {} 失败（可能已撤销）：{e}",
+                        inst.id, leg.symbol, o.client_order_id
+                    ),
+                ),
+            }
+        }
     }
 }
 
@@ -269,6 +422,9 @@ async fn verify_coin(deps: &RunnerDeps, leg: &LegRef, info: &OrderInfo) -> Resul
 }
 
 async fn run_instance(deps: &RunnerDeps, inst: &StrategyInstance, now: i64) {
+    // (3.1.2) clear stale protection first, even on a stale-book
+    // round: it needs no book, only the live position snapshot.
+    cleanup_protection(deps, inst, now).await;
     // The legs' streams must be wanted, or no frames ever arrive.
     // Only (re)subscribe when the book is missing or stale: a fresh
     // book means the stream is already running, and the Data page's
@@ -517,10 +673,47 @@ async fn run_instance(deps: &RunnerDeps, inst: &StrategyInstance, now: i64) {
             }
         }
     }
-    // A clean signal round clears a stale last error.
-    let mut stats = deps.stats.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(entry) = stats.get_mut(&inst.id) {
-        entry.last_error = None;
+    // (3.1.2) protection: an opening fire (net was flat) that
+    // matched on both legs gets a TP/SL pair per leg, from each leg's
+    // average fill price. A closing fire gets none — its position is
+    // going away. A leg without an average fill price is skipped.
+    let mut protection_ok = true;
+    if matched > 0.0 && net.abs() < spec_a.step_size {
+        for (leg, intent, r, spec) in [
+            (&inst.leg_a, ia, &ra, &spec_a),
+            (&inst.leg_b, ib, &rb, &spec_b),
+        ] {
+            let Some(fill_px) = r.as_ref().ok().and_then(|i| i.average_fill_price) else {
+                log(
+                    deps,
+                    "info",
+                    format!("策略 {} {} 腿无成交价，跳过保护单", inst.id, leg.symbol),
+                );
+                continue;
+            };
+            if !place_protection(
+                deps,
+                inst,
+                leg,
+                spec,
+                fill_px,
+                matched,
+                intent.side == "buy",
+                &origin,
+            )
+            .await
+            {
+                protection_ok = false;
+            }
+        }
+    }
+    // A clean signal round clears a stale last error — but not when
+    // protection just failed: that error is current, not stale.
+    if protection_ok {
+        let mut stats = deps.stats.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(entry) = stats.get_mut(&inst.id) {
+            entry.last_error = None;
+        }
     }
 }
 
@@ -959,6 +1152,242 @@ mod tests {
             3,
             "Canceled must unblock the next fire"
         );
+    }
+
+    /// Re-save the harness instance with TP/SL bps set.
+    fn set_protection(deps: &RunnerDeps, inst_id: &str, tp_bps: f64, sl_bps: f64) {
+        let mut input = testkit::input();
+        input.id = Some(inst_id.to_string());
+        input.params.tp_bps = tp_bps;
+        input.params.sl_bps = sl_bps;
+        crate::strategy::save_strategy(&deps.db, &deps.exec.sync, input).expect("save with tp/sl");
+    }
+
+    fn fill_both(h: &Harness) {
+        for (fake, acc) in [(&h.fake_a, "acc-a"), (&h.fake_b, "acc-b")] {
+            fake.fill_fraction
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(acc.to_string(), 1.0);
+        }
+    }
+
+    fn placed(fake: &FakeStrategyAdapter) -> Vec<crate::core::types::OrderRequest> {
+        fake.placed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    #[tokio::test]
+    async fn protection_placed_after_matched_opening_fill() {
+        let now = now_ms();
+        let h = harness(now).await;
+        set_protection(&h.deps, &h.inst_id, 100.0, 200.0);
+        fill_both(&h);
+        run_round(&h.deps, now).await;
+        // A fires sell (short) @ 90982, B fires buy (long) @ 90018;
+        // each leg then gets a TP + SL pair, reduce-only, trigger,
+        // market after trigger, origin strategy:<id>.
+        let placed_a = placed(&h.fake_a);
+        assert_eq!(placed_a.len(), 3, "entry + TP + SL on A");
+        assert_eq!(placed_a[0].side, "sell");
+        assert!(placed_a[0].trigger_px.is_none());
+        for (req, tpsl, want_trigger, want_px) in [
+            (&placed_a[1], "tp", 90072.0, 90072.0),
+            // SL p is the D8 buffer: trigger 92801 x 1.03 -> 95585.
+            (&placed_a[2], "sl", 92801.0, 95585.0),
+        ] {
+            assert_eq!(req.order_type, "trigger", "{tpsl}");
+            assert!(req.reduce_only, "{tpsl} must be reduce-only");
+            assert_eq!(req.is_market, Some(true), "{tpsl}");
+            assert_eq!(req.tpsl.as_deref(), Some(tpsl));
+            assert_eq!(req.side, "buy", "protection closes the short");
+            assert_eq!(req.trigger_px, Some(want_trigger), "{tpsl} trigger");
+            assert_eq!(req.price, Some(want_px), "{tpsl} limit price");
+            assert!((req.quantity - 0.055).abs() < 1e-12, "matched qty");
+        }
+        let placed_b = placed(&h.fake_b);
+        assert_eq!(placed_b.len(), 3, "entry + TP + SL on B");
+        assert_eq!(placed_b[0].side, "buy");
+        for (req, tpsl, want_trigger, want_px) in [
+            (&placed_b[1], "tp", 90919.0, 90919.0),
+            // SL p is the D8 buffer: trigger 88218 x 0.97 -> 85572.
+            (&placed_b[2], "sl", 88218.0, 85572.0),
+        ] {
+            assert_eq!(req.order_type, "trigger", "{tpsl}");
+            assert!(req.reduce_only, "{tpsl} must be reduce-only");
+            assert_eq!(req.tpsl.as_deref(), Some(tpsl));
+            assert_eq!(req.side, "sell", "protection closes the long");
+            assert_eq!(req.trigger_px, Some(want_trigger), "{tpsl} trigger");
+            assert_eq!(req.price, Some(want_px), "{tpsl} limit price");
+        }
+    }
+
+    #[tokio::test]
+    async fn protection_orders_do_not_block_the_next_fire() {
+        let now = now_ms();
+        let h = harness(now).await;
+        set_protection(&h.deps, &h.inst_id, 100.0, 200.0);
+        fill_both(&h);
+        run_round(&h.deps, now).await;
+        assert_eq!(placed(&h.fake_a).len(), 3);
+        // Flip the books so the spread now favours BuyA: the open
+        // short-A position may only close, and the close must fire
+        // even though the protection orders are still resting.
+        for b in [
+            book(
+                "hyperliquid",
+                "BTC",
+                &[(89990.0, 1.0)],
+                &[(90000.0, 1.0)],
+                now,
+            ),
+            book(
+                "entropy",
+                "io:BTC",
+                &[(91000.0, 1.0)],
+                &[(91010.0, 1.0)],
+                now,
+            ),
+        ] {
+            h.streams
+                .inject_book(&(b.adapter_id.clone(), b.symbol.clone()), b);
+        }
+        run_round(&h.deps, now).await;
+        let placed_a = placed(&h.fake_a);
+        assert_eq!(placed_a.len(), 4, "the close fires past resting protection");
+        assert_eq!(placed_a[3].side, "buy", "the close buys back the short A");
+        assert_eq!(placed_a[3].order_type, "limit");
+        // No new protection: a closing fire gets none.
+        assert_eq!(placed(&h.fake_b).len(), 4);
+        assert!(
+            placed(&h.fake_a)
+                .iter()
+                .filter(|r| r.trigger_px.is_some())
+                .count()
+                == 2,
+            "still only the round-1 TP/SL pair"
+        );
+    }
+
+    #[tokio::test]
+    async fn protection_not_placed_twice_for_the_same_fill() {
+        let now = now_ms();
+        let h = harness(now).await;
+        set_protection(&h.deps, &h.inst_id, 100.0, 200.0);
+        fill_both(&h);
+        let inst = load_strategies(&h.deps.db)
+            .expect("load")
+            .into_iter()
+            .find(|i| i.id == h.inst_id)
+            .expect("instance");
+        let spec = spec_for(&h.deps, &inst.leg_a).expect("spec");
+        let origin = format!("strategy:{}", h.inst_id);
+        // Same fill, twice: the second call must find the first
+        // call's orders in the store and skip.
+        assert!(
+            place_protection(
+                &h.deps,
+                &inst,
+                &inst.leg_a,
+                &spec,
+                90982.0,
+                0.055,
+                false,
+                &origin
+            )
+            .await
+        );
+        assert_eq!(placed(&h.fake_a).len(), 2, "TP + SL placed once");
+        assert!(
+            place_protection(
+                &h.deps,
+                &inst,
+                &inst.leg_a,
+                &spec,
+                90982.0,
+                0.055,
+                false,
+                &origin
+            )
+            .await
+        );
+        assert_eq!(
+            placed(&h.fake_a).len(),
+            2,
+            "the second call must not duplicate the pair"
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_protection_cancelled_when_position_gone() {
+        let now = now_ms();
+        let h = harness(now).await;
+        set_protection(&h.deps, &h.inst_id, 100.0, 200.0);
+        fill_both(&h);
+        run_round(&h.deps, now).await;
+        assert_eq!(placed(&h.fake_a).len(), 3);
+        // Close the position (flip the books to the BuyA side) so
+        // the live snapshot goes flat again.
+        for b in [
+            book(
+                "hyperliquid",
+                "BTC",
+                &[(89990.0, 1.0)],
+                &[(90000.0, 1.0)],
+                now,
+            ),
+            book(
+                "entropy",
+                "io:BTC",
+                &[(91000.0, 1.0)],
+                &[(91010.0, 1.0)],
+                now,
+            ),
+        ] {
+            h.streams
+                .inject_book(&(b.adapter_id.clone(), b.symbol.clone()), b);
+        }
+        run_round(&h.deps, now).await;
+        assert_eq!(placed(&h.fake_a).len(), 4, "the close fired");
+        // 20s later the books are stale, but cleanup runs first and
+        // cancels the now-stale protection orders (the exchange is
+        // reported to do this itself; the runner does it explicitly).
+        run_round(&h.deps, now + 20_000).await;
+        let cancels_a = h
+            .fake_a
+            .cancels
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        assert_eq!(cancels_a.len(), 2, "both stale protection orders on A");
+        let cancels_b = h
+            .fake_b
+            .cancels
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        assert_eq!(cancels_b.len(), 2, "both stale protection orders on B");
+        // The cancelled ids are the protection orders' cloids, not
+        // the (Filled, terminal) entries'.
+        let origin = format!("strategy:{}", h.inst_id);
+        let protection_cloids: Vec<String> = h
+            .deps
+            .exec
+            .orders
+            .list()
+            .iter()
+            .filter(|o| o.origin == origin && o.trigger_px.is_some())
+            .map(|o| o.client_order_id.clone())
+            .collect();
+        assert_eq!(protection_cloids.len(), 4);
+        for (cloid, _) in cancels_a.iter().chain(cancels_b.iter()) {
+            assert!(
+                protection_cloids.contains(cloid),
+                "{cloid} is a protection order"
+            );
+        }
     }
 
     #[tokio::test]
