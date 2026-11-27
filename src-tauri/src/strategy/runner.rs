@@ -140,6 +140,17 @@ fn has_inflight_order(deps: &RunnerDeps, inst_id: &str) -> bool {
     })
 }
 
+// (D7) first unresolved strategy order younger than 60s, with its age
+// in seconds; older ones are most likely already Failed (10s poll x5).
+fn fresh_unresolved(deps: &RunnerDeps, inst_id: &str, now: i64) -> Option<(String, u64)> {
+    let origin = format!("strategy:{inst_id}");
+    deps.exec.orders.list().iter().find_map(|o| {
+        let age = now - o.updated_at;
+        (o.origin == origin && o.status == OrderStatus::Unresolved && age < 60_000)
+            .then(|| (o.client_order_id.clone(), (age.max(0) / 1000) as u64))
+    })
+}
+
 /// Skip this round for one instance, logging only when the reason
 /// changed since the last skip.
 fn skip(deps: &RunnerDeps, inst: &StrategyInstance, reason: &str) {
@@ -309,13 +320,19 @@ async fn run_instance(deps: &RunnerDeps, inst: &StrategyInstance, now: i64) {
     let Some(spec_b) = spec_for(deps, &inst.leg_b) else {
         return skip(deps, inst, "B 腿品种不在目录中");
     };
-    clear_skip(deps, inst);
     // (D6) in-flight gate: while this instance still has a
     // non-terminal order on the books, do not fire again — a resting
     // order must fill or cancel before the next signal.
     if has_inflight_order(deps, &inst.id) {
         return skip(deps, inst, "有在途策略单，等待成交或撤销");
     }
+    // (D7) fresh Unresolved, bounded to 60s: it may already be filled.
+    if let Some((cloid, age)) = fresh_unresolved(deps, &inst.id, now) {
+        let msg = format!("等待未确认订单 {cloid}（已 {age} 秒）");
+        return skip(deps, inst, &msg);
+    }
+    // (D7) clear AFTER the gate — before it, last_skip was wiped every round.
+    clear_skip(deps, inst);
     let net = net_qty(&live_a, &inst.leg_a.symbol);
     let snap_a = BookSnapshot::from_order_book(&book_a);
     let snap_b = BookSnapshot::from_order_book(&book_b);
@@ -660,6 +677,19 @@ mod tests {
         }
     }
 
+    /// Flip non-terminal strategy orders to Unresolved and backdate
+    /// their update time by `age_ms` (D7: controls the gate's age cap).
+    fn set_strategy_orders_unresolved_aged(deps: &RunnerDeps, inst_id: &str, age_ms: i64) {
+        let origin = format!("strategy:{inst_id}");
+        for mut o in deps.exec.orders.list() {
+            if o.origin == origin && !o.status.is_terminal() {
+                o.status = OrderStatus::Unresolved;
+                o.updated_at -= age_ms;
+                deps.exec.orders.apply_query(&o);
+            }
+        }
+    }
+
     fn placed_accounts(fake: &FakeStrategyAdapter) -> Vec<String> {
         fake.placed
             .lock()
@@ -924,6 +954,95 @@ mod tests {
                 .len(),
             3,
             "Canceled must unblock the next fire"
+        );
+    }
+
+    #[tokio::test]
+    async fn fresh_unresolved_blocks_the_next_fire() {
+        let now = now_ms();
+        let h = harness(now).await;
+        run_round(&h.deps, now).await;
+        assert_eq!(placed_accounts(&h.fake_a).len(), 1);
+        set_strategy_orders_status(&h.deps, &h.inst_id, OrderStatus::Unresolved);
+        run_round(&h.deps, now).await;
+        assert_eq!(
+            placed_accounts(&h.fake_a).len(),
+            1,
+            "a fresh Unresolved must block the next fire"
+        );
+        // The skip names the order and its age.
+        let skip = h
+            .deps
+            .stats
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&h.inst_id)
+            .and_then(|s| s.last_skip.clone())
+            .unwrap_or_default();
+        assert!(skip.contains("等待未确认订单"), "skip was: {skip}");
+        assert!(skip.contains("（已 0 秒）"), "skip was: {skip}");
+        // A third blocked round adds no second log line (same content).
+        run_round(&h.deps, now).await;
+        let n = h
+            .deps
+            .exec
+            .bus
+            .snapshot_logs()
+            .iter()
+            .filter(|l| l.message.contains("等待未确认订单"))
+            .count();
+        assert_eq!(n, 1, "the same Unresolved block must log once");
+    }
+
+    #[tokio::test]
+    async fn aged_unresolved_does_not_block() {
+        let now = now_ms();
+        let h = harness(now).await;
+        run_round(&h.deps, now).await;
+        assert_eq!(placed_accounts(&h.fake_a).len(), 1);
+        // 61s old: past the 60s cap, so the gate must let the round run.
+        set_strategy_orders_unresolved_aged(&h.deps, &h.inst_id, 61_000);
+        // A later `now` proves round 2 evaluated (last_eval_ms moves).
+        run_round(&h.deps, now + 1_000).await;
+        let entry = h
+            .deps
+            .stats
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&h.inst_id)
+            .expect("stats entry")
+            .clone();
+        assert_eq!(entry.last_eval_ms, Some(now + 1_000));
+        assert!(!entry
+            .last_skip
+            .unwrap_or_default()
+            .contains("等待未确认订单"));
+        // The identical order is still not resubmitted — that is the
+        // execution duplicate guard holding the line, not the gate.
+        assert_eq!(placed_accounts(&h.fake_a).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn unresolved_reconciled_to_failed_unblocks_immediately() {
+        let now = now_ms();
+        let h = harness(now).await;
+        run_round(&h.deps, now).await;
+        assert_eq!(placed_accounts(&h.fake_a).len(), 1);
+        set_strategy_orders_status(&h.deps, &h.inst_id, OrderStatus::Unresolved);
+        run_round(&h.deps, now).await;
+        assert_eq!(
+            placed_accounts(&h.fake_a).len(),
+            1,
+            "fresh Unresolved must block"
+        );
+        // Reconciliation flips it to Failed (terminal): the very next
+        // round must fire again.
+        set_strategy_orders_status(&h.deps, &h.inst_id, OrderStatus::Failed);
+        run_round(&h.deps, now).await;
+        assert_eq!(
+            placed_accounts(&h.fake_a).len(),
+            2,
+            "Failed must unblock the next fire"
         );
     }
 
