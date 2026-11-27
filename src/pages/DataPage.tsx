@@ -1,5 +1,5 @@
-import React, { useEffect, useLayoutEffect } from "react";
-import { Button, DataTable, MultiSelectDropdown, tdClsCompact, trCls } from "../components/ui";
+import React, { useLayoutEffect } from "react";
+import { Button, DataTable, Input, MultiSelectDropdown, tdClsCompact, tdClsCompactRight, trCls } from "../components/ui";
 import PageState from "../components/PageState";
 import { useMarketSearch } from "../hooks/useMarketSearch";
 import { useVenueSchemas } from "../hooks/useVenueSchemas";
@@ -63,17 +63,23 @@ function fmtUsdCompact(v: number | null): string {
 
 const HEADERS = [
   "交易所",
-  "原始合约",
+  "品种",
   "标记价",
-  "买一 / 卖一",
-  "资金费率",
-  "年化 APR",
-  "最大杠杆",
+  "买/卖",
+  "资金费",
+  "年化",
+  "杠杆",
 ];
 // Fixed column ratios, summing to 100 (960x640-safe, horizontal scroll).
 const COL_WIDTHS = ["14%", "16%", "14%", "16%", "14%", "13%", "13%"];
+// Numbers right-aligned (header and cells alike); names centered.
+const COL_ALIGNS = ["center", "center", "right", "right", "right", "right", "right"] as const;
 
-function MarketRows({
+/** One fragment per market (row + optional detail row), returned as
+ * an array so DataTable sees each market as one row group — that is
+ * what lets the table virtualize past 200 results. Rows are
+ * keyboard reachable: Tab to a row, Enter expands it. */
+function marketRowNodes({
   rows,
   books,
   expandedKey,
@@ -85,109 +91,117 @@ function MarketRows({
   expandedKey: string | null;
   onToggle: (key: string) => void;
   venueName: (id: string) => string;
-}) {
-  return (
-    <>
-      {rows.map((m) => {
-        const key = `${m.exchangeId}:${m.symbol}`;
-        // A fresh streamed book overrides the 2s REST bid/ask; a stale
-        // one falls back to the catalog values so a dead stream never
-        // freezes the row on an old price.
-        const book = books[key];
-        const liveFresh = book != null && Date.now() - book.ts <= LIVE_MS;
-        const bidPx = liveFresh ? (book.bids[0]?.[0] ?? null) : m.bidPx;
-        const askPx = liveFresh ? (book.asks[0]?.[0] ?? null) : m.askPx;
-        const rateCls =
-          m.funding1h == null
-            ? ""
-            : m.funding1h > 0
-              ? "text-ds-up"
-              : m.funding1h < 0
-                ? "text-ds-down"
-                : "";
-        const aprCls =
-          m.fundingApr == null
-            ? ""
-            : m.fundingApr > 0
-              ? "text-ds-up"
-              : m.fundingApr < 0
-                ? "text-ds-down"
-                : "";
-        const fundingText =
-          m.funding1h == null
-            ? "—"
-            : `${m.funding1h >= 0 ? "+" : ""}${(m.funding1h * 100).toFixed(4)}%`;
-        const aprText =
-          m.fundingApr == null
-            ? "—"
-            : `${m.fundingApr >= 0 ? "+" : ""}${m.fundingApr.toFixed(2)}%`;
-        return (
-          <React.Fragment key={key}>
-            <tr className={`${trCls} cursor-pointer`} onClick={() => onToggle(key)}>
-              <td className={tdClsCompact}>{venueName(m.exchangeId)}</td>
-              <td className={`${tdClsCompact} num whitespace-nowrap`}>{displaySymbol(m.symbol)}</td>
-              <td className={`${tdClsCompact} num whitespace-nowrap`}>{fmtPrice(m.markPx, m.tickSize)}</td>
-              <td className={`${tdClsCompact} num whitespace-nowrap`}>
-                <span className="text-ds-up">{fmtPrice(bidPx, m.tickSize)}</span>
-                {" / "}
-                <span className="text-ds-down">{fmtPrice(askPx, m.tickSize)}</span>
-              </td>
-              <td className={`${tdClsCompact} num whitespace-nowrap ${rateCls}`}>{fundingText}</td>
-              <td className={`${tdClsCompact} num whitespace-nowrap ${aprCls}`}>{aprText}</td>
-              <td className={`${tdClsCompact} num whitespace-nowrap`}>
-                {m.maxLeverage == null ? "—" : `${m.maxLeverage}x`}
-              </td>
-            </tr>
-            {expandedKey === key && (
-              <tr className="border-t border-ds-line bg-ds-panel-2/50">
-                <td colSpan={HEADERS.length} className="px-4 py-3 text-left">
-                  {/* 2x7 detail grid (Phase 3.1, commit 2): value above
-                   * label, one cell per field. Mid is always
-                   * (bid + ask) / 2 from the live book — never the
-                   * catalog midPx, which no longer carries a value. */}
-                  <div className="flex flex-wrap gap-y-3 text-xs num">
-                    {(
-                      [
-                        ["指数价", fmtPrice(m.indexPx, m.tickSize)],
-                        ["持仓量", fmtUsdCompact(m.openInterestUsd)],
-                        [
-                          "资金费率",
-                          m.fundingRateRaw == null
-                            ? "—"
-                            : `${m.fundingRateRaw >= 0 ? "+" : ""}${(m.fundingRateRaw * 100).toFixed(4)}%`,
-                        ],
-                        ["价格步长", fmtStep(m.tickSize)],
-                        ["最小名义", m.minNotional == null ? "—" : `$${fmtStep(m.minNotional)}`],
-                        ["费率周期", m.fundingIntervalHours == null ? "—" : `${m.fundingIntervalHours}h`],
-                        ["盘口更新", liveFresh ? fmtClock(book.ts) : "—"],
-                        [
-                          "中间价",
-                          liveFresh && book.bids[0]?.[0] != null && book.asks[0]?.[0] != null
-                            ? fmtPrice((book.bids[0][0] + book.asks[0][0]) / 2, m.tickSize)
-                            : "—",
-                        ],
-                        ["成交额", fmtUsdCompact(m.volume24hUsd)],
-                        ["下次结算", fmtTime(m.nextFundingTime)],
-                        ["数量步长", fmtStep(m.stepSize)],
-                        ["最大杠杆", m.maxLeverage == null ? "—" : `${m.maxLeverage}x`],
-                        ["结算币种", m.settlementCurrency],
-                        ["目录更新", fmtClock(m.updatedAt)],
-                      ] as [string, string][]
-                    ).map(([label, value]) => (
-                      <div key={label} className="w-28 shrink-0">
-                        <div className="text-ds-text-1">{value}</div>
-                        <div className="text-ds-text-2">{label}</div>
-                      </div>
-                    ))}
+}): React.ReactNode[] {
+  return rows.map((m) => {
+    const key = `${m.exchangeId}:${m.symbol}`;
+    // A fresh streamed book overrides the 2s REST bid/ask; a stale
+    // one falls back to the catalog values so a dead stream never
+    // freezes the row on an old price.
+    const book = books[key];
+    const liveFresh = book != null && Date.now() - book.ts <= LIVE_MS;
+    const bidPx = liveFresh ? (book.bids[0]?.[0] ?? null) : m.bidPx;
+    const askPx = liveFresh ? (book.asks[0]?.[0] ?? null) : m.askPx;
+    const rateCls =
+      m.funding1h == null
+        ? ""
+        : m.funding1h > 0
+          ? "text-ds-up"
+          : m.funding1h < 0
+            ? "text-ds-down"
+            : "";
+    const aprCls =
+      m.fundingApr == null
+        ? ""
+        : m.fundingApr > 0
+          ? "text-ds-up"
+          : m.fundingApr < 0
+            ? "text-ds-down"
+            : "";
+    const fundingText =
+      m.funding1h == null
+        ? "—"
+        : `${m.funding1h >= 0 ? "+" : ""}${(m.funding1h * 100).toFixed(4)}%`;
+    const aprText =
+      m.fundingApr == null
+        ? "—"
+        : `${m.fundingApr >= 0 ? "+" : ""}${m.fundingApr.toFixed(2)}%`;
+    // 2x7 detail grid (Phase 3.1, commit 2): value above label, one
+    // cell per field, row-major — row 1: 指数价 / 持仓量 / 资金费率 /
+    // 价格步长 / 最小名义 / 费率周期 / 盘口更新; row 2: 中间价 / 成交额 /
+    // 下次结算 / 数量步长 / 最大杠杆 / 结算币种 / 目录更新. Mid is
+    // always (bid + ask) / 2 from the live book — never the catalog
+    // midPx, which no longer carries a value. The two rows use the
+    // primary / secondary text colors.
+    const detail: [string, string][] = [
+      ["指数价", fmtPrice(m.indexPx, m.tickSize)],
+      ["持仓量", fmtUsdCompact(m.openInterestUsd)],
+      [
+        "资金费率",
+        m.fundingRateRaw == null
+          ? "—"
+          : `${m.fundingRateRaw >= 0 ? "+" : ""}${(m.fundingRateRaw * 100).toFixed(4)}%`,
+      ],
+      ["价格步长", fmtStep(m.tickSize)],
+      ["最小名义", m.minNotional == null ? "—" : `$${fmtStep(m.minNotional)}`],
+      ["费率周期", m.fundingIntervalHours == null ? "—" : `${m.fundingIntervalHours}h`],
+      ["盘口更新", liveFresh ? fmtClock(book.ts) : "—"],
+      [
+        "中间价",
+        liveFresh && book.bids[0]?.[0] != null && book.asks[0]?.[0] != null
+          ? fmtPrice((book.bids[0][0] + book.asks[0][0]) / 2, m.tickSize)
+          : "—",
+      ],
+      ["成交额", fmtUsdCompact(m.volume24hUsd)],
+      ["下次结算", fmtTime(m.nextFundingTime)],
+      ["数量步长", fmtStep(m.stepSize)],
+      ["最大杠杆", m.maxLeverage == null ? "—" : `${m.maxLeverage}x`],
+      ["结算币种", m.settlementCurrency],
+      ["目录更新", fmtClock(m.updatedAt)],
+    ];
+    return (
+      <React.Fragment key={key}>
+        <tr
+          className={`${trCls} cursor-pointer`}
+          tabIndex={0}
+          onClick={() => onToggle(key)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              onToggle(key);
+            }
+          }}
+        >
+          <td className={tdClsCompact}>{venueName(m.exchangeId)}</td>
+          <td className={`${tdClsCompact} num whitespace-nowrap`}>{displaySymbol(m.symbol)}</td>
+          <td className={`${tdClsCompactRight} num whitespace-nowrap`}>{fmtPrice(m.markPx, m.tickSize)}</td>
+          <td className={`${tdClsCompactRight} num whitespace-nowrap`}>
+            <span className="text-ds-up">{fmtPrice(bidPx, m.tickSize)}</span>
+            {" / "}
+            <span className="text-ds-down">{fmtPrice(askPx, m.tickSize)}</span>
+          </td>
+          <td className={`${tdClsCompactRight} num whitespace-nowrap ${rateCls}`}>{fundingText}</td>
+          <td className={`${tdClsCompactRight} num whitespace-nowrap ${aprCls}`}>{aprText}</td>
+          <td className={`${tdClsCompactRight} num whitespace-nowrap`}>
+            {m.maxLeverage == null ? "—" : `${m.maxLeverage}x`}
+          </td>
+        </tr>
+        {expandedKey === key && (
+          <tr className="border-t border-ds-line bg-ds-panel-2/50">
+            <td colSpan={HEADERS.length} className="px-4 py-3 text-left">
+              <div className="grid grid-cols-7 gap-x-2 gap-y-3 text-xs num">
+                {detail.map(([label, value], i) => (
+                  <div key={label} className="min-w-0">
+                    <div className={`break-words ${i < 7 ? "text-ds-text-1" : "text-ds-text-2"}`}>{value}</div>
+                    <div className="text-ds-text-3">{label}</div>
                   </div>
-                </td>
-              </tr>
-            )}
-          </React.Fragment>
-        );
-      })}
-    </>
-  );
+                ))}
+              </div>
+            </td>
+          </tr>
+        )}
+      </React.Fragment>
+    );
+  });
 }
 
 export default function DataPage() {
@@ -228,7 +242,7 @@ export default function DataPage() {
           <div className="flex rounded-lg border border-ds-line bg-ds-panel p-0.5">
             <button
               onClick={() => setView("signals")}
-              className={`px-3 py-1 rounded-md text-sm ${
+              className={`px-3 py-1 rounded-md text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ds-focus-ring/50 ${
                 view === "signals"
                   ? "bg-ds-accent text-ds-accent-contrast"
                   : "text-ds-text-2 hover:text-ds-text-1"
@@ -238,7 +252,7 @@ export default function DataPage() {
             </button>
             <button
               onClick={() => setView("search")}
-              className={`px-3 py-1 rounded-md text-sm ${
+              className={`px-3 py-1 rounded-md text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ds-focus-ring/50 ${
                 view === "search"
                   ? "bg-ds-accent text-ds-accent-contrast"
                   : "text-ds-text-2 hover:text-ds-text-1"
@@ -247,8 +261,8 @@ export default function DataPage() {
               标的查询
             </button>
           </div>
-          <Button onClick={onRefresh} disabled={refreshing}>
-            {refreshing ? "刷新中…" : "刷新"}
+          <Button onClick={onRefresh} loading={refreshing}>
+            刷新
           </Button>
         </>
       ),
@@ -270,15 +284,16 @@ export default function DataPage() {
               cache timestamp can push a control sideways. The cache time
               lives in the results footer below the table instead. */}
           <div className="flex items-center gap-2 mb-3">
-            <input
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") searchNow();
-              }}
-              placeholder="输入 BTC、ETH、SOL、NVDA 等标的名称，查询 6 所实时对比数据"
-              className="flex-1 min-w-0 bg-ds-panel-2 border border-ds-control-line rounded-lg px-3 h-8 text-ds-text-1 outline-none focus:border-ds-accent focus:ring-2 focus:ring-ds-focus-ring/50 disabled:bg-ds-bg-disabled disabled:text-ds-text-disabled num"
-            />
+            <div className="flex-1 min-w-0">
+              <Input
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") searchNow();
+                }}
+                placeholder="输入 BTC、ETH、SOL、NVDA 等标的名称，查询 6 所实时对比数据"
+              />
+            </div>
             <div className="w-44 shrink-0">
               <MultiSelectDropdown
                 options={(schemas ?? []).map((e) => ({ value: e.id, label: e.name }))}
@@ -288,14 +303,15 @@ export default function DataPage() {
               />
             </div>
             <div className="shrink-0">
-              <Button onClick={onRefresh} disabled={refreshing}>
-                {refreshing ? "刷新中…" : "刷新"}
+              <Button onClick={onRefresh} loading={refreshing}>
+                刷新
               </Button>
             </div>
           </div>
 
-          {/* Per-venue catalog status (updated time / not ready / failed).
-              Lives below the tool row so the row itself stays static. */}
+          {/* Per-venue catalog status (rows / update time / not ready /
+              failed). Lives below the tool row so the row itself stays
+              static. Refreshing never blocks the table. */}
           {venueStatus && (
             <div className="text-xs text-ds-text-3 mb-3 num">
               {venueStatus.venues.map((v) => {
@@ -306,7 +322,7 @@ export default function DataPage() {
                     : fmtClock(v.updatedAt);
                 return (
                   <span key={v.exchangeId} className="mr-3">
-                    {venueName(v.exchangeId)} {st}
+                    {venueName(v.exchangeId)} {v.rows}行 · {st}
                   </span>
                 );
               })}
@@ -323,18 +339,20 @@ export default function DataPage() {
             <PageState empty>未找到包含「{query.trim()}」的标的。</PageState>
           ) : (
             <div className="mb-6">
-              <DataTable headers={HEADERS} minWidth={720} colWidths={COL_WIDTHS} compact>
-                <MarketRows
-                  rows={results}
-                  books={books}
-                  expandedKey={expandedKey}
-                  onToggle={(key) => setExpandedKey((cur) => (cur === key ? null : key))}
-                  venueName={venueName}
-                />
+              {searching && (
+                <div className="text-xs text-ds-text-3 mb-2">搜索中…</div>
+              )}
+              <DataTable headers={HEADERS} minWidth={720} colWidths={COL_WIDTHS} aligns={[...COL_ALIGNS]} compact>
+                {marketRowNodes({
+                  rows: results,
+                  books,
+                  expandedKey,
+                  onToggle: (key) => setExpandedKey((cur) => (cur === key ? null : key)),
+                  venueName,
+                })}
               </DataTable>
               <div className="text-xs text-ds-text-3 mt-2">
                 共 {results.length} 个交易所结果
-                {searching && <> · 搜索中…</>}
                 {cacheUpdatedAt != null && <> · 缓存更新于 {fmtClock(cacheUpdatedAt)}</>}
                 {" · "}点击行查看完整规则详情 · 费率正值（多头付费）为绿，负值为红
               </div>

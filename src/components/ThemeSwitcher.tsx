@@ -35,7 +35,7 @@ export default function ThemeSwitcher() {
           type="button"
           onClick={() => setTheme(o.value)}
           aria-pressed={theme === o.value}
-          className={`h-9 flex items-center gap-2 px-2.5 rounded-lg text-[13px] transition-colors ${
+          className={`h-9 flex items-center gap-2 px-2.5 rounded-lg text-[13px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ds-focus-ring/50 ${
             theme === o.value
               ? "bg-ds-accent-soft/15 text-ds-accent font-medium"
               : "text-ds-text-2 hover:text-ds-text-1 hover:bg-ds-hover"
