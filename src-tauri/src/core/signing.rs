@@ -312,7 +312,7 @@ mod tests {
                 Mp::Array(vec![Mp::Map(vec![
                     ("a", Mp::UInt(0)),
                     ("b", Mp::Bool(true)),
-                    ("p", Mp::Str("90000.0")),
+                    ("p", Mp::Str("90000")),
                     ("s", Mp::Str("0.01")),
                     ("r", Mp::Bool(false)),
                     (
@@ -358,11 +358,14 @@ mod tests {
         hex::encode(out)
     }
 
+    /// Regenerated 2026-11-27 with the CURRENT official Python SDK:
+    /// `float_to_wire(90000.0)` is now "90000" (the old vector's
+    /// "90000.0" no longer matches what the SDK emits — see D8).
     #[test]
     fn msgpack_matches_the_official_sdk() {
         assert_eq!(
             pack_hex(&order_action()),
-            "83a474797065a56f72646572a66f72646572739187a16100a162c3a170a739303030302e30a173a4302e3031a172c2a17481a56c696d697481a3746966a3477463a163d92230783132333435363738393061626364656631323334353637383930616263646566a867726f7570696e67a26e61"
+            "83a474797065a56f72646572a66f72646572739187a16100a162c3a170a53930303030a173a4302e3031a172c2a17481a56c696d697481a3746966a3477463a163d92230783132333435363738393061626364656631323334353637383930616263646566a867726f7570696e67a26e61"
         );
         assert_eq!(
             pack_hex(&cancel_action()),
@@ -435,7 +438,7 @@ mod tests {
     fn action_hash_matches_the_official_sdk() {
         assert_eq!(
             hex::encode(action_hash(&order_action(), NONCE)),
-            "29241af242754b51f84a0228d1b9b805cfe407ebe493f6e27b726e963b467bd5"
+            "f9472055867c66bfa69652f2d14acbef1417433df82e5ed8edeb4217b76fecef"
         );
         assert_eq!(
             hex::encode(action_hash(&cancel_action(), NONCE)),
@@ -452,15 +455,13 @@ mod tests {
         let sig = sign_l1_action(&test_secret(), &order_action(), NONCE).unwrap();
         assert_eq!(
             sig.r,
-            "0xd43bd50d14c86605409fedd7c078cbf2dc45a6e338cee0f5ff8bddcd31a1eca0"
+            "0xe10269ab7ef1aeb276caed45037bc41ef59cdc51e09a09d5f8019958e5e0a00b"
         );
         assert_eq!(
             sig.s,
-            // The SDK's `to_hex` strips the leading zero nibble; the
-            // number is the same, ours is the full 32-byte form.
-            "0x0fad9c72b5f4dbc1040176a2212e749cedcd2d18e3046260dc7a3c0bffc22698"
+            "0x78c359113c7f8ce401cfaeba766be53bf7239481b9bd74a0f0dcc917a9118e97"
         );
-        assert_eq!(sig.v, 28);
+        assert_eq!(sig.v, 27);
 
         let sig = sign_l1_action(&test_secret(), &cancel_action(), NONCE).unwrap();
         assert_eq!(

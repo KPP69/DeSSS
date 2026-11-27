@@ -66,7 +66,9 @@ pub struct PlaceIntent {
     pub reduce_only: bool,
     /// Trigger (TP/SL) price — when set, the order is a trigger
     /// order (wire "t" is the trigger variant, grouping
-    /// "positionTpsl"). `price` stays the reference price.
+    /// "positionTpsl"). `price` is the wire limit price `p`: for a
+    /// stop-loss place_order pre-buffers it 3% beyond the trigger
+    /// (SL_SLIPPAGE_BPS); for a take-profit it equals the trigger.
     pub trigger_px: Option<f64>,
     /// Trigger purpose: "tp" | "sl" (required with `trigger_px`).
     pub tpsl: Option<String>,
@@ -87,6 +89,16 @@ fn live_of(deps: &ExecDeps, account_id: &str) -> Option<crate::core::types::Acco
         .into_iter()
         .find(|s| s.account_id == account_id)
 }
+
+/// D8: stop-loss slippage buffer, in basis points (3%). For a market
+/// trigger (isMarket=true) the wire limit price `p` is still the
+/// worst-acceptable price after the trigger — the official SDK
+/// example `basic_tpsl.py` sets the stop's limit ~3-4% beyond the
+/// trigger (and the take-profit's limit equal to it). A stop whose
+/// `p` equals its trigger can rest unfilled through a gap, so a
+/// stop-loss gets its `p` set 3% beyond the trigger price; a
+/// take-profit hugs the trigger price.
+const SL_SLIPPAGE_BPS: i64 = 300;
 
 /// Place one order through the full pipeline. Returns the order
 /// record: Open / Filled / Unresolved are all `Ok` (an Unresolved
@@ -169,6 +181,21 @@ pub async fn place_order(deps: &ExecDeps, intent: PlaceIntent) -> Result<OrderIn
     if price_dec <= Decimal::ZERO || qty_dec <= Decimal::ZERO {
         return Err("价格和数量必须大于 0".to_string());
     }
+    // D8: a stop-loss's `p` is the buffered worst-acceptable price
+    // (see SL_SLIPPAGE_BPS): sell (long stop) 3% below the trigger,
+    // buy (short stop) 3% above it. Decimal math, so 89000 x 0.97
+    // is exactly 86330; the tick alignment below still applies.
+    // Take-profit keeps `p` = trigger price.
+    let price_dec = if intent.trigger_px.is_some() && intent.tpsl.as_deref() == Some("sl") {
+        let bps = if intent.side == "sell" {
+            10_000 - SL_SLIPPAGE_BPS
+        } else {
+            10_000 + SL_SLIPPAGE_BPS
+        };
+        price_dec * Decimal::new(bps, 4)
+    } else {
+        price_dec
+    };
     if let Some(min) = min_notional {
         if price_dec * qty_dec < min {
             return Err(format!("订单名义价值低于该品种最小值 ${min}", min = min));
@@ -1103,6 +1130,9 @@ mod tests {
             assert_eq!(placed[0].trigger_px, Some(89000.0));
             assert_eq!(placed[0].tpsl.as_deref(), Some("sl"));
             assert_eq!(placed[0].is_market, Some(true));
+            // D8: a stop-loss's `p` is NOT the trigger price — it is
+            // the trigger buffered 3% beyond it (89000 x 0.97).
+            assert_eq!(placed[0].price, Some(86330.0));
         }
         // A plain reduce-only close: reduce_only rides, no trigger.
         let info = place_order(
@@ -1136,6 +1166,35 @@ mod tests {
             assert_eq!(placed[1].trigger_px, None);
             assert_eq!(placed[1].tpsl, None);
         }
+        // A take-profit hugs the trigger: its `p` IS the trigger.
+        let info = place_order(
+            &deps,
+            PlaceIntent {
+                account_id: "acc-1".to_string(),
+                symbol: "BTC".to_string(),
+                side: "sell".to_string(),
+                order_type: "trigger".to_string(),
+                quantity: 0.01,
+                price: 91000.0,
+                reduce_only: true,
+                trigger_px: Some(91000.0),
+                tpsl: Some("tp".to_string()),
+                is_market: Some(true),
+                origin: "manual".to_string(),
+            },
+        )
+        .await
+        .expect("take-profit places");
+        assert_eq!(info.status, OrderStatus::Open);
+        assert_eq!(info.trigger_px, Some(91000.0));
+        assert_eq!(info.tpsl.as_deref(), Some("tp"));
+        {
+            let placed = fake.placed.lock().unwrap_or_else(|e| e.into_inner());
+            assert_eq!(placed.len(), 3);
+            assert_eq!(placed[2].price, Some(91000.0));
+            assert_eq!(placed[2].trigger_px, Some(91000.0));
+            assert_eq!(placed[2].tpsl.as_deref(), Some("tp"));
+        }
         // Invalid trigger inputs fail before any adapter call.
         for (tp, tpsl, why) in [
             (Some(0.0), Some("sl".to_string()), "trigger 0"),
@@ -1165,7 +1224,7 @@ mod tests {
         }
         assert_eq!(
             fake.placed.lock().unwrap_or_else(|e| e.into_inner()).len(),
-            2,
+            3,
             "invalid trigger inputs must not reach the adapter"
         );
     }

@@ -266,7 +266,16 @@ pub(crate) enum OrderTypeWire<'a> {
 /// Build the signed order action — msgpack form (for the signature)
 /// and JSON form (for the POST body) — from the already-wired
 /// strings. Key order follows the official SDK
-/// (`order_request_to_order_wire` / `order_wires_to_order_action`):
+/// (`order_request_to_order_wire` / `order_wires_to_order_action`).
+///
+/// D8: `p` is the worst-acceptable (limit) price even for a market
+/// trigger (isMarket=true) — the official SDK example
+/// `basic_tpsl.py` sets the stop's limit ~3-4% beyond the trigger
+/// and the take-profit's limit equal to it, so a stop whose `p`
+/// equals its trigger can rest unfilled through a gap. The caller
+/// (execution::place_order) pre-buffers a stop-loss `p` by
+/// SL_SLIPPAGE_BPS; a take-profit's `p` is its trigger price. This
+/// builder only wires the strings it is given.
 /// a, b, p, s, r, t, c inside each order; type, orders, grouping
 /// outside. Grouping follows the variant: a trigger order is a
 /// position TP/SL ("positionTpsl"), a plain order is ungrouped ("na").
