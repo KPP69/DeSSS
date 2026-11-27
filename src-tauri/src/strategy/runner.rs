@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::core::types::{AccountLive, OrderBook, OrderInfo};
+use crate::core::types::{AccountLive, OrderBook, OrderInfo, OrderStatus};
 use crate::core::util::now_ms;
 use crate::data_engine::DataEngine;
 use crate::execution::{self, ExecDeps, PlaceIntent as ExecIntent};
@@ -55,11 +55,16 @@ fn log(deps: &RunnerDeps, level: &str, message: String) {
 }
 
 /// The production loop: one round every 200ms, forever. Spawned once
-/// from `lib.rs` via `tauri::async_runtime::spawn`.
+/// from `lib.rs` via `tauri::async_runtime::spawn`. An `interval`
+/// (not sleep-after-round) keeps the period fixed at 200ms even when
+/// a round runs slow; `Delay` drops missed ticks instead of bursting
+/// to catch up.
 pub async fn run(deps: RunnerDeps) {
+    let mut tick = tokio::time::interval(Duration::from_millis(ROUND_MS));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
+        tick.tick().await;
         run_round(&deps, now_ms()).await;
-        tokio::time::sleep(Duration::from_millis(ROUND_MS)).await;
     }
 }
 
@@ -114,6 +119,25 @@ fn spec_for(deps: &RunnerDeps, leg: &LegRef) -> Option<MarketSpec> {
         .into_iter()
         .find(|r| r.symbol == leg.symbol)?;
     MarketSpec::from_row(&row)
+}
+
+/// In-flight gate (D6): true while this instance still has a
+/// non-terminal order on the books. `Unresolved` is deliberately
+/// NOT in the set — it exists to be resolved by the 10s open-orders
+/// poll, and blocking on it would stall the strategy on every
+/// timeout.
+fn has_inflight_order(deps: &RunnerDeps, inst_id: &str) -> bool {
+    let origin = format!("strategy:{inst_id}");
+    deps.exec.orders.list().iter().any(|o| {
+        o.origin == origin
+            && matches!(
+                o.status,
+                OrderStatus::Pending
+                    | OrderStatus::Submitted
+                    | OrderStatus::Open
+                    | OrderStatus::PartiallyFilled
+            )
+    })
 }
 
 /// Skip this round for one instance, logging only when the reason
@@ -286,6 +310,12 @@ async fn run_instance(deps: &RunnerDeps, inst: &StrategyInstance, now: i64) {
         return skip(deps, inst, "B 腿品种不在目录中");
     };
     clear_skip(deps, inst);
+    // (D6) in-flight gate: while this instance still has a
+    // non-terminal order on the books, do not fire again — a resting
+    // order must fill or cancel before the next signal.
+    if has_inflight_order(deps, &inst.id) {
+        return skip(deps, inst, "有在途策略单，等待成交或撤销");
+    }
     let net = net_qty(&live_a, &inst.leg_a.symbol);
     let snap_a = BookSnapshot::from_order_book(&book_a);
     let snap_b = BookSnapshot::from_order_book(&book_b);
@@ -618,6 +648,18 @@ mod tests {
         }
     }
 
+    /// Flip every still-open strategy order of one instance to a
+    /// terminal status, as the exchange would after a fill / cancel.
+    fn set_strategy_orders_status(deps: &RunnerDeps, inst_id: &str, status: OrderStatus) {
+        let origin = format!("strategy:{inst_id}");
+        for mut o in deps.exec.orders.list() {
+            if o.origin == origin && !o.status.is_terminal() {
+                o.status = status;
+                deps.exec.orders.apply_query(&o);
+            }
+        }
+    }
+
     fn placed_accounts(fake: &FakeStrategyAdapter) -> Vec<String> {
         fake.placed
             .lock()
@@ -801,5 +843,139 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn inflight_order_blocks_the_next_fire() {
+        let now = now_ms();
+        let h = harness(now).await;
+        // Orders rest Open (fraction 0): round 1 fires, round 2 must not.
+        run_round(&h.deps, now).await;
+        assert_eq!(
+            h.fake_a
+                .placed
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .len(),
+            1
+        );
+        run_round(&h.deps, now).await;
+        assert_eq!(
+            h.fake_a
+                .placed
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .len(),
+            1,
+            "a resting strategy order must block the next fire"
+        );
+        assert_eq!(
+            h.fake_b
+                .placed
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .len(),
+            1
+        );
+        // The skip is logged (deduped by skip()).
+        let skip = h
+            .deps
+            .stats
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&h.inst_id)
+            .and_then(|s| s.last_skip.clone());
+        assert!(skip.map(|s| s.contains("在途")).unwrap_or(false));
+    }
+
+    #[tokio::test]
+    async fn filled_or_canceled_order_unblocks_firing() {
+        let now = now_ms();
+        let h = harness(now).await;
+        run_round(&h.deps, now).await;
+        assert_eq!(
+            h.fake_a
+                .placed
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .len(),
+            1
+        );
+        // Filled is terminal: the gate must clear.
+        set_strategy_orders_status(&h.deps, &h.inst_id, OrderStatus::Filled);
+        run_round(&h.deps, now).await;
+        assert_eq!(
+            h.fake_a
+                .placed
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .len(),
+            2,
+            "Filled must unblock the next fire"
+        );
+        // ... and Canceled too.
+        set_strategy_orders_status(&h.deps, &h.inst_id, OrderStatus::Canceled);
+        run_round(&h.deps, now).await;
+        assert_eq!(
+            h.fake_a
+                .placed
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .len(),
+            3,
+            "Canceled must unblock the next fire"
+        );
+    }
+
+    #[tokio::test]
+    async fn interval_rounds_stay_within_tolerance() {
+        let now = now_ms();
+        let h = harness(now).await;
+        // Orders fill immediately, so the in-flight gate clears every
+        // round and evaluate runs again (round 2+ is then blocked
+        // from *firing* by the position state machine — already
+        // short A — but last_eval_ms still updates each round).
+        h.fake_a
+            .fill_fraction
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert("acc-a".to_string(), 1.0);
+        h.fake_b
+            .fill_fraction
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert("acc-b".to_string(), 1.0);
+        let stats = h.deps.stats.clone();
+        tokio::spawn(crate::strategy::runner::run(h.deps));
+        // Observe rounds via last_eval_ms, which the runner updates
+        // on every evaluation — even when the position state machine
+        // blocks a re-fire after round 1 fills, so this measures the
+        // loop period, not the firing rate. Real time with the spec's
+        // ±50ms bound (no paused clock: advance() interacts badly
+        // with the engine's 100ms first-frame poll sleeps).
+        let mut seen: Vec<std::time::Instant> = Vec::new();
+        let mut last_seen: Option<i64> = None;
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while seen.len() < 5 && std::time::Instant::now() < deadline {
+            let cur = stats
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .values()
+                .next()
+                .and_then(|s| s.last_eval_ms);
+            if cur.is_some() && cur != last_seen {
+                last_seen = cur;
+                seen.push(std::time::Instant::now());
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(seen.len(), 5, "only {} rounds in 3s", seen.len());
+        for w in seen.windows(2) {
+            let gap = w[1].duration_since(w[0]);
+            assert!(
+                gap >= Duration::from_millis(150) && gap <= Duration::from_millis(250),
+                "round gap {gap:?} outside 200ms ±50ms"
+            );
+        }
     }
 }
