@@ -340,19 +340,21 @@ pub fn evaluate(
         }
     }
     // (f) limits: sell at the bid less protection, buy at the ask
-    // plus protection.
+    // plus protection. The price is the worst acceptable price, and
+    // the order is IOC (D9): a resting entry can fill later with no
+    // protection attached, so entries must never rest.
     let prot = PROTECTION_BPS / 10_000.0;
     let (intent_a, intent_b) = match dir {
         Dir::SellA => (
             PlaceIntent {
                 side: "sell".to_string(),
-                order_type: "limit".to_string(),
+                order_type: "ioc".to_string(),
                 quantity: qty,
                 price: a.best_bid().unwrap() * (1.0 - prot),
             },
             PlaceIntent {
                 side: "buy".to_string(),
-                order_type: "limit".to_string(),
+                order_type: "ioc".to_string(),
                 quantity: qty,
                 price: b.best_ask().unwrap() * (1.0 + prot),
             },
@@ -360,13 +362,13 @@ pub fn evaluate(
         Dir::BuyA => (
             PlaceIntent {
                 side: "buy".to_string(),
-                order_type: "limit".to_string(),
+                order_type: "ioc".to_string(),
                 quantity: qty,
                 price: a.best_ask().unwrap() * (1.0 + prot),
             },
             PlaceIntent {
                 side: "sell".to_string(),
-                order_type: "limit".to_string(),
+                order_type: "ioc".to_string(),
                 quantity: qty,
                 price: b.best_bid().unwrap() * (1.0 - prot),
             },

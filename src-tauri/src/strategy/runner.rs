@@ -1258,7 +1258,7 @@ mod tests {
         let placed_a = placed(&h.fake_a);
         assert_eq!(placed_a.len(), 4, "the close fires past resting protection");
         assert_eq!(placed_a[3].side, "buy", "the close buys back the short A");
-        assert_eq!(placed_a[3].order_type, "limit");
+        assert_eq!(placed_a[3].order_type, "ioc", "the close is IOC too");
         // No new protection: a closing fire gets none.
         assert_eq!(placed(&h.fake_b).len(), 4);
         assert!(
@@ -1269,6 +1269,98 @@ mod tests {
                 == 2,
             "still only the round-1 TP/SL pair"
         );
+    }
+
+    #[tokio::test]
+    async fn entry_orders_are_ioc() {
+        let now = now_ms();
+        let h = harness(now).await;
+        run_round(&h.deps, now).await;
+        // Both entry legs are IOC; the prices are unchanged (the
+        // protection-bps worst acceptable price).
+        let placed_a = placed(&h.fake_a);
+        let placed_b = placed(&h.fake_b);
+        assert_eq!(placed_a.len(), 1);
+        assert_eq!(placed_b.len(), 1);
+        assert_eq!(placed_a[0].order_type, "ioc");
+        assert_eq!(placed_b[0].order_type, "ioc");
+        assert_eq!(placed_a[0].price, Some(90982.0));
+        assert_eq!(placed_b[0].price, Some(90018.0));
+    }
+
+    #[tokio::test]
+    async fn partial_fill_still_matches_and_hedges() {
+        let now = now_ms();
+        let h = harness(now).await;
+        set_protection(&h.deps, &h.inst_id, 100.0, 200.0);
+        // Leg A fills in full, leg B half: matched is the smaller
+        // fill, the A excess is hedged, protection covers matched.
+        h.fake_a
+            .fill_fraction
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert("acc-a".to_string(), 1.0);
+        h.fake_b
+            .fill_fraction
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert("acc-b".to_string(), 0.5);
+        run_round(&h.deps, now).await;
+        let placed_a = placed(&h.fake_a);
+        let placed_b = placed(&h.fake_b);
+        assert_eq!(placed_a[0].order_type, "ioc");
+        assert_eq!(placed_b[0].order_type, "ioc");
+        assert_eq!(placed_a.len(), 4, "entry + hedge + TP + SL on A");
+        assert_eq!(placed_b.len(), 3, "entry + TP + SL on B");
+        // The hedge is unchanged: a limit reduce-only order.
+        // Quantities are floored to the step in the pipeline, so the
+        // 0.0275 excess / matched become 0.027 (0.0005 sub-step dust).
+        assert_eq!(placed_a[1].order_type, "limit");
+        assert!(placed_a[1].reduce_only);
+        assert_eq!(placed_a[1].side, "buy");
+        assert!(
+            (placed_a[1].quantity - 0.027).abs() < 1e-12,
+            "hedged excess"
+        );
+        // Protection covers the matched 0.027 on both legs.
+        for req in [&placed_a[2], &placed_a[3], &placed_b[1], &placed_b[2]] {
+            assert_eq!(req.order_type, "trigger");
+            assert!((req.quantity - 0.027).abs() < 1e-12, "matched qty");
+        }
+    }
+
+    #[tokio::test]
+    async fn no_fill_places_no_protection_and_keeps_evaluating() {
+        let now = now_ms();
+        let h = harness(now).await;
+        set_protection(&h.deps, &h.inst_id, 100.0, 200.0);
+        run_round(&h.deps, now).await;
+        // Nothing filled: no protection, no hedge, instance stays enabled.
+        let placed_a = placed(&h.fake_a);
+        let placed_b = placed(&h.fake_b);
+        assert_eq!(placed_a.len(), 1);
+        assert_eq!(placed_b.len(), 1);
+        assert_eq!(placed_a[0].order_type, "ioc");
+        assert_eq!(placed_b[0].order_type, "ioc");
+        assert!(placed_a.iter().all(|r| r.trigger_px.is_none()));
+        assert!(placed_b.iter().all(|r| r.trigger_px.is_none()));
+        assert!(instance_enabled(&h.deps, &h.inst_id));
+        // The exchange cancels the unfilled IOC remainder; the next
+        // round evaluates and fires again.
+        set_strategy_orders_status(&h.deps, &h.inst_id, OrderStatus::Canceled);
+        run_round(&h.deps, now).await;
+        assert_eq!(placed(&h.fake_a).len(), 2, "round 2 fires again");
+        assert_eq!(placed(&h.fake_b).len(), 2);
+        assert!(instance_enabled(&h.deps, &h.inst_id));
+    }
+
+    fn instance_enabled(deps: &RunnerDeps, inst_id: &str) -> bool {
+        crate::strategy::load_strategies(&deps.db)
+            .expect("load")
+            .into_iter()
+            .find(|i| i.id == inst_id)
+            .expect("instance")
+            .enabled
     }
 
     #[tokio::test]
