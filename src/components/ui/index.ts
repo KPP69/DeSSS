@@ -1,7 +1,7 @@
 export { default as Button } from "./Button";
 export { default as Badge } from "./Badge";
 export { default as StatCard } from "./StatCard";
-export { default as DataTable, tdCls, tdClsCompact, trCls } from "./DataTable";
+export { default as DataTable, tdCls, tdClsCompact, tdClsCompactRight, tdClsRight, trCls } from "./DataTable";
 export { default as Modal } from "./Modal";
 export { default as SelectDropdown, type SelectOption } from "./SelectDropdown";
 export { default as MultiSelectDropdown } from "./MultiSelectDropdown";
@@ -11,3 +11,4 @@ export { default as Input } from "./Input";
 export { default as Checkbox } from "./Checkbox";
 export { default as Tooltip } from "./Tooltip";
 export { default as Spinner } from "./Spinner";
+export { default as Switch } from "./Switch";

@@ -24,6 +24,9 @@ type AccountState = {
   accounts: AccountView[];
   loading: boolean;
   error: string | null;
+  /** Last list-load failure (F3): the page shows it as its error
+   * state with a retry. Null on every successful load. */
+  listError: string | null;
   fetchAll: () => Promise<void>;
   create: (label: string, exchangeId: string, credentials: CredentialMap) => Promise<boolean>;
   update: (
@@ -33,8 +36,11 @@ type AccountState = {
     credentials: CredentialMap | null
   ) => Promise<boolean>;
   remove: (id: string) => Promise<boolean>;
-  connect: (id: string, silent?: boolean) => Promise<void>;
-  disconnect: (id: string) => Promise<void>;
+  /** True when the account is live afterwards (F3: the page toasts
+   * success on true; failures already toast inside, unless silent). */
+  connect: (id: string, silent?: boolean) => Promise<boolean>;
+  /** True when the disconnect call succeeded. */
+  disconnect: (id: string) => Promise<boolean>;
   hydrateLive: () => Promise<void>;
 };
 
@@ -73,6 +79,7 @@ export const useAccountStore = create<AccountState>((set, get) => {
     accounts: [],
     loading: false,
     error: null,
+    listError: null,
     fetchAll: async () => {
       set({ loading: true });
       try {
@@ -88,12 +95,12 @@ export const useAccountStore = create<AccountState>((set, get) => {
         } else if (!vaultError) {
           lastVaultErrorLogged = null;
         }
-        set({ accounts, error: null, loading: false });
+        set({ accounts, error: null, listError: null, loading: false });
         await get().hydrateLive();
         autoConnect();
       } catch (e) {
         consoleError(`加载账户列表失败：${errText(e)}`);
-        set({ loading: false });
+        set({ loading: false, listError: errText(e) });
       }
     },
     create: async (label, exchangeId, credentials) => {
@@ -123,7 +130,10 @@ export const useAccountStore = create<AccountState>((set, get) => {
         await get().fetchAll();
         return true;
       } catch (e) {
+        // User-initiated delete (F3): the failure toasts verbatim
+        // (and still goes to the console, as before).
         consoleError(`删除账户失败：${errText(e)}`);
+        toast.error(errText(e));
         return false;
       }
     },
@@ -131,11 +141,13 @@ export const useAccountStore = create<AccountState>((set, get) => {
       try {
         const a = await api.connectAccount(id);
         useLiveStore.getState().setLive(a);
+        return true;
       } catch (e) {
         // Backend logs the failure too; the manual button toasts it
         // (auto-connect passes silent so a bad credential does not
         // pop a toast on every list load).
         if (!silent) toast.error(errText(e));
+        return false;
       }
     },
     disconnect: async (id) => {
@@ -143,8 +155,11 @@ export const useAccountStore = create<AccountState>((set, get) => {
         await api.disconnectAccount(id);
       } catch (e) {
         toast.error(errText(e));
+        useLiveStore.getState().removeLive(id);
+        return false;
       }
       useLiveStore.getState().removeLive(id);
+      return true;
     },
     hydrateLive: async () => {
       try {

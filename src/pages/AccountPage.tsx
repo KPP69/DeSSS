@@ -1,12 +1,14 @@
 import React, { useEffect, useLayoutEffect, useMemo, useState } from "react";
 import AccountModal from "../components/AccountModal";
-import { Badge, Button, ConfirmDialog, DataTable, StatCard, tdClsCompact, trCls } from "../components/ui";
+import PageState from "../components/PageState";
+import { Badge, Button, ConfirmDialog, DataTable, StatCard, tdClsCompact, tdClsCompactRight, trCls } from "../components/ui";
 import { useVenueSchemas } from "../hooks/useVenueSchemas";
 import { useAccountStore } from "../store/useAccountStore";
 import type { AccountView } from "../lib/types";
 import { useAccountUiStore } from "../store/useAccountUiStore";
-import { useLiveStore, latencyTone } from "../store/useLiveStore";
+import { useLiveStore } from "../store/useLiveStore";
 import { useShellActions } from "../store/useShellActions";
+import { toast } from "../store/useToastStore";
 import { useVenueStore } from "../store/useVenueStore";
 
 function fmt(n: number): string {
@@ -14,10 +16,18 @@ function fmt(n: number): string {
 }
 
 /**
- * Account page. Live sync lives in the account store (Phase 2, I11):
- * the list load hydrates live states and auto-connects, so this page
- * only reads state and fires store actions. The connectable set is
- * the backend's schema list, not a frontend table (Phase 2, I10).
+ * Account page (F3): one row per account. Live sync lives in the
+ * account store (Phase 2, I11): the list load hydrates live states
+ * and auto-connects, so this page only reads state and fires store
+ * actions. The connectable set is the backend's schema list, not a
+ * frontend table (Phase 2, I10).
+ *
+ * Columns: 名称 · 交易所 · 标识（脱敏）· 状态 · 权益 · 可用 · 操作.
+ * Status is text + Badge (connected up, connecting info, error down,
+ * degraded gets an extra warn badge, no live entry = neutral 未连接).
+ * Amounts are right-aligned tabular numerals. Actions converge by
+ * state: disconnected shows 连接 + 编辑, connected shows 断开 +
+ * 编辑, 删除 is always last (danger + confirm).
  */
 
 const STATUS_LABEL: Record<string, string> = {
@@ -27,11 +37,19 @@ const STATUS_LABEL: Record<string, string> = {
   disconnected: "已断开",
 };
 
-const HEADERS = ["账户名", "账户信息", "交易所", "权益 / 可用", "盈亏", "操作"];
+const STATUS_TONE: Record<string, "up" | "info" | "down" | "neutral"> = {
+  connecting: "info",
+  connected: "up",
+  error: "down",
+  disconnected: "neutral",
+};
+
+const HEADERS = ["名称", "交易所", "标识", "状态", "权益", "可用", "操作"];
 
 export default function AccountPage() {
   const accounts = useAccountStore((s) => s.accounts);
   const loading = useAccountStore((s) => s.loading);
+  const listError = useAccountStore((s) => s.listError);
   const fetchAll = useAccountStore((s) => s.fetchAll);
   const remove = useAccountStore((s) => s.remove);
   const connect = useAccountStore((s) => s.connect);
@@ -52,6 +70,7 @@ export default function AccountPage() {
   const openEdit = useAccountUiStore((s) => s.openEdit);
   const closeModal = useAccountUiStore((s) => s.close);
   const [pendingDelete, setPendingDelete] = useState<AccountView | null>(null);
+  const [busy, setBusy] = useState<{ id: string; kind: "connect" | "disconnect" } | null>(null);
 
   // Toolbar (F1): add-account action + account / connected counts.
   const register = useShellActions((s) => s.register);
@@ -98,6 +117,53 @@ export default function AccountPage() {
     fetchAll();
   }, [fetchAll]);
 
+  // A list-load failure with accounts already on screen has no
+  // full-page state to show — surface it as a toast instead.
+  useEffect(() => {
+    if (listError) toast.error(listError);
+  }, [listError]);
+
+  const onConnect = async (a: AccountView) => {
+    if (busy) return;
+    setBusy({ id: a.id, kind: "connect" });
+    const ok = await connect(a.id);
+    setBusy(null);
+    if (ok) toast.success(`账户「${a.label}」已连接`);
+  };
+
+  const onDisconnect = async (a: AccountView) => {
+    if (busy) return;
+    setBusy({ id: a.id, kind: "disconnect" });
+    const ok = await disconnect(a.id);
+    setBusy(null);
+    if (ok) toast.success(`账户「${a.label}」已断开`);
+  };
+
+  if (loading && accounts.length === 0) {
+    return <PageState loading loadingText="加载账户…" />;
+  }
+  if (listError && accounts.length === 0) {
+    return (
+      <PageState
+        error={`账户列表加载失败：${listError}`}
+        onRetry={() => void fetchAll()}
+      />
+    );
+  }
+  if (accounts.length === 0) {
+    return (
+      <PageState
+        empty
+        action={<Button onClick={openAdd}>添加账户</Button>}
+      >
+        <div>
+          <div className="text-[13px] font-semibold text-ds-text-1">暂无账户</div>
+          <div className="mt-1">添加第一个账户，凭证只加密保存在本机。</div>
+        </div>
+      </PageState>
+    );
+  }
+
   return (
     <div>
       <div className="grid grid-cols-3 gap-3 mb-4">
@@ -122,85 +188,98 @@ export default function AccountPage() {
         />
       </div>
       {/* Account columns, strictly locked by percentage (sum 100%):
-          账户名 14% / 账户信息 22% / 交易所 14% / 权益 16% / 盈亏 12% /
-          操作 22%. table-fixed + w-full keeps the ratios at any window
-          size; min-w-700px is the floor, overflow-x-auto is the fallback. */}
-      <DataTable headers={HEADERS} minWidth={700} compact colWidths={["14%", "22%", "14%", "16%", "12%", "22%"]}>
+          名称 14% / 交易所 12% / 标识 20% / 状态 14% / 权益 12% /
+          可用 11% / 操作 17%. table-fixed + w-full keeps the ratios
+          at any window size; min-w-800px is the floor. */}
+      <DataTable
+        headers={HEADERS}
+        minWidth={800}
+        compact
+        colWidths={["14%", "12%", "20%", "14%", "12%", "11%", "17%"]}
+        aligns={["center", "center", "center", "center", "right", "right", "center"]}
+      >
         {accounts.map((a) => {
           const lv = live[a.id];
           const isSyncable = syncable.has(a.exchangeId);
-          const tone = lv ? latencyTone(lv.latencyMs, lv.status) : "offline";
+          const connecting =
+            lv?.status === "connecting" ||
+            (busy?.id === a.id && busy.kind === "connect");
+          const disconnecting = busy?.id === a.id && busy.kind === "disconnect";
           return (
           <tr key={a.id} className={trCls}>
             <td className={tdClsCompact}>
               <span className="block truncate">{a.label}</span>
+              {!a.credentialConfigured && (
+                <span className="block text-[11px] text-ds-warn">未配置凭证</span>
+              )}
+            </td>
+            <td className={`${tdClsCompact} leading-tight`}>{venueName(a.exchangeId)}</td>
+            <td className={`${tdClsCompact} num`}>
+              <span className="block truncate">{a.maskedIdentifier}</span>
             </td>
             <td className={tdClsCompact}>
-              <div className="flex flex-col items-center gap-0.5 leading-tight w-full">
-                <span className="block w-full truncate text-xs text-ds-text-3 num">{a.maskedIdentifier}</span>
-                <Badge tone={a.credentialConfigured ? "configured" : "warn"}>
-                  {a.credentialConfigured ? "凭证已配置" : "未配置凭证"}
-                </Badge>
-                {lv && (
-                  <Badge tone={tone}>
+              <div className="flex flex-col items-center gap-1">
+                {lv ? (
+                  <Badge tone={STATUS_TONE[lv.status] ?? "neutral"}>
                     {STATUS_LABEL[lv.status] ?? lv.status}
-                    {lv.latencyMs !== null && lv.status === "connected"
-                      ? ` · ${lv.latencyMs}ms`
-                      : ""}
                   </Badge>
+                ) : (
+                  <Badge tone="neutral">{isSyncable ? "未连接" : "本阶段不支持"}</Badge>
                 )}
-                {lv && lv.degraded && (
-                  <span className="block w-full truncate text-[11px] text-ds-text-3">
-                    数据降级：REST 兜底
-                  </span>
+                {lv && lv.degraded && lv.status === "connected" && (
+                  <Badge tone="warn">数据降级</Badge>
+                )}
+                {lv && lv.status === "connected" && lv.latencyMs !== null && (
+                  <span className="text-[11px] text-ds-text-3 num">{lv.latencyMs}ms</span>
                 )}
               </div>
             </td>
-            <td className={`${tdClsCompact} leading-tight`}>{venueName(a.exchangeId)}</td>
-            {lv ? (
-              <>
-                <td className={`${tdClsCompact} num`}>
-                  <div>${fmt(lv.equityUsd)} <span className="text-ds-text-3 text-xs">{lv.currency}</span></div>
-                  <div className="text-ds-text-3 text-xs">可用 ${fmt(lv.availableUsd)}</div>
-                </td>
-                <td className={`${tdClsCompact} num ${lv.pnlUsd != null && lv.pnlUsd > 0 ? "text-ds-up" : lv.pnlUsd != null && lv.pnlUsd < 0 ? "text-ds-down" : ""}`}>
-                  {lv.pnlUsd == null ? "—" : `${lv.pnlUsd > 0 ? "+" : ""}$${fmt(lv.pnlUsd)}`}
-                </td>
-              </>
-            ) : (
-              <>
-                <td className={`${tdClsCompact} text-ds-text-3`}>{isSyncable ? "未连接" : "本阶段不支持"}</td>
-                <td className={`${tdClsCompact} text-ds-text-3`}>—</td>
-              </>
-            )}
+            <td className={tdClsCompactRight}>
+              {lv ? `$${fmt(lv.equityUsd)}` : <span className="text-ds-text-3">—</span>}
+            </td>
+            <td className={tdClsCompactRight}>
+              {lv ? `$${fmt(lv.availableUsd)}` : <span className="text-ds-text-3">—</span>}
+            </td>
             <td className="text-center px-2 py-1.5 text-[13px] text-ds-text-1 whitespace-nowrap">
-              <div className="flex items-center justify-center gap-1.5">
-                {isSyncable && a.credentialConfigured && !lv && (
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    onClick={() => void connect(a.id)}
-                  >
-                    连接
+              <div className="flex flex-wrap items-center justify-center gap-1.5">
+                {connecting ? (
+                  <Button variant="secondary" size="sm" loading disabled>
+                    连接中
                   </Button>
-                )}
-                {lv && (
+                ) : lv && lv.status === "connected" ? (
                   <Button
                     variant="ghost"
                     size="sm"
-                    onClick={() => void disconnect(a.id)}
+                    loading={disconnecting}
+                    disabled={busy !== null}
+                    onClick={() => void onDisconnect(a)}
                   >
                     断开
                   </Button>
-                )}
+                ) : isSyncable && a.credentialConfigured ? (
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    disabled={busy !== null}
+                    onClick={() => void onConnect(a)}
+                  >
+                    连接
+                  </Button>
+                ) : null}
                 <Button
                   variant="secondary"
                   size="sm"
+                  disabled={busy !== null}
                   onClick={() => openEdit(a)}
                 >
                   编辑
                 </Button>
-                <Button variant="ghost" size="sm" onClick={() => setPendingDelete(a)}>
+                <Button
+                  variant="danger"
+                  size="sm"
+                  disabled={busy !== null}
+                  onClick={() => setPendingDelete(a)}
+                >
                   删除
                 </Button>
               </div>
@@ -208,13 +287,6 @@ export default function AccountPage() {
           </tr>
           );
         })}
-        {accounts.length === 0 && (
-          <tr className="border-t border-ds-line">
-            <td colSpan={HEADERS.length} className="text-center px-4 py-8 text-ds-text-3">
-              {loading ? "加载中…" : "暂无真实账户，点击上方「添加账户」创建。账户凭证只加密保存在本机。"}
-            </td>
-          </tr>
-        )}
       </DataTable>
 
       <AccountModal open={modalOpen} editing={editing} onClose={closeModal} />
@@ -236,6 +308,7 @@ export default function AccountPage() {
           await disconnect(pendingDelete.id);
           const ok = await remove(pendingDelete.id);
           if (ok) {
+            toast.success("账户已删除");
             setPendingDelete(null);
           }
         }}

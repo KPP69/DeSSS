@@ -10,6 +10,7 @@ import {
   MultiSelectDropdown,
   SelectDropdown,
   StatCard,
+  Switch,
   Tooltip,
 } from "../components/ui";
 import PageState from "../components/PageState";
@@ -63,6 +64,7 @@ export default function UiShowcasePage() {
   const [modal, setModal] = useState(false);
   const [confirm, setConfirm] = useState(false);
   const [num, setNum] = useState("1234.56");
+  const [sw, setSw] = useState(true);
 
   return (
     <div>
@@ -185,6 +187,15 @@ export default function UiShowcasePage() {
           <div className="w-48"><StatCard title="总权益" value="$12,483.20" sub="全部账户" /></div>
           <div className="w-48"><StatCard title="今日盈亏" value="+$182.40" tone="profit" change={{ text: "+1.48% 今日", tone: "up" }} /></div>
           <div className="w-48"><StatCard title="今日盈亏" value="-$96.10" tone="loss" change={{ text: "-0.77% 今日", tone: "down" }} /></div>
+        </Row>
+      </Section>
+
+      <Section title="Switch — 开关（F3 新增）">
+        <Row label="sm / lg">
+          <Switch checked={sw} onChange={setSw} label="演示开关" />
+          <Switch checked={false} onChange={() => {}} label="演示开关（关）" />
+          <Switch checked disabled onChange={() => {}} label="演示开关（禁用）" />
+          <Switch size="lg" checked={sw} onChange={setSw} label="演示大开关" />
         </Row>
       </Section>
 

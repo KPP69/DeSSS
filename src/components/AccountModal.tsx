@@ -2,7 +2,8 @@ import React, { useEffect, useMemo, useState } from "react";
 import { useVenueSchemas } from "../hooks/useVenueSchemas";
 import type { AccountView, CredentialMap, VenueSchemaField } from "../lib/types";
 import { useAccountStore } from "../store/useAccountStore";
-import { Button, Modal, SelectDropdown } from "./ui";
+import { toast } from "../store/useToastStore";
+import { Button, Input, Modal, SelectDropdown } from "./ui";
 
 type Props = {
   open: boolean;
@@ -12,7 +13,8 @@ type Props = {
 };
 
 /**
- * Add / edit account modal, built on the shared Modal + SelectDropdown.
+ * Add / edit account modal, built on the shared Modal + SelectDropdown
+ * + Input (F3).
  *
  * The form is rendered entirely from the backend venue schemas
  * (Phase 2, I10): field order, required flag, number bounds,
@@ -21,6 +23,13 @@ type Props = {
  * added in Rust shows up here with no frontend change. Validation
  * is the frontend's basic intercept only (required + number bounds);
  * the backend re-checks everything.
+ *
+ * Errors: client-side validation shows under the field it belongs
+ * to. A backend failure is mapped to the field whose label the
+ * backend's own text names ("缺少必填项：主钱包地址" → the wallet
+ * field, "账户名不能为空" → the name field); anything unmappable
+ * shows at the bottom of the form. Every backend failure also
+ * toasts verbatim.
  *
  * Security notes (unchanged from phase 2):
  * - Secret inputs live only in this component's local state and are wiped
@@ -45,6 +54,16 @@ function validateField(field: VenueSchemaField, raw: string): string | null {
   return null;
 }
 
+/** Map a backend error to the field it names, if any. */
+function fieldForBackendError(
+  message: string,
+  fields: VenueSchemaField[],
+): string | null {
+  if (message.includes("账户名")) return "label";
+  const hit = fields.find((f) => message.includes(f.label));
+  return hit ? hit.key : null;
+}
+
 export default function AccountModal({ open, editing, onClose }: Props) {
   const create = useAccountStore((s) => s.create);
   const update = useAccountStore((s) => s.update);
@@ -54,6 +73,7 @@ export default function AccountModal({ open, editing, onClose }: Props) {
   const [label, setLabel] = useState("");
   const [exchangeId, setExchangeId] = useState("");
   const [values, setValues] = useState<Record<string, string>>({});
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [formError, setFormError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
@@ -71,6 +91,7 @@ export default function AccountModal({ open, editing, onClose }: Props) {
     setLabel("");
     setExchangeId("");
     setValues({});
+    setFieldErrors({});
     setFormError(null);
     setSubmitting(false);
   }
@@ -94,14 +115,14 @@ export default function AccountModal({ open, editing, onClose }: Props) {
     if (isEdit) return; // locked in edit mode (selector is disabled anyway)
     setExchangeId(id);
     setValues({}); // never reuse field values across exchanges
+    setFieldErrors({});
   }
 
   async function submit() {
+    setFieldErrors({});
     setFormError(null);
-    if (label.trim() === "") {
-      setFormError("请填写账户名");
-      return;
-    }
+    const errors: Record<string, string> = {};
+    if (label.trim() === "") errors.label = "请填写账户名";
     if (!def) {
       setFormError("交易所信息加载中，请稍后再试");
       return;
@@ -113,16 +134,24 @@ export default function AccountModal({ open, editing, onClose }: Props) {
       // Create always needs the full set; edit needs it once anything is typed.
       for (const f of fields) {
         const err = validateField(f, values[f.key] ?? "");
-        if (err) {
-          setFormError(isEdit ? `更新凭证时请填写完整：${err}` : err);
-          return;
+        if (err) errors[f.key] = err;
+      }
+      if (Object.keys(errors).length > 0) {
+        if (isEdit && errors.label === undefined) {
+          setFormError("更新凭证时请填写完整。");
         }
+        setFieldErrors(errors);
+        return;
       }
       credentials = {};
       for (const f of fields) {
         const raw = (values[f.key] ?? "").trim();
         credentials[f.key] = f.kind === "number" ? Number(raw) : raw;
       }
+    }
+    if (Object.keys(errors).length > 0) {
+      setFieldErrors(errors);
+      return;
     }
 
     setSubmitting(true);
@@ -131,14 +160,20 @@ export default function AccountModal({ open, editing, onClose }: Props) {
       : await create(label.trim(), def.id, credentials ?? {});
     setSubmitting(false);
     if (ok) {
+      toast.success(isEdit ? "账户已保存" : "账户已添加");
       close();
     } else {
-      setFormError(useAccountStore.getState().error ?? "保存失败");
+      const backendError = useAccountStore.getState().error ?? "保存失败";
+      toast.error(backendError);
+      const fieldKey = fieldForBackendError(backendError, fields);
+      if (fieldKey) {
+        setFieldErrors({ [fieldKey]: backendError });
+      } else {
+        setFormError(backendError);
+      }
     }
   }
 
-  const inputCls =
-    "w-full bg-ds-panel border border-ds-control-line rounded-lg px-3 h-8 text-ds-text-1 outline-none focus:border-ds-accent focus:ring-2 focus:ring-ds-focus-ring/50 disabled:bg-ds-bg-disabled disabled:text-ds-text-disabled";
   const labelCls = "block text-xs text-ds-text-2 mb-1";
 
   return (
@@ -151,8 +186,8 @@ export default function AccountModal({ open, editing, onClose }: Props) {
           <Button variant="secondary" onClick={close}>
             取消
           </Button>
-          <Button onClick={submit} disabled={submitting || (!def && !isEdit)}>
-            {submitting ? "保存中…" : isEdit ? "保存修改" : "添加账户"}
+          <Button onClick={submit} loading={submitting} disabled={!def && !isEdit}>
+            {isEdit ? "保存修改" : "添加账户"}
           </Button>
         </>
       }
@@ -162,11 +197,11 @@ export default function AccountModal({ open, editing, onClose }: Props) {
         <div className="space-y-4 min-w-0">
           <div>
             <label className={labelCls}>账户名</label>
-            <input
-              className={inputCls}
+            <Input
               value={label}
               onChange={(e) => setLabel(e.target.value)}
               placeholder="例如：主账户"
+              error={fieldErrors.label}
             />
           </div>
           <div>
@@ -212,13 +247,13 @@ export default function AccountModal({ open, editing, onClose }: Props) {
                   {f.label}
                   {f.required && <span className="text-ds-text-3"> *</span>}
                 </label>
-                <input
-                  className={inputCls}
+                <Input
                   type={f.kind === "password" ? "password" : f.kind === "number" ? "number" : "text"}
                   value={values[f.key] ?? ""}
                   autoComplete="off"
                   onChange={(e) => setValues((v) => ({ ...v, [f.key]: e.target.value }))}
                   placeholder={isEdit ? "留空保留原凭证" : undefined}
+                  error={fieldErrors[f.key]}
                 />
                 {f.hint && <p className="text-xs text-ds-text-3 mt-1">{f.hint}</p>}
               </div>
