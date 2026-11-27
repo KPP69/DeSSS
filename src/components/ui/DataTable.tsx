@@ -1,10 +1,15 @@
 import React from "react";
+import PageState from "../PageState";
 
 /**
- * Centered data table with a horizontal-scroll wrapper.
- * Headers and cells are always center-aligned; rows highlight on hover.
- * Pass body rows as `rows` (arrays of cell nodes) or as children <tbody>
- * content via `children` for full control (e.g. a pinned first row).
+ * Centered data table with a horizontal-scroll wrapper. Headers and
+ * cells are always center-aligned; rows highlight on hover. Pass body
+ * rows as `rows`, or children <tbody> for full control (pinned rows).
+ * Header: text-xs text-2, line-strong bottom border. Body rows are
+ * keyboard-reachable (tabIndex 0, focus-visible background — a ring
+ * does not render reliably on <tr>). Empty state is PageState.
+ * No sorting this round (F4). Numbers use tabular numerals (`.num`);
+ * alignment stays centered per the existing API.
  */
 export default function DataTable({
   headers,
@@ -37,7 +42,7 @@ export default function DataTable({
           </colgroup>
         )}
         <thead>
-          <tr>
+          <tr className="border-b border-ds-line-strong">
             {headers.map((h) => (
               <th
                 key={h}
@@ -53,11 +58,15 @@ export default function DataTable({
         <tbody>
           {children}
           {rows?.map((cells, i) => (
-            <tr key={i} className="border-t border-ds-line hover:bg-ds-hover transition-colors">
+            <tr
+              key={i}
+              tabIndex={0}
+              className="border-t border-ds-line hover:bg-ds-hover active:bg-ds-active focus-visible:bg-ds-hover focus-visible:outline-none transition-colors"
+            >
               {cells.map((cell, j) => (
                 <td
                   key={j}
-                  className={`text-center text-ds-text-1 ${compact ? "px-3 py-1.5 text-[13px]" : "px-4 py-3"}`}
+                  className={`num text-center text-ds-text-1 ${compact ? "px-3 py-1.5 text-[13px]" : "px-4 py-3"}`}
                 >
                   {cell}
                 </td>
@@ -66,11 +75,8 @@ export default function DataTable({
           ))}
           {isEmpty && (
             <tr className="border-t border-ds-line">
-              <td
-                colSpan={headers.length}
-                className="text-center px-4 py-8 text-ds-text-3"
-              >
-                {emptyText ?? "暂无数据"}
+              <td colSpan={headers.length} className="px-4 py-4">
+                <PageState empty>{emptyText ?? "暂无数据"}</PageState>
               </td>
             </tr>
           )}
@@ -81,7 +87,8 @@ export default function DataTable({
 }
 
 /** Shared centered cell classes for hand-built rows inside DataTable. */
-export const tdCls = "text-center px-4 py-3 text-ds-text-1";
-export const trCls = "border-t border-ds-line hover:bg-ds-hover transition-colors";
+export const tdCls = "num text-center px-4 py-3 text-ds-text-1";
+export const trCls =
+  "border-t border-ds-line hover:bg-ds-hover active:bg-ds-active focus-visible:bg-ds-hover focus-visible:outline-none transition-colors";
 /** Compact variant: tighter padding and smaller text for dense lists. */
-export const tdClsCompact = "text-center px-3 py-1.5 text-[13px] text-ds-text-1";
+export const tdClsCompact = "num text-center px-3 py-1.5 text-[13px] text-ds-text-1";

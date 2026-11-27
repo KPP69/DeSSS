@@ -2,29 +2,53 @@ import { create } from "zustand";
 
 /**
  * Toasts (F1): top-right, auto-dismiss after 3s, success / error.
- * A toast shows the message it is given verbatim — write-op failures
- * pass the backend's own error text, never a rewrite. At most 3 are
- * kept; a click dismisses early.
+ * Messages show verbatim — write-op failures pass the backend's own
+ * error text, never a rewrite. At most 3 visible at once; further
+ * pushes queue and are promoted (fresh 3s timer) as visible ones dismiss.
  */
 export type ToastKind = "success" | "error";
 export type ToastItem = { id: number; kind: ToastKind; message: string };
 
 let nextId = 1;
 
+const AUTO_DISMISS_MS = 3000;
+
 type S = {
   toasts: ToastItem[];
+  queue: ToastItem[];
   push: (kind: ToastKind, message: string) => void;
   dismiss: (id: number) => void;
 };
 
+function schedule(id: number) {
+  setTimeout(() => useToastStore.getState().dismiss(id), AUTO_DISMISS_MS);
+}
+
 export const useToastStore = create<S>((set, get) => ({
   toasts: [],
+  queue: [],
   push: (kind, message) => {
-    const id = nextId++;
-    set((s) => ({ toasts: [...s.toasts.slice(-2), { id, kind, message }] }));
-    setTimeout(() => get().dismiss(id), 3000);
+    const item = { id: nextId++, kind, message };
+    if (get().toasts.length < 3) {
+      set((s) => ({ toasts: [...s.toasts, item] }));
+      schedule(item.id);
+    } else {
+      set((s) => ({ queue: [...s.queue, item] }));
+    }
   },
-  dismiss: (id) => set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) })),
+  dismiss: (id) => {
+    const s = get();
+    if (!s.toasts.some((t) => t.id === id)) return;
+    const next = s.queue[0];
+    set({
+      toasts: s.toasts.filter((t) => t.id !== id),
+      queue: s.queue.slice(1),
+    });
+    if (next) {
+      set((s2) => ({ toasts: [...s2.toasts, next] }));
+      schedule(next.id);
+    }
+  },
 }));
 
 /** Call from anywhere (stores included): `toast.error(errText(e))`. */

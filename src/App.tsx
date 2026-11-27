@@ -9,6 +9,7 @@ import TradingPage from "./pages/TradingPage";
 import DataPage from "./pages/DataPage";
 import RiskPage from "./pages/RiskPage";
 import SystemPage from "./pages/SystemPage";
+import UiShowcasePage from "./pages/UiShowcasePage";
 
 const PAGE_TITLES: Record<PageKey, string> = {
   account: "账户",
@@ -17,9 +18,10 @@ const PAGE_TITLES: Record<PageKey, string> = {
   data: "数据",
   risk: "风控",
   system: "系统",
+  _ui: "组件一览",
 };
 
-const PAGE_KEYS: PageKey[] = ["account", "strategy", "trading", "data", "risk", "system"];
+const PAGE_KEYS: PageKey[] = ["account", "strategy", "trading", "data", "risk", "system", "_ui"];
 
 /** Shell + wiring. The current page is synced to the URL hash so a
  * refresh stays on the same page, and the runtime snapshot restores
@@ -57,6 +59,7 @@ export default function App() {
       {page === "data" && <DataPage />}
       {page === "risk" && <RiskPage />}
       {page === "system" && <SystemPage />}
+      {page === "_ui" && <UiShowcasePage />}
     </AppShell>
   );
 }

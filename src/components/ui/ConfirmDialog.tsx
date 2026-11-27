@@ -1,8 +1,10 @@
-import React from "react";
+import React, { useState } from "react";
 import Button from "./Button";
 import Modal from "./Modal";
 
-/** Unified second-confirmation dialog (never window.confirm). */
+/** Unified second-confirmation dialog (never window.confirm). While
+ * the confirm handler runs, both buttons are disabled (the confirm
+ * button shows its loading spinner). */
 export default function ConfirmDialog({
   open,
   title,
@@ -17,21 +19,30 @@ export default function ConfirmDialog({
   message: React.ReactNode;
   confirmText?: string;
   cancelText?: string;
-  onConfirm: () => void;
+  onConfirm: () => void | Promise<void>;
   onCancel: () => void;
 }) {
+  const [busy, setBusy] = useState(false);
+  const confirm = async () => {
+    setBusy(true);
+    try {
+      await onConfirm();
+    } finally {
+      setBusy(false);
+    }
+  };
   return (
     <Modal
       open={open}
       title={title}
       onClose={onCancel}
-      widthClass="w-[420px]"
+      size="sm"
       footer={
         <>
-          <Button variant="secondary" onClick={onCancel}>
+          <Button variant="secondary" onClick={onCancel} disabled={busy}>
             {cancelText}
           </Button>
-          <Button variant="danger" onClick={onConfirm}>
+          <Button variant="danger" onClick={confirm} loading={busy}>
             {confirmText}
           </Button>
         </>

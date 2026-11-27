@@ -11,7 +11,9 @@ type Pos = { top: number; left: number; width: number };
  * scrolls independently (max-h-56 + overflow-y-auto) and can never stretch
  * or be clipped by an ancestor's overflow. Supports mouse, outside-click
  * close, Esc, and ArrowUp/ArrowDown + Enter keyboard selection. While
- * open, its position tracks window scroll/resize.
+ * open, its position tracks window scroll/resize. Highlight uses the
+ * hover token; the selected option uses accent-soft/10. Options are
+ * arrow-key navigated (tabIndex -1); the trigger holds the tab stop.
  *
  * When `disabled`, the trigger is greyed out and cannot open (used for the
  * locked exchange selector in edit mode).
@@ -107,7 +109,7 @@ export default function SelectDropdown({
         onKeyDown={onTriggerKey}
         aria-haspopup="listbox"
         aria-expanded={open}
-        className={`w-full text-left h-8 px-3 rounded-lg border transition-colors focus:outline-none focus:ring-2 focus:ring-ds-focus-ring/50 ${
+        className={`w-full text-left h-8 px-3 rounded-lg border transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-ds-focus-ring/50 ${
           disabled
             ? "bg-ds-panel/50 border-ds-control-line text-ds-text-3 cursor-not-allowed"
             : "bg-ds-panel border-ds-control-line text-ds-text-1 hover:border-ds-text-3"
@@ -130,15 +132,20 @@ export default function SelectDropdown({
                 key={o.value}
                 type="button"
                 role="option"
+                tabIndex={-1}
                 aria-selected={o.value === value}
                 onMouseEnter={() => setHighlight(i)}
                 onClick={() => {
                   onChange(o.value);
                   close();
                 }}
-                className={`block w-full text-left px-3 py-2 ${
-                  i === highlight ? "bg-ds-accent-soft/10" : ""
-                } ${o.value === value ? "text-ds-text-1 font-medium" : "text-ds-text-1"}`}
+                className={`block w-full text-left px-3 py-2 text-ds-text-1 ${
+                  i === highlight
+                    ? "bg-ds-hover"
+                    : o.value === value
+                      ? "bg-ds-accent-soft/10"
+                      : ""
+                } ${o.value === value ? "font-medium" : ""}`}
               >
                 {o.label}
               </button>

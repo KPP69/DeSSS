@@ -15,6 +15,9 @@ type Tone =
 // Semantic tones carry meaning through the dot + the colored label together
 // (the text itself always says what the state is); neutral chrome is used
 // for plain labels such as configured.
+// The canonical tones are neutral / up / down / warn / info; online,
+// offline, configured and danger are aliases kept for existing pages
+// (F2 does not rewrite pages).
 const tones: Record<Tone, { cls: string; dot: string }> = {
   up: { cls: "text-ds-up border-ds-up/30 bg-ds-up-soft/10", dot: "bg-ds-up" },
   online: { cls: "text-ds-up border-ds-up/30 bg-ds-up-soft/10", dot: "bg-ds-up" },
@@ -29,15 +32,20 @@ const tones: Record<Tone, { cls: string; dot: string }> = {
 
 export default function Badge({
   tone = "neutral",
+  size = "sm",
   children,
 }: {
   tone?: Tone;
+  /** sm is the default (h-5, 11px); md is h-6, 12px. */
+  size?: "sm" | "md";
   children: React.ReactNode;
 }) {
   const t = tones[tone];
   return (
     <span
-      className={`inline-flex items-center gap-1 h-5 px-1.5 rounded-[5px] border text-[11px] leading-none ${t.cls}`}
+      className={`inline-flex items-center gap-1 rounded-[5px] border leading-none ${
+        size === "md" ? "h-6 px-2 text-xs" : "h-5 px-1.5 text-[11px]"
+      } ${t.cls}`}
     >
       <span className={`inline-block w-[5px] h-[5px] rounded-full shrink-0 ${t.dot}`} />
       {children}

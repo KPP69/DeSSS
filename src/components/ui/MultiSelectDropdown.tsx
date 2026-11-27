@@ -1,5 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import Badge from "./Badge";
+import Checkbox from "./Checkbox";
 import type { SelectOption } from "./SelectDropdown";
 
 type Pos = { top: number; left: number; width: number };
@@ -12,9 +14,10 @@ type Pos = { top: number; left: number; width: number };
  * options without ever stretching or being clipped by an ancestor's
  * overflow. The trigger shows a compact count (`交易所 (6/6) ▾`) and
  * never changes width as options are toggled. The menu stays open while
- * toggling; its header offers 全选 / 清空. Supports mouse, outside-click
- * close, Esc, and ArrowUp/ArrowDown + Enter/Space keyboard toggling.
- * While open, its position tracks window scroll/resize.
+ * toggling; its header offers 全选 / 清空. Selected rows show a 已选
+ * Badge; the check itself is the shared Checkbox. Supports mouse,
+ * outside-click close, Esc, and ArrowUp/ArrowDown + Enter/Space keyboard
+ * toggling. While open, its position tracks window scroll/resize.
  */
 export default function MultiSelectDropdown({
   options,
@@ -115,7 +118,7 @@ export default function MultiSelectDropdown({
         onKeyDown={onTriggerKey}
         aria-haspopup="listbox"
         aria-expanded={open}
-        className={`w-full text-left h-8 px-3 rounded-lg border transition-colors focus:outline-none focus:ring-2 focus:ring-ds-focus-ring/50 ${
+        className={`w-full text-left h-8 px-3 rounded-lg border transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-ds-focus-ring/50 ${
           disabled
             ? "bg-ds-panel/50 border-ds-control-line text-ds-text-3 cursor-not-allowed"
             : "bg-ds-panel border-ds-control-line text-ds-text-1 hover:border-ds-text-3"
@@ -141,7 +144,7 @@ export default function MultiSelectDropdown({
                 type="button"
                 onClick={selectAll}
                 disabled={allSelected}
-                className="text-xs text-ds-accent hover:underline disabled:text-ds-text-3 disabled:no-underline"
+                className="text-xs text-ds-accent hover:underline disabled:text-ds-text-3 disabled:no-underline rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ds-focus-ring/50"
               >
                 全选
               </button>
@@ -149,29 +152,38 @@ export default function MultiSelectDropdown({
                 type="button"
                 onClick={clearAll}
                 disabled={values.length === 0}
-                className="text-xs text-ds-text-2 hover:text-ds-text-1 disabled:text-ds-text-3"
+                className="text-xs text-ds-text-2 hover:text-ds-text-1 disabled:text-ds-text-3 rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ds-focus-ring/50"
               >
                 清空
               </button>
             </div>
             {options.map((o, i) => (
-              <label
+              <div
                 key={o.value}
                 role="option"
                 aria-selected={selected.has(o.value)}
                 onMouseEnter={() => setHighlight(i)}
+                onClick={() => toggle(o.value)}
                 className={`flex items-center gap-2 px-3 py-2 cursor-pointer text-ds-text-1 ${
-                  i === highlight ? "bg-ds-accent-soft/10" : ""
+                  i === highlight
+                    ? "bg-ds-hover"
+                    : selected.has(o.value)
+                      ? "bg-ds-accent-soft/10"
+                      : ""
                 }`}
               >
-                <input
-                  type="checkbox"
+                <Checkbox
                   checked={selected.has(o.value)}
                   onChange={() => toggle(o.value)}
-                  className="accent-ds-accent"
+                  onClick={(e) => e.stopPropagation()}
+                  label={<span className={selected.has(o.value) ? "font-medium" : ""}>{o.label}</span>}
                 />
-                <span className={selected.has(o.value) ? "font-medium" : ""}>{o.label}</span>
-              </label>
+                {selected.has(o.value) && (
+                  <span className="ml-auto">
+                    <Badge tone="up">已选</Badge>
+                  </span>
+                )}
+              </div>
             ))}
           </div>,
           document.body

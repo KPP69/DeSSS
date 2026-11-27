@@ -13,7 +13,7 @@ export default function Toast() {
           key={t.id}
           type="button"
           onClick={() => dismiss(t.id)}
-          className={`pointer-events-auto text-left rounded-lg border px-3 py-2 text-[13px] text-ds-text-1 shadow-card transition-colors ${
+          className={`pointer-events-auto text-left rounded-lg border px-3 py-2 text-[13px] text-ds-text-1 shadow-card transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-ds-focus-ring/50 ${
             t.kind === "error"
               ? "border-ds-down/60 bg-ds-down-soft/15"
               : "border-ds-up/60 bg-ds-up-soft/15"
