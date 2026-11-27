@@ -87,8 +87,10 @@ fn parse_lighter(
             min_notional: num_field(r, "min_quote_amount"),
             bid_px: None,
             ask_px: None,
-            // No bulk bid/ask in REST; last trade price is the closest
-            mid_px: num_field(r, "last_trade_price").or(mark_px),
+            // No bulk bid/ask in REST, and last_trade_price is not a
+            // mid: mid stays None until the BBO fill sets
+            // (bid + ask) / 2 (see Lighter enrich).
+            mid_px: None,
             mark_px,
             index_px: num_field(r, "index_price"),
             funding_rate_raw: funding_raw,
@@ -228,7 +230,7 @@ mod tests {
         assert_eq!(btc.step_size, Some(0.00001));
         assert_eq!(btc.min_notional, Some(10.0));
         assert_eq!(btc.bid_px, None);
-        assert_eq!(btc.mid_px, Some(58048.4));
+        assert_eq!(btc.mid_px, None);
         // 8h-equivalent rate 0.000088 -> 1h 0.000011.
         assert!((btc.funding_1h.unwrap() - 0.000011).abs() < 1e-12);
         assert_eq!(btc.funding_interval_hours, Some(1.0));

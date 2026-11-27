@@ -36,6 +36,8 @@ export type VenueSchema = {
   id: string;
   name: string;
   note?: string;
+  /** Phase 3.1: the venue can take orders (HL / Entropy only). */
+  supportsTrading: boolean;
   fields: VenueSchemaField[];
 };
 
@@ -111,7 +113,7 @@ export type CatalogRefresh = { count: number; updatedAt: number };
 
 /** Per-venue catalog status (PR-0.3): row count, newest row time, last error. */
 export type VenueCatalogStatus = { exchangeId: string; updatedAt: number | null; rows: number; error: string | null };
-export type CatalogStatus = { venues: VenueCatalogStatus[]; logDir: string };
+export type CatalogStatus = { venues: VenueCatalogStatus[]; logDir: string; dataDir: string };
 
 /** Risk gateway config: kill switch + hard limits (phase 5A §3). */
 export type RiskConfig = {
@@ -161,6 +163,8 @@ export type OrderInfo = {
   remainingQuantity: number;
   averageFillPrice: number | null;
   error: string | null;
+  /** Where the order came from: "manual", or "strategy:<id>". */
+  origin: string;
   createdAt: number;
   updatedAt: number;
 };
@@ -180,3 +184,47 @@ export type TradeInfo = {
   feeCurrency: string | null;
   timestamp: number;
 };
+
+/** Spread strategy (Phase 3.1): one leg = one account row. HL main
+ * and Entropy are two rows of the same wallet. */
+export type LegRef = { accountId: string; exchangeId: string; symbol: string };
+
+/** Mean-reversion spread parameters (all bps unless noted). */
+export type SpreadParams = {
+  midlineBps: number;
+  upperBps: number;
+  lowerBps: number;
+  persistSec: number;
+  takeFraction: number;
+  maxNotionalUsd: number;
+  feeBpsA: number;
+  feeBpsB: number;
+};
+
+export type StrategyInstance = {
+  id: string;
+  kind: string;
+  legA: LegRef;
+  legB: LegRef;
+  params: SpreadParams;
+  enabled: boolean;
+  createdAt: number;
+};
+
+/** One instance plus its live view state (Phase 3.1, commit 2). */
+export type StrategyView = StrategyInstance & {
+  lastEvalMs: number | null;
+  lastError: string | null;
+  ordersPlaced: number;
+};
+
+export type SaveStrategyInput = {
+  id?: string | null;
+  kind: string;
+  legA: LegRef;
+  legB: LegRef;
+  params: SpreadParams;
+  enabled: boolean;
+};
+
+export type SaveStrategyResult = { instance: StrategyInstance; warning: string | null };

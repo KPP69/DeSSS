@@ -1,6 +1,6 @@
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { AppInfo, AccountView, CredentialMap, OrderBook, AccountLive, LogEntry, RuntimeSnapshot, ProxyState, MarketInfo, CatalogRefresh, CatalogStatus, RiskConfig, DrawdownStatus, OrderInfo, TradeInfo, VenueSchema } from "./types";
+import type { AppInfo, AccountView, CredentialMap, OrderBook, AccountLive, LogEntry, RuntimeSnapshot, ProxyState, MarketInfo, CatalogRefresh, CatalogStatus, RiskConfig, DrawdownStatus, OrderInfo, TradeInfo, VenueSchema, StrategyView, StrategyInstance, SaveStrategyInput, SaveStrategyResult } from "./types";
 
 // Tauri 框架级英文报错翻译成中文（实机事故 2026-11-26：下单失败只显示
 // "invalid args input for command place_order: missing field account_id"，
@@ -98,6 +98,14 @@ export const api = {
     invoke<OrderInfo[]>("list_open_orders", { accountId }),
   listOrderRecords: () => invoke<OrderInfo[]>("list_order_records"),
   listOrderFills: () => invoke<TradeInfo[]>("list_order_fills"),
+  // Strategy (Phase 3.1): spread instances. save returns the stored
+  // instance plus a midline warning when one applies (a warning, not
+  // an error — the save succeeds).
+  listStrategies: () => invoke<StrategyView[]>("list_strategies"),
+  saveStrategy: (input: SaveStrategyInput) =>
+    invoke<SaveStrategyResult>("save_strategy", { input }),
+  setStrategyEnabled: (id: string, enabled: boolean) =>
+    invoke<StrategyInstance>("set_strategy_enabled", { id, enabled }),
   // Account center (phase 2). Credentials go to the Rust vault exactly once;
   // nothing secret is ever returned.
   listAccounts: () => invoke<AccountView[]>("list_accounts"),

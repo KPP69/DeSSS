@@ -123,6 +123,7 @@ pub struct VenueCatalogStatus {
 pub struct CatalogStatus {
     pub venues: Vec<VenueCatalogStatus>,
     pub log_dir: String,
+    pub data_dir: String,
 }
 
 #[tauri::command]
@@ -143,6 +144,7 @@ pub fn get_catalog_status(state: State<'_, Arc<AppState>>) -> CatalogStatus {
     CatalogStatus {
         venues,
         log_dir: state.paths.log_dir.display().to_string(),
+        data_dir: state.paths.data_dir.display().to_string(),
     }
 }
 

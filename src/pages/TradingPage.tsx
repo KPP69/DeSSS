@@ -35,6 +35,14 @@ const STATUS_LABEL: Record<string, string> = {
   unresolved: "未确认",
 };
 
+/** Where an order came from (Phase 3.1, commit 2): manual orders
+ * say 手动, strategy orders show the first 8 chars of the id. */
+function originLabel(origin: string): string {
+  if (origin === "manual") return "手动";
+  if (origin.startsWith("strategy:")) return `策略 ${origin.slice(9, 17)}`;
+  return origin;
+}
+
 function statusTone(status: string): "up" | "down" | "warn" | "info" | "neutral" {
   switch (status) {
     case "filled":
@@ -162,7 +170,7 @@ export default function TradingPage() {
       ) : (
         <div className="mb-6">
           <DataTable
-            headers={["账户", "交易对", "方向", "数量", "价格", "状态", "操作"]}
+            headers={["账户", "交易对", "方向", "数量", "价格", "状态", "来源", "操作"]}
             minWidth={760}
             rows={openOrders.map((o) => [
               <span key="a">{labelOf(o.accountId)}</span>,
@@ -175,6 +183,7 @@ export default function TradingPage() {
               <span key="st">
                 <Badge tone={statusTone(o.status)}>{STATUS_LABEL[o.status] ?? o.status}</Badge>
               </span>,
+              <span key="o">{originLabel(o.origin)}</span>,
               <span key="c">
                 <Button
                   variant="ghost"
@@ -221,7 +230,7 @@ export default function TradingPage() {
       ) : (
         <div className="mb-6">
           <DataTable
-            headers={["时间", "交易对", "方向", "数量", "价格", "已成交", "状态", "说明"]}
+            headers={["时间", "交易对", "方向", "数量", "价格", "已成交", "状态", "来源", "说明"]}
             minWidth={760}
             rows={records.slice(0, 20).map((o) => [
               <span key="t" className="num">
@@ -241,6 +250,7 @@ export default function TradingPage() {
               <span key="st">
                 <Badge tone={statusTone(o.status)}>{STATUS_LABEL[o.status] ?? o.status}</Badge>
               </span>,
+              <span key="o">{originLabel(o.origin)}</span>,
               <span key="e" className="text-ds-text-2">{o.error ?? ""}</span>,
             ])}
           />

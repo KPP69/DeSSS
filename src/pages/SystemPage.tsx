@@ -98,6 +98,9 @@ export default function SystemPage() {
               ))}
             </div>
             <div className="text-xs text-ds-text-3 mt-3 num break-all">
+              数据目录：{catalog.data.dataDir}
+            </div>
+            <div className="text-xs text-ds-text-3 mt-1 num break-all">
               日志目录：{catalog.data.logDir}
             </div>
           </>

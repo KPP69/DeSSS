@@ -79,7 +79,10 @@ fn parse_hyperliquid(
             min_notional: Some(10.0),
             bid_px: None,
             ask_px: None,
-            mid_px: num_field(ctx, "midPx"),
+            // The exchange's midPx is not used for display: mid is
+            // always (bid + ask) / 2 from the live BBO (see
+            // DataPage); index_px stays oraclePx.
+            mid_px: None,
             mark_px,
             index_px: num_field(ctx, "oraclePx"),
             funding_rate_raw: funding,

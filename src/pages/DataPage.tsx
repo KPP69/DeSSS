@@ -140,22 +140,44 @@ function MarketRows({
             {expandedKey === key && (
               <tr className="border-t border-ds-line bg-ds-panel-2/50">
                 <td colSpan={HEADERS.length} className="px-4 py-3 text-left">
-                  <div className="flex flex-wrap gap-x-5 gap-y-1 text-xs text-ds-text-2 num">
-                    <span>指数价：<span className="text-ds-text-1">{fmtPrice(m.indexPx, m.tickSize)}</span></span>
-                    <span>中间价：<span className="text-ds-text-1">{fmtPrice(m.midPx, m.tickSize)}</span></span>
-                    <span>原始费率：<span className="text-ds-text-1">{m.fundingRateRaw == null ? "—" : `${m.fundingRateRaw >= 0 ? "+" : ""}${(m.fundingRateRaw * 100).toFixed(4)}%`}</span></span>
-                    <span>结算周期：<span className="text-ds-text-1">{m.fundingIntervalHours == null ? "—" : `${m.fundingIntervalHours}h`}</span></span>
-                    <span>价格步长：<span className="text-ds-text-1">{fmtStep(m.tickSize)}</span></span>
-                    <span>数量步长：<span className="text-ds-text-1">{fmtStep(m.stepSize)}</span></span>
-                    <span>最小名义：<span className="text-ds-text-1">{m.minNotional == null ? "—" : `$${fmtStep(m.minNotional)}`}</span></span>
-                    <span>结算币种：<span className="text-ds-text-1">{m.settlementCurrency}</span></span>
-                    <span>24h成交额：<span className="text-ds-text-1">{fmtUsdCompact(m.volume24hUsd)}</span></span>
-                    <span>持仓量：<span className="text-ds-text-1">{fmtUsdCompact(m.openInterestUsd)}</span></span>
-                    <span>下次结算：<span className="text-ds-text-1">{fmtTime(m.nextFundingTime)}</span></span>
-                    <span>更新：<span className="text-ds-text-1">{fmtClock(m.updatedAt)}</span></span>
-                    {liveFresh && (
-                      <span>盘口：<span className="text-ds-text-1">实时 {fmtClock(book.ts)}</span></span>
-                    )}
+                  {/* 2x7 detail grid (Phase 3.1, commit 2): value above
+                   * label, one cell per field. Mid is always
+                   * (bid + ask) / 2 from the live book — never the
+                   * catalog midPx, which no longer carries a value. */}
+                  <div className="flex flex-wrap gap-y-3 text-xs num">
+                    {(
+                      [
+                        ["指数价", fmtPrice(m.indexPx, m.tickSize)],
+                        ["持仓量", fmtUsdCompact(m.openInterestUsd)],
+                        [
+                          "资金费率",
+                          m.fundingRateRaw == null
+                            ? "—"
+                            : `${m.fundingRateRaw >= 0 ? "+" : ""}${(m.fundingRateRaw * 100).toFixed(4)}%`,
+                        ],
+                        ["价格步长", fmtStep(m.tickSize)],
+                        ["最小名义", m.minNotional == null ? "—" : `$${fmtStep(m.minNotional)}`],
+                        ["费率周期", m.fundingIntervalHours == null ? "—" : `${m.fundingIntervalHours}h`],
+                        ["盘口更新", liveFresh ? fmtClock(book.ts) : "—"],
+                        [
+                          "中间价",
+                          liveFresh && book.bids[0]?.[0] != null && book.asks[0]?.[0] != null
+                            ? fmtPrice((book.bids[0][0] + book.asks[0][0]) / 2, m.tickSize)
+                            : "—",
+                        ],
+                        ["成交额", fmtUsdCompact(m.volume24hUsd)],
+                        ["下次结算", fmtTime(m.nextFundingTime)],
+                        ["数量步长", fmtStep(m.stepSize)],
+                        ["最大杠杆", m.maxLeverage == null ? "—" : `${m.maxLeverage}x`],
+                        ["结算币种", m.settlementCurrency],
+                        ["目录更新", fmtClock(m.updatedAt)],
+                      ] as [string, string][]
+                    ).map(([label, value]) => (
+                      <div key={label} className="w-28 shrink-0">
+                        <div className="text-ds-text-1">{value}</div>
+                        <div className="text-ds-text-2">{label}</div>
+                      </div>
+                    ))}
                   </div>
                 </td>
               </tr>
