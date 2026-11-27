@@ -40,6 +40,8 @@ pub async fn place_order(
             order_type: input.order_type,
             quantity: input.quantity,
             price: input.price,
+            reduce_only: false,
+            origin: "manual".to_string(),
         },
     )
     .await

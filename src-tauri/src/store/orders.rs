@@ -155,6 +155,10 @@ impl OrderStore {
                 if merged.quantity == 0.0 {
                     merged.quantity = stored.quantity;
                 }
+                // Origin is local bookkeeping, never exchange state:
+                // a query result must not overwrite it (a strategy
+                // order stays "strategy:<id>" after reconciliation).
+                merged.origin = stored.origin.clone();
                 // F4: leaving Unresolved for a terminal state clears
                 // the strike entry, whatever path applied the update.
                 if stored.status == OrderStatus::Unresolved && merged.status.is_terminal() {

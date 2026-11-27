@@ -132,6 +132,12 @@ pub trait Venue: Send + Sync {
         &self,
         creds: &serde_json::Map<String, serde_json::Value>,
     ) -> Result<String, String>;
+    /// Whether this venue can take orders today (the strategy
+    /// runner and the Strategy page only offer trading venues).
+    /// Default false; Hyperliquid / Entropy override to true.
+    fn supports_trading(&self) -> bool {
+        false
+    }
     /// Validate the credentials and build a connected account's
     /// runtime handle.
     fn build(
@@ -270,6 +276,7 @@ pub struct VenueSchema {
     pub name: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<&'static str>,
+    pub supports_trading: bool,
     pub fields: Vec<VenueSchemaField>,
 }
 
@@ -284,6 +291,7 @@ pub fn venue_schemas() -> Vec<VenueSchema> {
             id: v.id(),
             name: v.display_name(),
             note: v.note(),
+            supports_trading: v.supports_trading(),
             fields: v
                 .credentials()
                 .iter()
@@ -387,5 +395,12 @@ mod tests {
         assert_eq!(first["name"], "Hyperliquid");
         assert_eq!(first["fields"][1]["kind"], "password");
         assert!(first.get("note").is_none() || first["note"].is_null());
+        // Only Hyperliquid / Entropy take orders (Phase 3.1): the
+        // Strategy page filters its exchange dropdown on this flag.
+        assert!(schemas[0].supports_trading);
+        assert!(schemas[1].supports_trading);
+        assert!(schemas[2..].iter().all(|s| !s.supports_trading));
+        assert_eq!(v[1]["supportsTrading"], true);
+        assert_eq!(v[2]["supportsTrading"], false);
     }
 }

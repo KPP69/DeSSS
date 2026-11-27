@@ -62,6 +62,11 @@ pub struct PlaceIntent {
     pub order_type: String,
     pub quantity: f64,
     pub price: f64,
+    /// Reduce-only (strategy fill-balancing): may only shrink the
+    /// position. Manual orders always pass false.
+    pub reduce_only: bool,
+    /// "manual", or "strategy:<id>" — carried onto the order record.
+    pub origin: String,
 }
 
 fn log(deps: &ExecDeps, level: &str, message: String) {
@@ -181,6 +186,7 @@ pub async fn place_order(deps: &ExecDeps, intent: PlaceIntent) -> Result<OrderIn
         remaining_quantity: aligned_qty.to_f64().unwrap_or(0.0),
         average_fill_price: None,
         error: None,
+        origin: intent.origin.clone(),
         created_at: now,
         updated_at: now,
     };
@@ -286,6 +292,7 @@ pub async fn place_order(deps: &ExecDeps, intent: PlaceIntent) -> Result<OrderIn
         quantity: aligned_qty.to_f64().unwrap_or(0.0),
         price: Some(aligned_price.to_f64().unwrap_or(0.0)),
         client_order_id: Some(cloid.clone()),
+        reduce_only: intent.reduce_only,
     };
     info.transition(OrderStatus::Submitted, crate::core::util::now_ms())
         .ok();
@@ -530,6 +537,7 @@ pub async fn cancel_order(
                 remaining_quantity: 0.0,
                 average_fill_price: None,
                 error: None,
+                origin: "manual".to_string(),
                 created_at: crate::core::util::now_ms(),
                 updated_at: crate::core::util::now_ms(),
             },
@@ -608,6 +616,9 @@ fn merge_open_orders(
                 remaining_quantity: o.quantity,
                 average_fill_price: None,
                 error: None,
+                // Imported from the exchange (e.g. placed on the
+                // website): a human order, never a strategy order.
+                origin: "manual".to_string(),
                 created_at: o.ts,
                 updated_at: o.ts,
             }
@@ -774,6 +785,7 @@ mod tests {
             remaining_quantity: 0.01,
             average_fill_price: None,
             error: None,
+            origin: "manual".to_string(),
             created_at: 1000,
             updated_at: 1000,
         }
@@ -882,6 +894,8 @@ mod tests {
                 order_type: "limit".to_string(),
                 quantity: 0.01,
                 price: 90000.0,
+                reduce_only: false,
+                origin: "manual".to_string(),
             },
         )
         .await
@@ -920,6 +934,8 @@ mod tests {
                 order_type: "limit".to_string(),
                 quantity: 0.01,
                 price: 90000.0,
+                reduce_only: false,
+                origin: "manual".to_string(),
             },
         )
         .await

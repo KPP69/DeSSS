@@ -10,7 +10,7 @@ pub mod net;
 pub mod portable;
 pub mod risk;
 pub mod store;
-pub mod strategy_engine;
+pub mod strategy;
 pub mod vault;
 pub mod venues;
 
@@ -36,6 +36,9 @@ pub struct AppState {
     /// In-memory order records + fills (the execution engine owns
     /// it; the exchange is the source of truth).
     pub orders: Arc<OrderStore>,
+    /// Per-instance strategy runtime stats (memory only; the runner
+    /// writes them, `list_strategies` reads them).
+    pub strategy_stats: crate::strategy::StrategyStatsMap,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -72,6 +75,7 @@ pub fn run() {
     // truth while the app runs.
     let risk = Arc::new(RiskGateway::new(RiskConfig::load(&db)));
     let orders = Arc::new(OrderStore::new());
+    let strategy_stats = crate::strategy::StrategyStatsMap::default();
     let state = Arc::new(AppState {
         paths,
         bus,
@@ -82,11 +86,13 @@ pub fn run() {
         streams,
         risk,
         orders,
+        strategy_stats,
     });
     let s2 = state.clone();
     let sampler_state = state.clone();
     let sync_state = state.clone();
     let catalog_state = state.clone();
+    let strategy_state = state.clone();
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(state)
@@ -184,6 +190,27 @@ pub fn run() {
                     }
                 });
             }
+            // Strategy runner (Phase 3.1): one task, 200ms rounds
+            // over the enabled spread instances. Same spawn rule as
+            // the sampler above.
+            {
+                let state = strategy_state.clone();
+                tauri::async_runtime::spawn(async move {
+                    let deps = crate::strategy::runner::RunnerDeps::new(
+                        crate::execution::ExecDeps {
+                            risk: state.risk.clone(),
+                            orders: state.orders.clone(),
+                            sync: state.sync.clone(),
+                            streams: state.streams.clone(),
+                            catalog: state.catalog.clone(),
+                            bus: state.bus.clone(),
+                        },
+                        state.db.clone(),
+                        state.strategy_stats.clone(),
+                    );
+                    crate::strategy::runner::run(deps).await;
+                });
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -212,7 +239,10 @@ pub fn run() {
             commands::orders::cancel_order,
             commands::orders::list_open_orders,
             commands::orders::list_order_records,
-            commands::orders::list_order_fills
+            commands::orders::list_order_fills,
+            commands::strategy::list_strategies,
+            commands::strategy::save_strategy,
+            commands::strategy::set_strategy_enabled
         ])
         .run(tauri::generate_context!())
         .expect("error while running DeSSS");

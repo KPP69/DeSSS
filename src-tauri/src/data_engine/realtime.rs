@@ -433,6 +433,14 @@ impl RealtimeEngine {
         self.bus.publish(AppEvent::Book(book));
     }
 
+    /// Test-only seam: record a book as if a frame just arrived, so
+    /// `wait_for_first_frame` / `is_stale` see it without a live
+    /// stream. Production code never calls this.
+    #[cfg(test)]
+    pub fn inject_book(&self, key: &StreamKey, book: OrderBook) {
+        self.publish(key, book);
+    }
+
     /// Parse one text frame for the stream's exchange. Pure except for
     /// the warning logs on gaps / degraded snapshots.
     fn handle_frame(

@@ -168,6 +168,12 @@ impl Venue for HyperliquidVenue {
     fn id(&self) -> &'static str {
         self.id
     }
+    /// Hyperliquid main and Entropy both take real orders (Phase
+    /// 3.1): the strategy runner and the Strategy page offer only
+    /// these two venues.
+    fn supports_trading(&self) -> bool {
+        true
+    }
 
     fn display_name(&self) -> &'static str {
         match self.id {

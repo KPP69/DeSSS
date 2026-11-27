@@ -45,6 +45,11 @@ pub struct OrderRequest {
     pub quantity: f64,
     pub price: Option<f64>,
     pub client_order_id: Option<String>,
+    /// Reduce-only: the order may only shrink the position, never
+    /// grow or flip it. The strategy runner's fill-balancing orders
+    /// set it; manual orders never do.
+    #[serde(default)]
+    pub reduce_only: bool,
 }
 
 /// The `place_order` command's input, exactly as the Trading page sends
@@ -162,6 +167,11 @@ pub struct OrderInfo {
     pub average_fill_price: Option<f64>,
     /// Last rejection / failure / reconciliation note, if any.
     pub error: Option<String>,
+    /// Where the order came from: "manual", or "strategy:<id>" for a
+    /// strategy order. Set at placement, never changed by
+    /// reconciliation (the exchange never reports it).
+    #[serde(default)]
+    pub origin: String,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -416,6 +426,7 @@ mod tests {
             remaining_quantity: 0.01,
             average_fill_price: None,
             error: None,
+            origin: "manual".to_string(),
             created_at: 0,
             updated_at: 0,
         }
@@ -588,6 +599,7 @@ mod tests {
             "{json}"
         );
         assert!(json.contains("\"filledQuantity\""), "{json}");
+        assert!(json.contains("\"origin\":\"manual\""), "{json}");
         assert!(!json.contains("client_order_id"), "{json}");
         assert!(!json.contains("filled_quantity"), "{json}");
     }

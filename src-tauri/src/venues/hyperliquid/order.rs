@@ -116,6 +116,10 @@ fn parse_order_status_response(
         remaining_quantity: remaining,
         average_fill_price: avg,
         error: None,
+        // A queried record carries no origin; the caller keeps the
+        // stored one (see `apply_query`). "manual" is only the
+        // placeholder for a record the store has never seen.
+        origin: "manual".to_string(),
         created_at: o["timestamp"].as_i64().unwrap_or(0),
         updated_at: inner["statusTimestamp"].as_i64().unwrap_or(0),
     })
@@ -448,7 +452,7 @@ impl ExchangeAdapter for HyperliquidAdapter {
                     ("b", Mp::Bool(req.side == "buy")),
                     ("p", Mp::Str(&price_wire)),
                     ("s", Mp::Str(&qty_wire)),
-                    ("r", Mp::Bool(false)),
+                    ("r", Mp::Bool(req.reduce_only)),
                     (
                         "t",
                         Mp::Map(vec![("limit", Mp::Map(vec![("tif", Mp::Str(tif))]))]),
@@ -465,7 +469,7 @@ impl ExchangeAdapter for HyperliquidAdapter {
                 "b": req.side == "buy",
                 "p": price_wire,
                 "s": qty_wire,
-                "r": false,
+                "r": req.reduce_only,
                 "t": {"limit": {"tif": tif}},
                 "c": cloid,
             }],
