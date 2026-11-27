@@ -59,6 +59,22 @@ fn map_order_status(s: &str) -> OrderStatus {
 /// is the volume-weighted average fill price from the fills query
 /// (None when the order never filled or the fills query failed — the
 /// caller falls back to the limit price and logs it).
+/// TP/SL purpose from the exchange's human-readable order type
+/// ("Take Profit Market" / "Stop Loss Market"); None when the type
+/// does not say — plain `openOrders` reports "Trigger Market",
+/// which carries no tp/sl, so the caller derives it from the
+/// position or keeps the placement intent's value (see
+/// `apply_query`).
+fn tpsl_from_order_type(order_type: &str) -> Option<String> {
+    if order_type.contains("Take Profit") {
+        Some("tp".to_string())
+    } else if order_type.contains("Stop") {
+        Some("sl".to_string())
+    } else {
+        None
+    }
+}
+
 fn parse_order_status_response(
     v: &Value,
     exchange_id: &str,
@@ -92,10 +108,18 @@ fn parse_order_status_response(
         None
     };
     let tif = o["tif"].as_str().unwrap_or("Gtc");
-    let order_type = match tif {
-        "Alo" => "post_only",
-        "Ioc" => "ioc",
-        _ => "limit",
+    // A trigger order's TIF is meaningless (it fires at market);
+    // record it as "trigger" so the type tells the truth.
+    let is_trigger = o["isTrigger"].as_bool().unwrap_or(false);
+    let order_type = if is_trigger {
+        "trigger".to_string()
+    } else {
+        match tif {
+            "Alo" => "post_only",
+            "Ioc" => "ioc",
+            _ => "limit",
+        }
+        .to_string()
     };
     Ok(OrderInfo {
         order_id: o["oid"].as_u64().map(|n| n.to_string()).unwrap_or_default(),
@@ -108,7 +132,7 @@ fn parse_order_status_response(
         account_id: account_id.to_string(),
         symbol: o["coin"].as_str().unwrap_or("").to_string(),
         side: hl_side_to_side(o["side"].as_str().unwrap_or("B")),
-        order_type: order_type.to_string(),
+        order_type,
         status,
         price: Some(limit_px),
         quantity: orig_sz,
@@ -116,6 +140,16 @@ fn parse_order_status_response(
         remaining_quantity: remaining,
         average_fill_price: avg,
         error: None,
+        trigger_px: if is_trigger {
+            Some(f64_from(&o["triggerPx"])).filter(|p| *p > 0.0)
+        } else {
+            None
+        },
+        tpsl: if is_trigger {
+            tpsl_from_order_type(o["orderType"].as_str().unwrap_or(""))
+        } else {
+            None
+        },
         // A queried record carries no origin; the caller keeps the
         // stored one (see `apply_query`). "manual" is only the
         // placeholder for a record the store has never seen.
@@ -134,6 +168,7 @@ fn parse_open_orders(v: &Value, exchange_id: &str, account_id: &str) -> Result<V
         .iter()
         .filter_map(|o| {
             let oid = o["oid"].as_u64()?;
+            let is_trigger = o["isTrigger"].as_bool().unwrap_or(false);
             Some(Order {
                 order_id: oid.to_string(),
                 // The exchange returns the cloid when the order was
@@ -146,11 +181,25 @@ fn parse_open_orders(v: &Value, exchange_id: &str, account_id: &str) -> Result<V
                 account_id: account_id.to_string(),
                 symbol: o["coin"].as_str().unwrap_or("").to_string(),
                 side: hl_side_to_side(o["side"].as_str().unwrap_or("B")),
-                order_type: "limit".to_string(),
+                order_type: if is_trigger {
+                    "trigger".to_string()
+                } else {
+                    "limit".to_string()
+                },
                 quantity: f64_from(&o["sz"]),
                 price: Some(f64_from(&o["limitPx"])),
                 status: OrderStatus::Open,
                 ts: o["timestamp"].as_i64().unwrap_or(0),
+                trigger_px: if is_trigger {
+                    Some(f64_from(&o["triggerPx"])).filter(|p| *p > 0.0)
+                } else {
+                    None
+                },
+                tpsl: if is_trigger {
+                    tpsl_from_order_type(o["orderType"].as_str().unwrap_or(""))
+                } else {
+                    None
+                },
             })
         })
         .collect())
@@ -200,6 +249,91 @@ fn dex_offset_for(names: &[String], dex: &str) -> Option<u32> {
         .iter()
         .position(|n| n == dex)
         .map(|pos| 110_000 + pos as u32 * 10_000)
+}
+
+/// The wire "t" value: a limit order carries its TIF; a trigger
+/// order carries isMarket / triggerPx / tpsl (HL docs: the "t" object
+/// is either {"limit": {"tif": ...}} or {"trigger": {...}}).
+pub(crate) enum OrderTypeWire<'a> {
+    Limit(&'a str),
+    Trigger {
+        is_market: bool,
+        trigger_px: &'a str,
+        tpsl: &'a str,
+    },
+}
+
+/// Build the signed order action — msgpack form (for the signature)
+/// and JSON form (for the POST body) — from the already-wired
+/// strings. Key order follows the official SDK
+/// (`order_request_to_order_wire` / `order_wires_to_order_action`):
+/// a, b, p, s, r, t, c inside each order; type, orders, grouping
+/// outside. Grouping follows the variant: a trigger order is a
+/// position TP/SL ("positionTpsl"), a plain order is ungrouped ("na").
+/// The golden-vector test in `core::signing` covers this builder
+/// against the SDK's own bytes, so a key-order slip here fails loudly.
+pub(crate) fn build_order_action<'a>(
+    asset: u32,
+    is_buy: bool,
+    price: &'a str,
+    qty: &'a str,
+    reduce_only: bool,
+    order_type: OrderTypeWire<'a>,
+    cloid: &'a str,
+) -> (Mp<'a>, serde_json::Value) {
+    let (t_mp, t_json, grouping) = match order_type {
+        OrderTypeWire::Limit(tif) => (
+            Mp::Map(vec![("limit", Mp::Map(vec![("tif", Mp::Str(tif))]))]),
+            serde_json::json!({"limit": {"tif": tif}}),
+            "na",
+        ),
+        OrderTypeWire::Trigger {
+            is_market,
+            trigger_px,
+            tpsl,
+        } => (
+            Mp::Map(vec![(
+                "trigger",
+                Mp::Map(vec![
+                    ("isMarket", Mp::Bool(is_market)),
+                    ("triggerPx", Mp::Str(trigger_px)),
+                    ("tpsl", Mp::Str(tpsl)),
+                ]),
+            )]),
+            serde_json::json!({"trigger": {"isMarket": is_market, "triggerPx": trigger_px, "tpsl": tpsl}}),
+            "positionTpsl",
+        ),
+    };
+    let action_mp = Mp::Map(vec![
+        ("type", Mp::Str("order")),
+        (
+            "orders",
+            Mp::Array(vec![Mp::Map(vec![
+                ("a", Mp::UInt(asset as u64)),
+                ("b", Mp::Bool(is_buy)),
+                ("p", Mp::Str(price)),
+                ("s", Mp::Str(qty)),
+                ("r", Mp::Bool(reduce_only)),
+                ("t", t_mp),
+                ("c", Mp::Str(cloid)),
+            ])]),
+        ),
+        ("grouping", Mp::Str(grouping)),
+    ]);
+    let action_json = serde_json::json!({
+        "type": "order",
+        "orders": [{
+            "a": asset,
+            "b": is_buy,
+            "p": price,
+            "s": qty,
+            "r": reduce_only,
+            "t": t_json,
+            "c": cloid,
+        }],
+        "grouping": grouping,
+    });
+    (action_mp, action_json)
 }
 
 impl HyperliquidAdapter {
@@ -425,16 +559,6 @@ impl ExchangeAdapter for HyperliquidAdapter {
         if req.quantity <= 0.0 {
             return Err(VenueError::rejected("下单数量必须大于 0".to_string()));
         }
-        let tif = match req.order_type.as_str() {
-            "limit" => "Gtc",
-            "post_only" => "Alo",
-            "ioc" => "Ioc",
-            other => {
-                return Err(VenueError::rejected(format!(
-                    "不支持的订单类型：{other}（仅支持 limit / post_only / ioc）"
-                )))
-            }
-        };
         let price_wire = decimal_to_wire(price).map_err(VenueError::rejected)?;
         let qty_wire = decimal_to_wire(req.quantity).map_err(VenueError::rejected)?;
         let cloid = req
@@ -442,39 +566,58 @@ impl ExchangeAdapter for HyperliquidAdapter {
             .clone()
             .filter(|c| !c.is_empty())
             .unwrap_or_else(signing::generate_cloid);
+        // A trigger price turns this into a trigger (TP/SL) order:
+        // the wire "t" is the trigger variant and grouping is
+        // "positionTpsl" (tied to the position, not to an entry
+        // order). "p" stays the reference / worst-acceptable price —
+        // the caller sends it equal to the trigger price. Without a
+        // trigger price this is a plain limit order with its TIF.
+        // Declared without an initial value: only the trigger arm
+        // assigns it, and only there is it borrowed (the enum carries
+        // the borrow into build_order_action below). No dummy empty
+        // string, no assignment that is never read.
+        let trigger_px_wire: String;
+        let order_type = if let Some(tp) = req.trigger_px {
+            if !(tp > 0.0) {
+                return Err(VenueError::rejected("触发价必须大于 0".to_string()));
+            }
+            let tpsl = match req.tpsl.as_deref() {
+                Some("tp") | Some("sl") => req.tpsl.as_deref().unwrap(),
+                _ => {
+                    return Err(VenueError::rejected(
+                        "触发单必须指定 tpsl 为 tp 或 sl".to_string(),
+                    ))
+                }
+            };
+            trigger_px_wire = decimal_to_wire(tp).map_err(VenueError::rejected)?;
+            OrderTypeWire::Trigger {
+                is_market: req.is_market.unwrap_or(true),
+                trigger_px: &trigger_px_wire,
+                tpsl,
+            }
+        } else {
+            let tif = match req.order_type.as_str() {
+                "limit" => "Gtc",
+                "post_only" => "Alo",
+                "ioc" => "Ioc",
+                other => {
+                    return Err(VenueError::rejected(format!(
+                        "不支持的订单类型：{other}（仅支持 limit / post_only / ioc）"
+                    )))
+                }
+            };
+            OrderTypeWire::Limit(tif)
+        };
         let nonce = NonceAllocator::next(&agent_addr);
-        let action_mp = Mp::Map(vec![
-            ("type", Mp::Str("order")),
-            (
-                "orders",
-                Mp::Array(vec![Mp::Map(vec![
-                    ("a", Mp::UInt(asset as u64)),
-                    ("b", Mp::Bool(req.side == "buy")),
-                    ("p", Mp::Str(&price_wire)),
-                    ("s", Mp::Str(&qty_wire)),
-                    ("r", Mp::Bool(req.reduce_only)),
-                    (
-                        "t",
-                        Mp::Map(vec![("limit", Mp::Map(vec![("tif", Mp::Str(tif))]))]),
-                    ),
-                    ("c", Mp::Str(&cloid)),
-                ])]),
-            ),
-            ("grouping", Mp::Str("na")),
-        ]);
-        let action_json = serde_json::json!({
-            "type": "order",
-            "orders": [{
-                "a": asset,
-                "b": req.side == "buy",
-                "p": price_wire,
-                "s": qty_wire,
-                "r": req.reduce_only,
-                "t": {"limit": {"tif": tif}},
-                "c": cloid,
-            }],
-            "grouping": "na",
-        });
+        let (action_mp, action_json) = build_order_action(
+            asset,
+            req.side == "buy",
+            &price_wire,
+            &qty_wire,
+            req.reduce_only,
+            order_type,
+            &cloid,
+        );
         let v = self.post_exchange(action_json, &action_mp, nonce).await?;
         if v["status"].as_str() == Some("err") {
             return Err(VenueError::rejected(format!(
@@ -519,6 +662,8 @@ impl ExchangeAdapter for HyperliquidAdapter {
             price: Some(price),
             status,
             ts: now_ms(),
+            trigger_px: req.trigger_px,
+            tpsl: req.tpsl,
         })
     }
 
@@ -668,6 +813,53 @@ mod tests {
                     .map(|s| s.to_string())
             })
             .collect()
+    }
+
+    #[test]
+    fn decimal_to_wire_normalizes_like_the_sdk() {
+        // The golden vector's strings ("90000", not "90000.0") must
+        // be the ones this encoder emits, or the vector proves
+        // nothing about the production path.
+        assert_eq!(decimal_to_wire(90000.0).unwrap(), "90000");
+        assert_eq!(decimal_to_wire(0.01).unwrap(), "0.01");
+        assert_eq!(decimal_to_wire(90000.5).unwrap(), "90000.5");
+    }
+
+    #[test]
+    fn open_orders_parse_trigger_orders() {
+        // A position TP/SL resting on the book: the frontend shows
+        // it as the position's protection and the protect flow
+        // cancels it by oid. The second row is what plain
+        // openOrders reports for a trigger ("Trigger Market" carries
+        // no tp/sl) — tpsl stays None and the frontend derives it.
+        let v = serde_json::json!([
+            {
+                "coin": "BTC", "side": "A", "limitPx": "91000.0",
+                "sz": "0.01", "oid": 7, "timestamp": 1724361546645i64,
+                "triggerCondition": "Mark price >= 91000.0",
+                "isTrigger": true, "triggerPx": "91000.0",
+                "children": [], "isPositionTpsl": true,
+                "reduceOnly": true, "orderType": "Take Profit Market",
+                "cloid": "0x1234567890abcdef1234567890abcdef"
+            },
+            {
+                "coin": "BTC", "side": "A", "limitPx": "89000.0",
+                "sz": "0.01", "oid": 8, "timestamp": 1724361546645i64,
+                "triggerCondition": "Mark price <= 89000.0",
+                "isTrigger": true, "triggerPx": "89000.0",
+                "children": [], "isPositionTpsl": true,
+                "reduceOnly": true, "orderType": "Trigger Market",
+                "cloid": null
+            }
+        ]);
+        let orders = parse_open_orders(&v, "hyperliquid", "acc-1").unwrap();
+        assert_eq!(orders.len(), 2);
+        assert_eq!(orders[0].order_type, "trigger");
+        assert_eq!(orders[0].trigger_px, Some(91000.0));
+        assert_eq!(orders[0].tpsl.as_deref(), Some("tp"));
+        assert_eq!(orders[1].order_type, "trigger");
+        assert_eq!(orders[1].trigger_px, Some(89000.0));
+        assert_eq!(orders[1].tpsl, None);
     }
 
     #[test]

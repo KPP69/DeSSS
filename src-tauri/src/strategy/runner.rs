@@ -199,6 +199,10 @@ fn to_exec_intent(
         quantity: intent.quantity,
         price: intent.price,
         reduce_only,
+        // The strategy never places trigger orders: no TP/SL legs.
+        trigger_px: None,
+        tpsl: None,
+        is_market: None,
         origin: origin.to_string(),
     }
 }

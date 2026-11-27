@@ -91,6 +91,14 @@ export const api = {
     orderType: string;
     quantity: number;
     price: number;
+    /** Reduce-only: close / TP/SL (PR-3.1.1). */
+    reduceOnly?: boolean;
+    /** Trigger price: when set, a TP/SL trigger order. */
+    triggerPx?: number;
+    /** Trigger purpose: "tp" | "sl". */
+    tpsl?: "tp" | "sl";
+    /** Execute at market after the trigger (default true). */
+    isMarket?: boolean;
   }) => invoke<OrderInfo>("place_order", { input }),
   cancelOrder: (accountId: string, orderId: string, symbol: string) =>
     invoke<OrderInfo>("cancel_order", { accountId, orderId, symbol }),

@@ -159,6 +159,15 @@ impl OrderStore {
                 // a query result must not overwrite it (a strategy
                 // order stays "strategy:<id>" after reconciliation).
                 merged.origin = stored.origin.clone();
+                // Same for the trigger fields: the exchange may not
+                // report tp/sl (plain openOrders gives "Trigger
+                // Market"), but the placement intent knew them.
+                if merged.trigger_px.is_none() {
+                    merged.trigger_px = stored.trigger_px;
+                }
+                if merged.tpsl.is_none() {
+                    merged.tpsl = stored.tpsl.clone();
+                }
                 // F4: leaving Unresolved for a terminal state clears
                 // the strike entry, whatever path applied the update.
                 if stored.status == OrderStatus::Unresolved && merged.status.is_terminal() {

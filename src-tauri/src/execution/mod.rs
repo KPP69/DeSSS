@@ -62,9 +62,17 @@ pub struct PlaceIntent {
     pub order_type: String,
     pub quantity: f64,
     pub price: f64,
-    /// Reduce-only (strategy fill-balancing): may only shrink the
-    /// position. Manual orders always pass false.
+    /// Reduce-only (strategy fill-balancing; manual close / TP/SL).
     pub reduce_only: bool,
+    /// Trigger (TP/SL) price — when set, the order is a trigger
+    /// order (wire "t" is the trigger variant, grouping
+    /// "positionTpsl"). `price` stays the reference price.
+    pub trigger_px: Option<f64>,
+    /// Trigger purpose: "tp" | "sl" (required with `trigger_px`).
+    pub tpsl: Option<String>,
+    /// After the trigger fires, execute at market (default true;
+    /// resolved in the adapter). Ignored for non-trigger orders.
+    pub is_market: Option<bool>,
     /// "manual", or "strategy:<id>" — carried onto the order record.
     pub origin: String,
 }
@@ -90,6 +98,20 @@ pub async fn place_order(deps: &ExecDeps, intent: PlaceIntent) -> Result<OrderIn
     // error, never silently converted to one of them.
     if intent.side != "buy" && intent.side != "sell" {
         return Err("下单方向只能是 buy 或 sell".to_string());
+    }
+    // Trigger (TP/SL) validation, before any record or adapter call:
+    // a trigger needs a positive trigger price and a purpose; a
+    // purpose without a trigger price is a caller bug, not an order.
+    if let Some(tp) = intent.trigger_px {
+        if !(tp > 0.0) {
+            return Err("触发价必须大于 0".to_string());
+        }
+        match intent.tpsl.as_deref() {
+            Some("tp") | Some("sl") => {}
+            _ => return Err("触发单必须指定 tpsl 为 tp 或 sl".to_string()),
+        }
+    } else if intent.tpsl.is_some() {
+        return Err("tpsl 需要配合 triggerPx 使用".to_string());
     }
     let now = crate::core::util::now_ms();
     let adapter = deps
@@ -186,6 +208,8 @@ pub async fn place_order(deps: &ExecDeps, intent: PlaceIntent) -> Result<OrderIn
         remaining_quantity: aligned_qty.to_f64().unwrap_or(0.0),
         average_fill_price: None,
         error: None,
+        trigger_px: intent.trigger_px,
+        tpsl: intent.tpsl.clone(),
         origin: intent.origin.clone(),
         created_at: now,
         updated_at: now,
@@ -293,6 +317,9 @@ pub async fn place_order(deps: &ExecDeps, intent: PlaceIntent) -> Result<OrderIn
         price: Some(aligned_price.to_f64().unwrap_or(0.0)),
         client_order_id: Some(cloid.clone()),
         reduce_only: intent.reduce_only,
+        trigger_px: intent.trigger_px,
+        tpsl: intent.tpsl.clone(),
+        is_market: intent.is_market,
     };
     info.transition(OrderStatus::Submitted, crate::core::util::now_ms())
         .ok();
@@ -537,6 +564,10 @@ pub async fn cancel_order(
                 remaining_quantity: 0.0,
                 average_fill_price: None,
                 error: None,
+                // Synthetic record for an order the store never saw:
+                // no trigger info exists for it.
+                trigger_px: None,
+                tpsl: None,
                 origin: "manual".to_string(),
                 created_at: crate::core::util::now_ms(),
                 updated_at: crate::core::util::now_ms(),
@@ -616,6 +647,8 @@ fn merge_open_orders(
                 remaining_quantity: o.quantity,
                 average_fill_price: None,
                 error: None,
+                trigger_px: o.trigger_px,
+                tpsl: o.tpsl.clone(),
                 // Imported from the exchange (e.g. placed on the
                 // website): a human order, never a strategy order.
                 origin: "manual".to_string(),
@@ -785,6 +818,8 @@ mod tests {
             remaining_quantity: 0.01,
             average_fill_price: None,
             error: None,
+            trigger_px: None,
+            tpsl: None,
             origin: "manual".to_string(),
             created_at: 1000,
             updated_at: 1000,
@@ -895,6 +930,9 @@ mod tests {
                 quantity: 0.01,
                 price: 90000.0,
                 reduce_only: false,
+                trigger_px: None,
+                tpsl: None,
+                is_market: None,
                 origin: "manual".to_string(),
             },
         )
@@ -935,6 +973,9 @@ mod tests {
                 quantity: 0.01,
                 price: 90000.0,
                 reduce_only: false,
+                trigger_px: None,
+                tpsl: None,
+                is_market: None,
                 origin: "manual".to_string(),
             },
         )
@@ -942,6 +983,191 @@ mod tests {
         .unwrap_err();
         assert!(err.contains("buy") && err.contains("sell"), "{err}");
         assert!(deps.orders.list().is_empty());
+    }
+
+    /// PR-3.1.1: a trigger (TP/SL) intent reaches the adapter with
+    /// reduce_only + trigger fields intact, and the stored record
+    /// carries them (so the Trading page can show the protection).
+    /// A plain reduce-only close carries reduce_only and no trigger.
+    #[tokio::test]
+    async fn place_order_passes_trigger_fields_to_the_adapter() {
+        use crate::core::market::Instrument;
+        use crate::core::types::{AccountLive, LivePosition, OrderBook, PriceLevel};
+        use crate::core::util::now_ms;
+        use crate::strategy::testkit::{self, FakeStrategyAdapter};
+
+        let now = now_ms();
+        let (db, _dir) = testkit::temp_db();
+        let sync = Arc::new(SyncManager::new());
+        let fake = Arc::new(FakeStrategyAdapter::new("hyperliquid"));
+        db.insert_account(&testkit::account_row("acc-1", "hyperliquid"))
+            .expect("account");
+        sync.insert("acc-1".to_string(), fake.clone());
+        db.replace_instruments(
+            "hyperliquid",
+            &[Instrument {
+                exchange_id: "hyperliquid".to_string(),
+                symbol: "BTC".to_string(),
+                tick_size: Some(1.0),
+                step_size: Some(0.001),
+                min_notional: Some(10.0),
+                max_leverage: Some(40.0),
+                funding_interval_h: Some(1.0),
+                settlement_currency: "USDC".to_string(),
+                market_id: None,
+                status: "trading".to_string(),
+                updated_at: now,
+            }],
+        )
+        .expect("seed catalog");
+        let bus = EventBus::new(16);
+        let catalog = Arc::new(MarketCatalog::with_db(bus.clone(), db.clone()));
+        let streams = Arc::new(RealtimeEngine::new(bus.clone(), catalog.clone(), None));
+        // Connected, with a long 0.01 BTC to reduce.
+        {
+            let map = sync.live_map();
+            let mut m = map.write().unwrap();
+            m.insert(
+                "acc-1".to_string(),
+                AccountLive {
+                    account_id: "acc-1".to_string(),
+                    adapter_id: "hyperliquid".to_string(),
+                    wallet_key: None,
+                    status: "connected".to_string(),
+                    latency_ms: Some(50),
+                    equity_usd: 10_000.0,
+                    available_usd: 10_000.0,
+                    pnl_usd: Some(0.0),
+                    currency: "USDC".to_string(),
+                    positions: vec![LivePosition {
+                        symbol: "BTC".to_string(),
+                        side: "long".to_string(),
+                        qty: 0.01,
+                        entry_price: 90000.0,
+                        mark_price: 91000.0,
+                        unrealized_pnl: 10.0,
+                    }],
+                    error: None,
+                    ts: now,
+                },
+            );
+        }
+        streams.inject_book(
+            &("hyperliquid".to_string(), "BTC".to_string()),
+            OrderBook {
+                adapter_id: "hyperliquid".to_string(),
+                symbol: "BTC".to_string(),
+                bids: vec![PriceLevel(91000.0, 1.0)],
+                asks: vec![PriceLevel(91010.0, 1.0)],
+                ts: now,
+            },
+        );
+        let deps = ExecDeps {
+            risk: Arc::new(RiskGateway::new(RiskConfig::default())),
+            orders: Arc::new(OrderStore::new()),
+            sync: sync.clone(),
+            streams: streams.clone(),
+            catalog: catalog.clone(),
+            bus: bus.clone(),
+        };
+        // A stop-loss: sell 0.01, trigger 89000, reduce-only, market.
+        let info = place_order(
+            &deps,
+            PlaceIntent {
+                account_id: "acc-1".to_string(),
+                symbol: "BTC".to_string(),
+                side: "sell".to_string(),
+                order_type: "trigger".to_string(),
+                quantity: 0.01,
+                price: 89000.0,
+                reduce_only: true,
+                trigger_px: Some(89000.0),
+                tpsl: Some("sl".to_string()),
+                is_market: Some(true),
+                origin: "manual".to_string(),
+            },
+        )
+        .await
+        .expect("trigger order places");
+        assert_eq!(info.status, OrderStatus::Open);
+        assert_eq!(info.trigger_px, Some(89000.0));
+        assert_eq!(info.tpsl.as_deref(), Some("sl"));
+        // Scoped block, not an explicit drop: the guard must be
+        // released before the next `place_order(...).await` — a std
+        // Mutex is not reentrant and holding its guard across an
+        // await would also trip clippy's await_holding_lock.
+        {
+            let placed = fake.placed.lock().unwrap_or_else(|e| e.into_inner());
+            assert_eq!(placed.len(), 1);
+            assert!(placed[0].reduce_only, "reduceOnly must reach the adapter");
+            assert_eq!(placed[0].trigger_px, Some(89000.0));
+            assert_eq!(placed[0].tpsl.as_deref(), Some("sl"));
+            assert_eq!(placed[0].is_market, Some(true));
+        }
+        // A plain reduce-only close: reduce_only rides, no trigger.
+        let info = place_order(
+            &deps,
+            PlaceIntent {
+                account_id: "acc-1".to_string(),
+                symbol: "BTC".to_string(),
+                side: "sell".to_string(),
+                order_type: "ioc".to_string(),
+                quantity: 0.01,
+                price: 90981.8,
+                reduce_only: true,
+                trigger_px: None,
+                tpsl: None,
+                is_market: None,
+                origin: "manual".to_string(),
+            },
+        )
+        .await
+        .expect("close places");
+        assert_eq!(info.status, OrderStatus::Open);
+        assert_eq!(info.trigger_px, None);
+        assert_eq!(info.tpsl, None);
+        // Same scoping as above: the final assertion below locks
+        // `placed` again on this same thread, and a std Mutex is not
+        // reentrant — holding this guard would deadlock the test.
+        {
+            let placed = fake.placed.lock().unwrap_or_else(|e| e.into_inner());
+            assert_eq!(placed.len(), 2);
+            assert!(placed[1].reduce_only);
+            assert_eq!(placed[1].trigger_px, None);
+            assert_eq!(placed[1].tpsl, None);
+        }
+        // Invalid trigger inputs fail before any adapter call.
+        for (tp, tpsl, why) in [
+            (Some(0.0), Some("sl".to_string()), "trigger 0"),
+            (Some(89000.0), None, "tpsl missing"),
+            (Some(89000.0), Some("xx".to_string()), "tpsl xx"),
+            (None, Some("sl".to_string()), "tpsl without trigger"),
+        ] {
+            let err = place_order(
+                &deps,
+                PlaceIntent {
+                    account_id: "acc-1".to_string(),
+                    symbol: "BTC".to_string(),
+                    side: "sell".to_string(),
+                    order_type: "trigger".to_string(),
+                    quantity: 0.01,
+                    price: 89000.0,
+                    reduce_only: true,
+                    trigger_px: tp,
+                    tpsl,
+                    is_market: Some(true),
+                    origin: "manual".to_string(),
+                },
+            )
+            .await
+            .unwrap_err();
+            assert!(!err.is_empty(), "{why}");
+        }
+        assert_eq!(
+            fake.placed.lock().unwrap_or_else(|e| e.into_inner()).len(),
+            2,
+            "invalid trigger inputs must not reach the adapter"
+        );
     }
 
     /// One exchange open-orders row, for the sync tests.
@@ -958,6 +1184,8 @@ mod tests {
             price: Some(90000.0),
             status: OrderStatus::Open,
             ts: 1000,
+            trigger_px: None,
+            tpsl: None,
         }
     }
 

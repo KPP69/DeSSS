@@ -407,6 +407,8 @@ pub(crate) mod testkit {
                     price: r.price,
                     status: OrderStatus::Open,
                     ts: 0,
+                    trigger_px: r.trigger_px,
+                    tpsl: r.tpsl.clone(),
                 })
                 .collect())
         }
@@ -446,6 +448,8 @@ pub(crate) mod testkit {
                 price: req.price,
                 status,
                 ts: 0,
+                trigger_px: req.trigger_px,
+                tpsl: req.tpsl.clone(),
             })
         }
         async fn cancel_order(
@@ -495,6 +499,8 @@ pub(crate) mod testkit {
                 remaining_quantity: req.quantity - filled,
                 average_fill_price: req.price,
                 error: None,
+                trigger_px: req.trigger_px,
+                tpsl: req.tpsl.clone(),
                 origin: "manual".to_string(),
                 created_at: 0,
                 updated_at: 0,
@@ -737,6 +743,8 @@ mod tests {
             remaining_quantity: 0.01,
             average_fill_price: None,
             error: None,
+            trigger_px: None,
+            tpsl: None,
             origin: "manual".to_string(),
             created_at: 0,
             updated_at: 0,

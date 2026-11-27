@@ -40,7 +40,14 @@ pub async fn place_order(
             order_type: input.order_type,
             quantity: input.quantity,
             price: input.price,
-            reduce_only: false,
+            // Manual orders pass false unless this is a close / TP/SL
+            // (reduceOnly) — the strategy runner sets it for its own
+            // balancing orders; the trigger fields ride through as-is
+            // (None for ordinary orders).
+            reduce_only: input.reduce_only.unwrap_or(false),
+            trigger_px: input.trigger_px,
+            tpsl: input.tpsl,
+            is_market: input.is_market,
             origin: "manual".to_string(),
         },
     )

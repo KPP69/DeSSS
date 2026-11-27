@@ -50,6 +50,21 @@ pub struct OrderRequest {
     /// set it; manual orders never do.
     #[serde(default)]
     pub reduce_only: bool,
+    /// Trigger (TP/SL) order: when set, the order is a trigger order
+    /// whose trigger price is this value (the wire "t" is the trigger
+    /// variant and grouping is "positionTpsl"). `price` stays the
+    /// reference / worst-acceptable price — the frontend sends it
+    /// equal to the trigger price.
+    #[serde(default)]
+    pub trigger_px: Option<f64>,
+    /// Trigger purpose: "tp" (take profit) or "sl" (stop loss).
+    /// Required when `trigger_px` is set, ignored otherwise.
+    #[serde(default)]
+    pub tpsl: Option<String>,
+    /// After the trigger fires, execute at market. Defaults to true
+    /// when a trigger is set (resolved in the adapter).
+    #[serde(default)]
+    pub is_market: Option<bool>,
 }
 
 /// The `place_order` command's input, exactly as the Trading page sends
@@ -69,6 +84,18 @@ pub struct PlaceOrderInput {
     pub order_type: String,
     pub quantity: f64,
     pub price: f64,
+    /// Reduce-only (PR-3.1.1): close / TP/SL orders set this.
+    #[serde(default)]
+    pub reduce_only: Option<bool>,
+    /// Trigger price: when set, this is a trigger (TP/SL) order.
+    #[serde(default)]
+    pub trigger_px: Option<f64>,
+    /// Trigger purpose: "tp" | "sl". Required with `trigger_px`.
+    #[serde(default)]
+    pub tpsl: Option<String>,
+    /// After the trigger fires, execute at market (default true).
+    #[serde(default)]
+    pub is_market: Option<bool>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -84,6 +111,13 @@ pub struct Order {
     pub price: Option<f64>,
     pub status: OrderStatus,
     pub ts: i64,
+    /// Trigger price, for trigger (TP/SL) orders (None otherwise).
+    #[serde(default)]
+    pub trigger_px: Option<f64>,
+    /// Trigger purpose: "tp" | "sl" (None for non-trigger orders,
+    /// or when the exchange did not report it).
+    #[serde(default)]
+    pub tpsl: Option<String>,
 }
 
 /// Canonical order status (phase 5A §3, task-book §三.1). Serialized as
@@ -157,7 +191,7 @@ pub struct OrderInfo {
     pub symbol: String,
     /// "buy" | "sell".
     pub side: String,
-    /// "limit" | "ioc" | "post_only".
+    /// "limit" | "ioc" | "post_only" | "trigger".
     pub order_type: String,
     pub status: OrderStatus,
     pub price: Option<f64>,
@@ -165,6 +199,13 @@ pub struct OrderInfo {
     pub filled_quantity: f64,
     pub remaining_quantity: f64,
     pub average_fill_price: Option<f64>,
+    /// Trigger price, for trigger (TP/SL) orders (None otherwise).
+    #[serde(default)]
+    pub trigger_px: Option<f64>,
+    /// Trigger purpose: "tp" | "sl" (None for non-trigger orders,
+    /// or when the exchange did not report it).
+    #[serde(default)]
+    pub tpsl: Option<String>,
     /// Last rejection / failure / reconciliation note, if any.
     pub error: Option<String>,
     /// Where the order came from: "manual", or "strategy:<id>" for a
@@ -321,6 +362,8 @@ impl From<&OrderInfo> for Order {
             price: info.price,
             status: info.status,
             ts: info.created_at,
+            trigger_px: info.trigger_px,
+            tpsl: info.tpsl.clone(),
         }
     }
 }
@@ -425,11 +468,40 @@ mod tests {
             filled_quantity: 0.0,
             remaining_quantity: 0.01,
             average_fill_price: None,
+            trigger_px: None,
+            tpsl: None,
             error: None,
             origin: "manual".to_string(),
             created_at: 0,
             updated_at: 0,
         }
+    }
+
+    #[test]
+    fn place_order_input_deserializes_trigger_fields() {
+        // The Trading page's protection flow sends the trigger fields
+        // in camelCase; an older payload without them must still parse
+        // (all four are optional).
+        let v: PlaceOrderInput = serde_json::from_value(serde_json::json!({
+            "accountId": "acc-1", "symbol": "BTC", "side": "sell",
+            "orderType": "trigger", "quantity": 0.01, "price": 91000.0,
+            "reduceOnly": true, "triggerPx": 91000.0, "tpsl": "tp",
+            "isMarket": true
+        }))
+        .expect("trigger input");
+        assert_eq!(v.reduce_only, Some(true));
+        assert_eq!(v.trigger_px, Some(91000.0));
+        assert_eq!(v.tpsl.as_deref(), Some("tp"));
+        assert_eq!(v.is_market, Some(true));
+        let old: PlaceOrderInput = serde_json::from_value(serde_json::json!({
+            "accountId": "acc-1", "symbol": "BTC", "side": "buy",
+            "orderType": "limit", "quantity": 0.01, "price": 90000.0
+        }))
+        .expect("legacy input without trigger fields");
+        assert_eq!(old.reduce_only, None);
+        assert_eq!(old.trigger_px, None);
+        assert_eq!(old.tpsl, None);
+        assert_eq!(old.is_market, None);
     }
 
     #[test]

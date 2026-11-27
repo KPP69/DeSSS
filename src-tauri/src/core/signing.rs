@@ -382,6 +382,55 @@ mod tests {
         assert_eq!(pack_hex(&Mp::Nil), "c0");
     }
 
+    /// Trigger (TP/SL) order action, built by the PRODUCTION builder
+    /// (`venues::hyperliquid::order::build_order_action`) — not a
+    /// hand-built copy — so this covers the path `place_order`
+    /// actually sends. Expected bytes were produced by running the
+    /// official Python SDK (2026-11-27):
+    /// `order_request_to_order_wire` (limit_px 90000.0, trigger
+    /// {triggerPx 90000.0, isMarket True, tpsl "sl"}, reduce_only
+    /// True, cloid 0x1234…cdef) + `order_wires_to_order_action`
+    /// (grouping "positionTpsl"), then `msgpack.packb`. The SDK's
+    /// `float_to_wire` normalizes 90000.0 to "90000" — the same
+    /// strings our `decimal_to_wire` emits.
+    #[test]
+    fn trigger_order_action_matches_the_official_sdk() {
+        use crate::venues::hyperliquid::order::{build_order_action, OrderTypeWire};
+        let (mp, json) = build_order_action(
+            0,
+            true,
+            "90000",
+            "0.01",
+            true,
+            OrderTypeWire::Trigger {
+                is_market: true,
+                trigger_px: "90000",
+                tpsl: "sl",
+            },
+            "0x1234567890abcdef1234567890abcdef",
+        );
+        assert_eq!(
+            pack_hex(&mp),
+            "83a474797065a56f72646572a66f72646572739187a16100a162c3a170a53930303030a173a4302e3031a172c3a17481a77472696767657283a869734d61726b6574c3a9747269676765725078a53930303030a47470736ca2736ca163d92230783132333435363738393061626364656631323334353637383930616263646566a867726f7570696e67ac706f736974696f6e5470736c"
+        );
+        assert_eq!(
+            hex::encode(action_hash(&mp, NONCE)),
+            "458006e4203cc76df55e2527d51e36d62c10e00c3ec7b55d9b371d8351881d75"
+        );
+        // The JSON body mirrors the signed action (same values,
+        // same trigger variant, positionTpsl grouping).
+        assert_eq!(json["grouping"].as_str(), Some("positionTpsl"));
+        assert_eq!(
+            json["orders"][0]["t"]["trigger"]["triggerPx"].as_str(),
+            Some("90000")
+        );
+        assert_eq!(
+            json["orders"][0]["t"]["trigger"]["tpsl"].as_str(),
+            Some("sl")
+        );
+        assert_eq!(json["orders"][0]["r"].as_bool(), Some(true));
+    }
+
     #[test]
     fn action_hash_matches_the_official_sdk() {
         assert_eq!(

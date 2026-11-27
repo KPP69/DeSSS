@@ -163,6 +163,10 @@ export type OrderInfo = {
   remainingQuantity: number;
   averageFillPrice: number | null;
   error: string | null;
+  /** Trigger price for TP/SL orders, null otherwise. */
+  triggerPx: number | null;
+  /** Trigger purpose: "tp" | "sl", null for non-trigger orders. */
+  tpsl: string | null;
   /** Where the order came from: "manual", or "strategy:<id>". */
   origin: string;
   createdAt: number;
