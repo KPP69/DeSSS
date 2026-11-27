@@ -4,8 +4,13 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::RwLock;
+use std::time::Instant;
 
 use crate::core::types::{Order, OrderInfo, OrderStatus, TradeInfo};
+
+/// D10: one applied fill — (exchange order id, filled-size bits,
+/// exchange time). Size is stored as bits because f64 has no Eq.
+type AppliedFillKey = (u64, u64, i64);
 
 /// In-memory order store: the execution engine owns it. Orders are
 /// keyed by client order id (cloid); fills are kept per cloid.
@@ -17,6 +22,15 @@ pub struct OrderStore {
     /// `unknownOid` strikes per cloid (F4): (count, last strike ms).
     /// In-memory, cumulative, reset on restart.
     unresolved_attempts: std::sync::Mutex<HashMap<String, (u32, i64)>>,
+    /// D10: fills already applied to the local position, per account.
+    /// Keyed (oid, size bits, exchange time); a place-order fill is
+    /// recorded with time 0 (the response carries none), so the
+    /// userFills copy of the same execution is recognised by
+    /// (oid, size, 0). Cleared by the next snapshot (§5).
+    applied_fills: std::sync::Mutex<HashMap<String, HashSet<AppliedFillKey>>>,
+    /// D10 §4/§5: local receipt time of the latest snapshot, per
+    /// account (monotonic clock — exchange timestamps drift).
+    last_snapshot_at: std::sync::Mutex<HashMap<String, Instant>>,
 }
 
 impl OrderStore {
@@ -25,6 +39,48 @@ impl OrderStore {
             orders: RwLock::new(HashMap::new()),
             fills: RwLock::new(HashMap::new()),
             unresolved_attempts: std::sync::Mutex::new(HashMap::new()),
+            applied_fills: std::sync::Mutex::new(HashMap::new()),
+            last_snapshot_at: std::sync::Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// D10: record a fill as applied; true when it is new (the caller
+    /// applies it), false on a replay or on the place-order copy of a
+    /// fill the WS already delivered (the frame can beat the HTTP
+    /// response, so a time-0 record also matches any earlier copy).
+    pub fn note_applied_fill(&self, account_id: &str, oid: u64, sz: f64, time: i64) -> bool {
+        let key = (oid, sz.to_bits(), time);
+        let Ok(mut m) = self.applied_fills.lock() else {
+            return false;
+        };
+        let set = m.entry(account_id.to_string()).or_default();
+        let seen = set.contains(&key)
+            || set.contains(&(oid, sz.to_bits(), 0))
+            || (time == 0 && set.iter().any(|(o, s, _)| *o == oid && *s == sz.to_bits()));
+        if seen {
+            return false;
+        }
+        set.insert(key);
+        true
+    }
+
+    /// D10 §4: only apply fills received after the latest snapshot.
+    /// A fill received before it is already inside it.
+    pub fn fill_fresh(&self, account_id: &str, now: Instant) -> bool {
+        let Ok(m) = self.last_snapshot_at.lock() else {
+            return true;
+        };
+        m.get(account_id).is_none_or(|&t| now > t)
+    }
+
+    /// D10 §5: a snapshot replaces the base — forget applied fills
+    /// and stamp its local receipt time.
+    pub fn note_snapshot(&self, account_id: &str, now: Instant) {
+        if let Ok(mut m) = self.applied_fills.lock() {
+            m.remove(account_id);
+        }
+        if let Ok(mut m) = self.last_snapshot_at.lock() {
+            m.insert(account_id.to_string(), now);
         }
     }
 

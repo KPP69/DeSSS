@@ -57,6 +57,7 @@ async fn connect_account_inner(
         state.sync.live_map(),
         state.sync.reconcile_state(),
         state.orders.clone(),
+        state.sync.clone(),
     )?;
     state.bus.log(
         "info",

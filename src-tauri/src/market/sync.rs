@@ -62,15 +62,15 @@ impl SyncManager {
 
     /// Apply a fill to the live positions immediately (local estimate)
     /// and start the grace window. The exchange-confirmed state
-    /// remains the source of truth: the next post-grace poll overwrites
-    /// this estimate with confirmed positions. Equity / available are
-    /// left to that poll — they need the exchange's margin math.
+    /// remains the source of truth: the next snapshot overwrites this
+    /// estimate with confirmed positions. Equity / available are left
+    /// to that snapshot — they need the exchange's margin math.
     ///
-    /// Phase 3.3 §6: while the account WS is healthy the estimate is
-    /// SKIPPED — the WS full snapshot carries every fill, and applying
-    /// the same fill twice would double-count the position. The grace
-    /// window still starts (it only gates REST polls). The estimate
-    /// runs only while degraded, where no snapshot is coming.
+    /// D10 reverses the Phase 3.3 §6 rule: the estimate ALWAYS runs —
+    /// the snapshot corrects within 5s, it does not gate. Double
+    /// counting is prevented by the store's applied-fill ledger
+    /// (`OrderStore::note_applied_fill`), not by skipping. Returns the
+    /// updated entry so callers can publish it at once (sub-second UI).
     pub fn apply_fill(
         &self,
         account_id: &str,
@@ -78,25 +78,16 @@ impl SyncManager {
         side: &str,
         qty: f64,
         fill_price: f64,
-    ) {
+    ) -> Option<AccountLive> {
         self.reconcile.note_fill(account_id);
-        if self
-            .adapter(account_id)
-            .map(|a| a.ws_healthy())
-            .unwrap_or(false)
-        {
-            return;
-        }
         let Ok(mut live) = self.live.write() else {
-            return;
+            return None;
         };
-        let Some(entry) = live.get_mut(account_id) else {
-            return;
-        };
+        let entry = live.get_mut(account_id)?;
         // Signed net quantity: buys add, sells subtract.
         let signed = if side == "buy" { qty } else { -qty };
         if signed.abs() < 1e-12 {
-            return;
+            return None;
         }
         let idx = entry.positions.iter().position(|p| p.symbol == symbol);
         match idx {
@@ -106,7 +97,7 @@ impl SyncManager {
                 let net = cur_signed + signed;
                 if net.abs() < 1e-12 {
                     entry.positions.remove(i);
-                    return;
+                    return Some(entry.clone());
                 }
                 let new_side = if net > 0.0 { "long" } else { "short" };
                 let (new_entry, new_mark, new_pnl) =
@@ -147,6 +138,7 @@ impl SyncManager {
                 });
             }
         }
+        Some(entry.clone())
     }
 
     /// Force a position reconciliation for one account, after the
@@ -293,6 +285,7 @@ pub fn build_adapter(
     live: Arc<RwLock<HashMap<String, AccountLive>>>,
     reconcile: Arc<ReconcileState>,
     orders: Arc<crate::store::orders::OrderStore>,
+    sync: Arc<SyncManager>,
 ) -> Result<Arc<dyn ExchangeAdapter>, String> {
     let account_id = row.id.clone();
     let Some(v) = crate::venues::all()
@@ -309,6 +302,7 @@ pub fn build_adapter(
             live: Arc::clone(&live),
             reconcile: Arc::clone(&reconcile),
             orders,
+            sync,
         },
     )
 }
@@ -383,6 +377,7 @@ mod tests {
             Arc::new(RwLock::new(HashMap::new())),
             Arc::new(ReconcileState::new()),
             Arc::new(crate::store::orders::OrderStore::new()),
+            Arc::new(SyncManager::new()),
         ) {
             Ok(_) => panic!("api-mode build must fail"),
             Err(e) => e,
@@ -400,6 +395,7 @@ mod tests {
             Arc::new(RwLock::new(HashMap::new())),
             Arc::new(ReconcileState::new()),
             Arc::new(crate::store::orders::OrderStore::new()),
+            Arc::new(SyncManager::new()),
         ) {
             Ok(_) => panic!("agent-mode build without fields must fail"),
             Err(e) => e,
@@ -518,12 +514,13 @@ mod tests {
         }
     }
 
-    /// Phase 3.3 §6: while the account WS is healthy the local fill
-    /// estimate is skipped (the WS snapshot carries the fill — one
-    /// fill, counted once); while degraded it still applies. The
-    /// grace window starts in both cases.
+    /// D10 (reverses Phase 3.3 §6): the local fill estimate applies
+    /// even while the account WS is healthy — the snapshot is only a
+    /// 5s correction now, and the fill must show at once. The grace
+    /// window still starts, so the next REST poll does not overwrite
+    /// the fresh estimate.
     #[test]
-    fn fill_estimate_skipped_while_ws_healthy() {
+    fn fill_estimate_applies_even_while_ws_healthy() {
         let m = manager_with_live();
         m.insert(
             "acc-1".to_string(),
@@ -531,7 +528,7 @@ mod tests {
         );
         m.apply_fill("acc-1", "BTC", "buy", 0.1, 92000.0);
         let live = m.live_states().into_iter().next().unwrap();
-        assert!((live.positions[0].qty - 0.1).abs() < 1e-12);
+        assert!((live.positions[0].qty - 0.2).abs() < 1e-12);
         assert!(m.reconcile.in_grace("acc-1"), "grace still starts");
         let m2 = manager_with_live();
         m2.insert(

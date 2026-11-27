@@ -327,6 +327,11 @@ pub(crate) mod testkit {
         /// account_id -> fraction of the placed quantity that fills
         /// (0 = resting Open, 1 = fully Filled, between = partial).
         pub fill_fraction: Mutex<HashMap<String, f64>>,
+        /// Next exchange order id. D10: the execution ledger dedups
+        /// fills by oid, so a double that hands every order the same
+        /// oid would make a close look like a replay of the entry.
+        /// Real oids are unique per order; the fake is too.
+        next_oid: Mutex<u64>,
     }
 
     impl FakeStrategyAdapter {
@@ -338,6 +343,7 @@ pub(crate) mod testkit {
                 fail_accounts: Mutex::new(HashSet::new()),
                 wrong_coin_accounts: Mutex::new(HashSet::new()),
                 fill_fraction: Mutex::new(HashMap::new()),
+                next_oid: Mutex::new(1001),
             }
         }
 
@@ -435,8 +441,9 @@ pub(crate) mod testkit {
                 return Err(VenueError::rejected("模拟拒单".to_string()));
             }
             let fraction = self.fraction(&req.account_id);
-            // Any fill drives the engine's reconcile path (which is
-            // what reports the filled quantity); a resting order
+            // A fill is reported by the return itself (D10): the
+            // Filled order carries the filled size in quantity, so
+            // the engine applies it without a query. A resting order
             // stays Open. A trigger order always rests on placement
             // — it never fills at once, whatever the fraction says
             // (filling one would also corrupt the live position
@@ -448,15 +455,30 @@ pub(crate) mod testkit {
             } else {
                 OrderStatus::Open
             };
+            // D10: a Filled return carries the FILL in quantity
+            // (filled size, not the request) — a partial fill
+            // reports only what filled. A resting order keeps the
+            // requested qty.
+            let quantity = if status == OrderStatus::Filled {
+                req.quantity * fraction
+            } else {
+                req.quantity
+            };
+            let oid = {
+                let mut n = self.next_oid.lock().unwrap_or_else(|e| e.into_inner());
+                let oid = *n;
+                *n += 1;
+                oid
+            };
             Ok(Order {
-                order_id: "1001".to_string(),
+                order_id: oid.to_string(),
                 client_order_id: req.client_order_id.clone().unwrap_or_default(),
                 exchange_id: req.exchange_id.clone(),
                 account_id: req.account_id.clone(),
                 symbol: req.symbol.clone(),
                 side: req.side.clone(),
                 order_type: req.order_type.clone(),
-                quantity: req.quantity,
+                quantity,
                 price: req.price,
                 status,
                 ts: 0,

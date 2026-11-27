@@ -100,6 +100,9 @@ pub struct HyperliquidAdapter {
     /// openOrders / userFills frames to it. Shared with the execution
     /// layer — the store is the single record of orders and fills.
     orders: Arc<OrderStore>,
+    /// Sync manager (D10): the account WS applies fills through it —
+    /// one position writer, shared with the execution layer.
+    sync: Arc<crate::market::sync::SyncManager>,
     /// Per-dex account snapshots for the WS merge (Phase 3.3): the
     /// clearinghouseState channel pushes one dex at a time, and the
     /// published snapshot is main + io + spot, exactly like the REST
@@ -121,6 +124,9 @@ pub struct HyperliquidAdapter {
 struct AssetMeta {
     fetched_at: Instant,
     universe: Vec<String>,
+    /// `szDecimals` parallel to `universe` (D10 §6: one quantity step
+    /// per symbol, for the reconcile-mismatch check).
+    sz_decimals: Vec<u8>,
     dex_offset: u32,
 }
 
@@ -139,6 +145,7 @@ impl HyperliquidAdapter {
         reconcile: Arc<ReconcileState>,
         agent_secret: Option<[u8; 32]>,
         orders: Arc<OrderStore>,
+        sync: Arc<crate::market::sync::SyncManager>,
     ) -> Self {
         let agent_address = agent_secret
             .as_ref()
@@ -162,6 +169,7 @@ impl HyperliquidAdapter {
             agent_address,
             asset_meta: Mutex::new(None),
             orders,
+            sync,
             ws_legs: Mutex::new(WsLegs::default()),
             ws_state: Mutex::new(WsState::default()),
             last_poll: Mutex::new(None),
@@ -283,6 +291,7 @@ impl Venue for HyperliquidVenue {
             ctx.reconcile.clone(),
             agent_secret,
             ctx.orders.clone(),
+            ctx.sync.clone(),
         )))
     }
 

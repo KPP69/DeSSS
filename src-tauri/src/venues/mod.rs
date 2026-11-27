@@ -99,6 +99,10 @@ pub struct VenueCtx {
     pub live: Arc<RwLock<HashMap<String, AccountLive>>>,
     pub reconcile: Arc<ReconcileState>,
     pub orders: Arc<crate::store::orders::OrderStore>,
+    /// D10: the account WS applies fills through the sync manager
+    /// (one position writer — the adapter never mutates positions
+    /// itself). Only Hyperliquid uses it today.
+    pub sync: Arc<crate::market::sync::SyncManager>,
 }
 
 /// A market stream's dial plan for one symbol: where to connect, what

@@ -154,6 +154,17 @@ impl HyperliquidAdapter {
         self.bus.log(level, self.name(), message);
     }
 
+    /// D10 §6: one quantity step for a symbol, from the cached `meta`
+    /// universe (`szDecimals`); None before the first order resolved
+    /// an asset — no local fill can exist yet then, so nothing to
+    /// compare.
+    fn step_for(&self, symbol: &str) -> Option<f64> {
+        let m = self.asset_meta.lock().unwrap_or_else(|e| e.into_inner());
+        let m = m.as_ref()?;
+        let i = m.universe.iter().position(|n| n == symbol)?;
+        Some(10f64.powi(-(m.sz_decimals.get(i).copied().unwrap_or(0) as i32)))
+    }
+
     pub(crate) fn publish_live(&self, source: &'static str) {
         let snap = self
             .snapshot
@@ -173,6 +184,35 @@ impl HyperliquidAdapter {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
+        // D10 §6: flag drift bigger than one step (snapshot wins; log
+        // only, never block or retry). Compared against the live map's
+        // current estimate, before this replace overwrites it.
+        if let Ok(map) = self.live.read() {
+            if let Some(old) = map.get(&self.account_id) {
+                let mut syms: Vec<&str> =
+                    snap.positions.iter().map(|p| p.symbol.as_str()).collect();
+                for q in &old.positions {
+                    if !syms.contains(&q.symbol.as_str()) {
+                        syms.push(&q.symbol);
+                    }
+                }
+                for s in syms {
+                    let signed = |ps: &[LivePosition]| {
+                        ps.iter()
+                            .find(|p| p.symbol == s)
+                            .map(|p| if p.side == "long" { p.qty } else { -p.qty })
+                            .unwrap_or(0.0)
+                    };
+                    let (o, n) = (signed(&old.positions), signed(&snap.positions));
+                    if (o - n).abs() > self.step_for(s).unwrap_or(0.0).max(1e-9) {
+                        self.log(
+                            "warn",
+                            format!("reconcile mismatch: {s} 本地 {o:+} → 快照 {n:+}"),
+                        );
+                    }
+                }
+            }
+        }
         let live = AccountLive {
             account_id: self.account_id.clone(),
             adapter_id: self.id.clone(),
@@ -334,6 +374,9 @@ impl HyperliquidAdapter {
         match self.fetch_account_state().await {
             Ok((snap, balance)) => {
                 *self.snapshot.lock().unwrap_or_else(|e| e.into_inner()) = snap;
+                // D10 §5: this REST snapshot is a base too — forget
+                // fills applied since the last one.
+                self.orders.note_snapshot(&self.account_id, Instant::now());
                 self.bus.publish(AppEvent::Balance(balance));
                 self.set_rest(true, Some(started.elapsed()));
             }
@@ -503,6 +546,7 @@ mod tests {
             Arc::new(ReconcileState::new()),
             None,
             Arc::new(crate::store::orders::OrderStore::new()),
+            Arc::new(crate::market::sync::SyncManager::new()),
         );
         adapter.publish_live("rest");
         assert_eq!(

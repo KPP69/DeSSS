@@ -44,6 +44,7 @@ use tokio_tungstenite::tungstenite::Message;
 use super::order::{hl_side_to_side, parse_open_orders, parse_order_status_response};
 use super::rest::{merge_perp, merge_spot, parse_clearinghouse_state, SpotBalance};
 use super::{HyperliquidAdapter, Snapshot};
+use crate::bus::AppEvent;
 use crate::core::types::{Order, OrderInfo, TradeInfo};
 use crate::core::util::{f64_from, now_ms};
 use crate::net::ws::connect_ws;
@@ -424,6 +425,9 @@ impl HyperliquidAdapter {
             m
         };
         *self.snapshot.lock().unwrap_or_else(|e| e.into_inner()) = merged;
+        // D10 §5: this WS snapshot is the new base — forget fills
+        // applied since the last one (receipt time is `recv`).
+        self.orders.note_snapshot(&self.account_id, recv);
         self.publish_live("ws");
         // First-frame instrumentation (Phase 3.3 §17): dial → frame
         // plus frame → published position, logged once per connection.
@@ -476,12 +480,12 @@ impl HyperliquidAdapter {
         }
     }
 
-    /// A `userFills` frame appends its fills (deduped by trade id).
-    /// It does NOT touch positions: while the WS is healthy the
-    /// `clearinghouseState` snapshot carries every fill, and applying
-    /// the same fill twice would double-count (Phase 3.3 §6). The
-    /// local estimate (`SyncManager::apply_fill`) covers the degraded
-    /// case, where no snapshot is coming.
+    /// A `userFills` frame applies each NEW fill to the local position
+    /// at once (D10 — the Phase 3.3 §6 rule is reversed: the snapshot
+    /// corrects within 5s, it does not gate). Dedup is (oid, size,
+    /// time); a snapshot replay (`isSnapshot`) only records fills,
+    /// never moves positions — the fills it replays are already in the
+    /// base. The fill record itself is always appended.
     fn on_user_fills_frame(&self, data: &Value) {
         let fills = parse_user_fills_frame(data, &self.id, &self.account_id, &|oid| {
             self.orders.get_by_oid(oid).map(|o| o.client_order_id)
@@ -490,6 +494,22 @@ impl HyperliquidAdapter {
             return;
         }
         self.note_ws_frame();
+        let now = Instant::now();
+        let replay = data["isSnapshot"].as_bool().unwrap_or(false);
+        for f in &fills {
+            let oid = f.order_id.parse::<u64>().unwrap_or(0);
+            let fresh =
+                self.orders
+                    .note_applied_fill(&self.account_id, oid, f.quantity, f.timestamp);
+            if !replay && fresh && self.orders.fill_fresh(&self.account_id, now) {
+                if let Some(live) =
+                    self.sync
+                        .apply_fill(&self.account_id, &f.symbol, &f.side, f.quantity, f.price)
+                {
+                    self.bus.publish(AppEvent::AccountLive(live));
+                }
+            }
+        }
         // Group by cloid: one append per order keeps the store write
         // to one lock per order, not one per fill.
         let mut by_cloid: Vec<(String, Vec<TradeInfo>)> = Vec::new();
@@ -588,7 +608,6 @@ mod tests {
     use super::*;
     use crate::bus::EventBus;
     use crate::core::types::OrderStatus;
-    use crate::market::reconcile::ReconcileState;
     use crate::store::orders::OrderStore;
     use std::collections::HashMap;
     use std::sync::{Arc, RwLock};
@@ -649,7 +668,11 @@ mod tests {
         Arc<RwLock<HashMap<String, crate::core::types::AccountLive>>>,
         Arc<OrderStore>,
     ) {
-        let live = Arc::new(RwLock::new(HashMap::new()));
+        // The adapter's sync MUST share this live map (D10): fills it
+        // applies go through `sync.apply_fill` on the same map the
+        // tests read — a separate SyncManager would swallow them.
+        let sync = Arc::new(crate::market::sync::SyncManager::new());
+        let live = sync.live_map();
         let orders = Arc::new(OrderStore::new());
         let a = Arc::new(HyperliquidAdapter::new(
             "hyperliquid",
@@ -658,9 +681,10 @@ mod tests {
             "acc-1".to_string(),
             EventBus::new(16),
             live.clone(),
-            Arc::new(ReconcileState::new()),
+            sync.reconcile_state(),
             None,
             orders.clone(),
+            sync,
         ));
         (a, live, orders)
     }
@@ -673,6 +697,51 @@ mod tests {
             .get("acc-1")
             .expect("live published")
             .clone()
+    }
+
+    /// Seed the live map with one connected account carrying these
+    /// positions (D10: the local estimate a snapshot corrects).
+    fn seed_live(
+        live: &Arc<RwLock<HashMap<String, crate::core::types::AccountLive>>>,
+        positions: Vec<crate::core::types::LivePosition>,
+    ) {
+        live.write().unwrap().insert(
+            "acc-1".to_string(),
+            crate::core::types::AccountLive {
+                account_id: "acc-1".to_string(),
+                adapter_id: "hyperliquid".to_string(),
+                wallet_key: None,
+                status: "connected".to_string(),
+                latency_ms: None,
+                equity_usd: 15000.0,
+                available_usd: 8000.0,
+                pnl_usd: Some(0.0),
+                currency: "USDC".to_string(),
+                positions,
+                source: "ws".to_string(),
+                degraded: false,
+                error: None,
+                ts: now_ms(),
+            },
+        );
+    }
+
+    fn pos(symbol: &str, side: &str, qty: f64) -> crate::core::types::LivePosition {
+        crate::core::types::LivePosition {
+            symbol: symbol.to_string(),
+            side: side.to_string(),
+            qty,
+            entry_price: 90000.0,
+            mark_price: 91000.0,
+            unrealized_pnl: 0.0,
+        }
+    }
+
+    /// One live (non-snapshot) `userFills` frame with a single fill.
+    fn live_fill_frame(oid: u64, sz: &str, side: &str, time: i64) -> Value {
+        serde_json::json!({"isSnapshot": false, "fills": [
+            {"coin":"BTC","side":side,"px":"90000.0","sz":sz,"time":time,"tid":1,"oid":oid,"fee":"0.0","feeToken":"USDC"}
+        ]})
     }
 
     #[test]
@@ -712,8 +781,9 @@ mod tests {
         a.on_clearinghouse_frame(&main_clearinghouse_data(), Instant::now());
         a.on_clearinghouse_frame(&io_clearinghouse_data(), Instant::now());
         assert_eq!(live_of(&live).positions.len(), 2);
-        // A real fill arrives: it is recorded, but the position is
-        // NOT touched — the snapshot carries it (§6).
+        // A real fill arrives as a snapshot replay: it is recorded,
+        // but the position is NOT touched — the replay re-states fills
+        // already in the base (D10), so applying it would double-count.
         a.on_user_fills_frame(&user_fills_data());
         assert_eq!(orders.list_fills().len(), 2);
         assert_eq!(orders.list_fills()[0].symbol, "ETH");
@@ -728,6 +798,86 @@ mod tests {
         // The next snapshot still shows exactly the exchange state.
         a.on_clearinghouse_frame(&main_clearinghouse_data(), Instant::now());
         assert_eq!(live_of(&live).positions.len(), 2);
+    }
+
+    /// D10 (b): the same live fill pushed twice moves the position
+    /// once — the second copy is recognised by (oid, size, time).
+    #[test]
+    fn live_user_fill_applies_once_even_when_pushed_twice() {
+        let (a, live, orders) = adapter();
+        seed_live(&live, vec![]);
+        let frame = live_fill_frame(1001, "0.01", "B", 1000);
+        a.on_user_fills_frame(&frame);
+        a.on_user_fills_frame(&frame);
+        let l = live_of(&live);
+        assert_eq!(l.positions.len(), 1);
+        assert_eq!(l.positions[0].side, "long");
+        assert!((l.positions[0].qty - 0.01).abs() < 1e-12);
+        assert!((l.positions[0].entry_price - 90000.0).abs() < 1e-12);
+        assert_eq!(orders.list_fills().len(), 1);
+    }
+
+    /// D10 (d, fill first): a fill applied locally is wiped by the
+    /// next snapshot, which replaces wholesale — not added on top.
+    #[test]
+    fn fill_before_snapshot_is_replaced_not_added() {
+        let (a, live, _) = adapter();
+        seed_live(&live, vec![]);
+        a.on_user_fills_frame(&live_fill_frame(1001, "0.01", "B", 1000));
+        assert_eq!(live_of(&live).positions.len(), 1);
+        a.on_clearinghouse_frame(&main_clearinghouse_data(), Instant::now());
+        a.on_clearinghouse_frame(&io_clearinghouse_data(), Instant::now());
+        let l = live_of(&live);
+        assert_eq!(l.positions.len(), 2);
+        let btc = l.positions.iter().find(|p| p.symbol == "BTC").unwrap();
+        assert!((btc.qty - 0.1).abs() < 1e-12);
+    }
+
+    /// D10 (d, snapshot first): a fill received after the snapshot
+    /// applies on top of it.
+    #[test]
+    fn fill_after_snapshot_applies_on_top() {
+        let (a, live, _) = adapter();
+        a.on_clearinghouse_frame(&main_clearinghouse_data(), Instant::now());
+        a.on_clearinghouse_frame(&io_clearinghouse_data(), Instant::now());
+        assert_eq!(live_of(&live).positions.len(), 2);
+        a.on_user_fills_frame(&live_fill_frame(1002, "0.02", "B", 2000));
+        let l = live_of(&live);
+        let btc = l.positions.iter().find(|p| p.symbol == "BTC").unwrap();
+        assert!((btc.qty - 0.12).abs() < 1e-12);
+    }
+
+    /// D10 (c): the snapshot replaces the local estimate whole,
+    /// whether local is above or below it — and a drift bigger than
+    /// one step is logged (snapshot wins, log only).
+    #[test]
+    fn snapshot_replaces_local_estimate_in_both_directions() {
+        let (a, live, _) = adapter();
+        seed_live(&live, vec![pos("BTC", "long", 0.15)]);
+        a.on_clearinghouse_frame(&main_clearinghouse_data(), Instant::now());
+        a.on_clearinghouse_frame(&io_clearinghouse_data(), Instant::now());
+        let btc = live_of(&live)
+            .positions
+            .into_iter()
+            .find(|p| p.symbol == "BTC")
+            .unwrap();
+        assert!((btc.qty - 0.1).abs() < 1e-12);
+        assert!(
+            a.bus
+                .snapshot_logs()
+                .iter()
+                .any(|l| l.message.contains("reconcile mismatch")),
+            "drift 0.15 -> 0.1 must be logged"
+        );
+        seed_live(&live, vec![pos("BTC", "long", 0.05)]);
+        a.on_clearinghouse_frame(&main_clearinghouse_data(), Instant::now());
+        a.on_clearinghouse_frame(&io_clearinghouse_data(), Instant::now());
+        let btc = live_of(&live)
+            .positions
+            .into_iter()
+            .find(|p| p.symbol == "BTC")
+            .unwrap();
+        assert!((btc.qty - 0.1).abs() < 1e-12);
     }
 
     #[test]

@@ -30,7 +30,7 @@ use std::sync::Arc;
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 
-use crate::bus::EventBus;
+use crate::bus::{AppEvent, EventBus};
 use crate::core::error::{VenueError, UNKNOWN_OID};
 use crate::core::precision::{align_down, align_price_for_side, to_decimal};
 use crate::core::signing;
@@ -388,10 +388,56 @@ pub async fn place_order(deps: &ExecDeps, intent: PlaceIntent) -> Result<OrderIn
                     Ok(info)
                 }
                 OrderStatus::Filled => {
-                    // The response says filled; the authoritative
-                    // record (fills + avg price) comes from the query.
+                    // D10: the response already is the fill — the
+                    // adapter carries totalSz/avgPx in quantity/price.
+                    // Apply it to the position at once and record it,
+                    // so the userFills copy is recognised, not
+                    // re-applied. No order-status query: the snapshot
+                    // corrects within 5s if this disagrees.
                     deps.risk.record_order_outcome(true);
-                    Ok(reconcile_order(deps, &adapter, &info).await)
+                    let oid = order.order_id.parse::<u64>().unwrap_or(0);
+                    let fresh =
+                        deps.orders
+                            .note_applied_fill(&info.account_id, oid, order.quantity, 0);
+                    if fresh
+                        && deps
+                            .orders
+                            .fill_fresh(&info.account_id, std::time::Instant::now())
+                    {
+                        if let Some(live) = deps.sync.apply_fill(
+                            &info.account_id,
+                            &info.symbol,
+                            &info.side,
+                            order.quantity,
+                            order.price.unwrap_or(0.0),
+                        ) {
+                            deps.bus.publish(AppEvent::AccountLive(live));
+                        }
+                    }
+                    info.filled_quantity = order.quantity;
+                    info.average_fill_price = order.price;
+                    info.remaining_quantity = 0.0;
+                    info.transition(OrderStatus::Filled, crate::core::util::now_ms())
+                        .ok();
+                    deps.orders.insert(info.clone());
+                    log(
+                        deps,
+                        "info",
+                        format!(
+                            "下单成交：{} {} {} {} @ {}（oid {}）",
+                            info.exchange_id,
+                            info.symbol,
+                            if info.side == "buy" {
+                                "买入"
+                            } else {
+                                "卖出"
+                            },
+                            info.filled_quantity,
+                            info.average_fill_price.unwrap_or(0.0),
+                            info.order_id
+                        ),
+                    );
+                    Ok(info)
                 }
                 other => {
                     info.transition(other, crate::core::util::now_ms()).ok();
@@ -473,8 +519,9 @@ async fn query_order_latest(
 }
 
 /// Reconcile one order against the exchange: query its authoritative
-/// state, apply it to the store (fills once, delta only), update the
-/// local position estimate and trigger a position reconciliation.
+/// state, apply it to the store (fills once, delta only) and update
+/// the local position estimate (published at once — D10 deleted the
+/// post-fire extra REST poll; the snapshot corrects within 5s).
 /// Returns the merged record; on any query failure the order stays
 /// exactly as it was (Unresolved is never guessed away).
 async fn reconcile_order(
@@ -498,7 +545,7 @@ async fn reconcile_order(
                 {
                     deps.orders.record_fills(&info.client_order_id, fills);
                 }
-                deps.sync.apply_fill(
+                if let Some(live) = deps.sync.apply_fill(
                     &info.account_id,
                     &info.symbol,
                     &info.side,
@@ -506,8 +553,9 @@ async fn reconcile_order(
                     merged
                         .average_fill_price
                         .unwrap_or(merged.price.unwrap_or(0.0)),
-                );
-                deps.sync.reconcile_account(&info.account_id);
+                ) {
+                    deps.bus.publish(AppEvent::AccountLive(live));
+                }
                 log(
                     deps,
                     "info",
@@ -519,8 +567,6 @@ async fn reconcile_order(
                         merged.status
                     ),
                 );
-            } else if merged.status == OrderStatus::Canceled {
-                deps.sync.reconcile_account(&info.account_id);
             }
             merged
         }
@@ -862,6 +908,7 @@ mod tests {
             sync.reconcile_state(),
             None,
             Arc::new(crate::store::orders::OrderStore::new()),
+            sync.clone(),
         ));
         sync.insert("acc-1".to_string(), adapter);
         let deps = ExecDeps {
@@ -1155,6 +1202,214 @@ mod tests {
             3,
             "invalid trigger inputs must not reach the adapter"
         );
+    }
+
+    /// D10 harness: one connected account, flat, with a fresh book and
+    /// catalog row; the fake fills per `fill_fraction` (0 = resting).
+    fn filled_harness() -> (
+        Arc<SyncManager>,
+        Arc<crate::strategy::testkit::FakeStrategyAdapter>,
+        EventBus,
+        Arc<MarketCatalog>,
+        Arc<RealtimeEngine>,
+    ) {
+        use crate::core::market::Instrument;
+        use crate::core::types::{AccountLive, OrderBook, PriceLevel};
+        use crate::core::util::now_ms;
+        use crate::strategy::testkit::{self, FakeStrategyAdapter};
+
+        let now = now_ms();
+        let (db, _dir) = testkit::temp_db();
+        let sync = Arc::new(SyncManager::new());
+        let fake = Arc::new(FakeStrategyAdapter::new("hyperliquid"));
+        db.insert_account(&testkit::account_row("acc-1", "hyperliquid"))
+            .expect("account");
+        sync.insert("acc-1".to_string(), fake.clone());
+        db.replace_instruments(
+            "hyperliquid",
+            &[Instrument {
+                exchange_id: "hyperliquid".to_string(),
+                symbol: "BTC".to_string(),
+                tick_size: Some(1.0),
+                step_size: Some(0.001),
+                min_notional: Some(10.0),
+                max_leverage: Some(40.0),
+                funding_interval_h: Some(1.0),
+                settlement_currency: "USDC".to_string(),
+                market_id: None,
+                status: "trading".to_string(),
+                updated_at: now,
+            }],
+        )
+        .expect("seed catalog");
+        let bus = EventBus::new(16);
+        let catalog = Arc::new(MarketCatalog::with_db(bus.clone(), db.clone()));
+        let streams = Arc::new(RealtimeEngine::new(bus.clone(), catalog.clone(), None));
+        {
+            let map = sync.live_map();
+            let mut m = map.write().unwrap();
+            m.insert(
+                "acc-1".to_string(),
+                AccountLive {
+                    account_id: "acc-1".to_string(),
+                    adapter_id: "hyperliquid".to_string(),
+                    wallet_key: None,
+                    status: "connected".to_string(),
+                    latency_ms: Some(50),
+                    equity_usd: 10_000.0,
+                    available_usd: 10_000.0,
+                    pnl_usd: Some(0.0),
+                    currency: "USDC".to_string(),
+                    positions: vec![],
+                    source: "rest".to_string(),
+                    degraded: false,
+                    error: None,
+                    ts: now,
+                },
+            );
+        }
+        streams.inject_book(
+            &("hyperliquid".to_string(), "BTC".to_string()),
+            OrderBook {
+                adapter_id: "hyperliquid".to_string(),
+                symbol: "BTC".to_string(),
+                bids: vec![PriceLevel(91000.0, 1.0)],
+                asks: vec![PriceLevel(91010.0, 1.0)],
+                ts: now,
+            },
+        );
+        (sync, fake, bus, catalog, streams)
+    }
+
+    fn deps_for(
+        store: Arc<OrderStore>,
+        sync: &Arc<SyncManager>,
+        catalog: &Arc<MarketCatalog>,
+        streams: &Arc<RealtimeEngine>,
+        bus: &EventBus,
+    ) -> ExecDeps {
+        ExecDeps {
+            risk: Arc::new(RiskGateway::new(RiskConfig::default())),
+            orders: store,
+            sync: sync.clone(),
+            streams: streams.clone(),
+            catalog: catalog.clone(),
+            bus: bus.clone(),
+        }
+    }
+
+    /// D10 helper: one manual buy, no trigger, no reduce-only.
+    async fn place_into(
+        deps: &ExecDeps,
+        order_type: &str,
+        qty: f64,
+        price: f64,
+    ) -> Result<OrderInfo, String> {
+        place_order(
+            deps,
+            PlaceIntent {
+                account_id: "acc-1".to_string(),
+                symbol: "BTC".to_string(),
+                side: "buy".to_string(),
+                order_type: order_type.to_string(),
+                quantity: qty,
+                price,
+                reduce_only: false,
+                trigger_px: None,
+                tpsl: None,
+                is_market: None,
+                origin: "manual".to_string(),
+            },
+        )
+        .await
+    }
+
+    /// D10 (a) + §2 + (e): a filled response applies the position at
+    /// once (no query — the fake's order-status map is empty, so the
+    /// old query path would leave the order Submitted); a partial IOC
+    /// applies only totalSz; a resting order moves nothing; an
+    /// exchange error is Rejected with the message verbatim.
+    #[tokio::test]
+    async fn filled_response_applies_position_immediately() {
+        use crate::bus::AppEvent;
+
+        let (sync, fake, bus, catalog, streams) = filled_harness();
+        let mut rx = bus.subscribe();
+        let set_fraction = |f: f64| {
+            fake.fill_fraction
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert("acc-1".to_string(), f);
+        };
+        let positions = || {
+            sync.live_states()
+                .into_iter()
+                .find(|l| l.account_id == "acc-1")
+                .map(|l| l.positions)
+                .unwrap_or_default()
+        };
+        // Full fill: position appears at once, and the UI hears it.
+        set_fraction(1.0);
+        let deps = deps_for(Arc::new(OrderStore::new()), &sync, &catalog, &streams, &bus);
+        let info = place_into(&deps, "ioc", 0.01, 90000.0)
+            .await
+            .expect("fill places");
+        assert_eq!(info.status, OrderStatus::Filled);
+        assert!((info.filled_quantity - 0.01).abs() < 1e-12);
+        assert_eq!(info.average_fill_price, Some(90000.0));
+        assert_eq!(info.remaining_quantity, 0.0);
+        let p = positions();
+        assert_eq!(p.len(), 1);
+        assert_eq!(p[0].side, "long");
+        assert!((p[0].qty - 0.01).abs() < 1e-12);
+        let mut saw_live = false;
+        for _ in 0..8 {
+            match rx.try_recv() {
+                Ok(AppEvent::AccountLive(l)) if l.account_id == "acc-1" => {
+                    assert_eq!(l.positions.len(), 1);
+                    saw_live = true;
+                    break;
+                }
+                Ok(_) => continue,
+                Err(_) => break,
+            }
+        }
+        assert!(saw_live, "fill must publish AccountLive at once");
+        // Partial IOC: only totalSz (0.01 of 0.02) is added.
+        set_fraction(0.5);
+        let deps = deps_for(Arc::new(OrderStore::new()), &sync, &catalog, &streams, &bus);
+        let info = place_into(&deps, "ioc", 0.02, 90000.0)
+            .await
+            .expect("partial places");
+        assert_eq!(info.status, OrderStatus::Filled);
+        assert!((info.filled_quantity - 0.01).abs() < 1e-12);
+        let p = positions();
+        assert_eq!(p.len(), 1);
+        assert!(
+            (p[0].qty - 0.02).abs() < 1e-12,
+            "0.01 + 0.01, not 0.01 + 0.02"
+        );
+        // Resting: the position does not move.
+        set_fraction(0.0);
+        let deps = deps_for(Arc::new(OrderStore::new()), &sync, &catalog, &streams, &bus);
+        let info = place_into(&deps, "limit", 0.01, 90000.0)
+            .await
+            .expect("resting places");
+        assert_eq!(info.status, OrderStatus::Open);
+        assert!((positions()[0].qty - 0.02).abs() < 1e-12);
+        // Exchange error: Rejected, message verbatim.
+        fake.fail_accounts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert("acc-1".to_string());
+        let store = Arc::new(OrderStore::new());
+        let deps = deps_for(store.clone(), &sync, &catalog, &streams, &bus);
+        let err = place_into(&deps, "ioc", 0.01, 90000.0).await.unwrap_err();
+        assert_eq!(err, "模拟拒单");
+        let rec = store.list().into_iter().next().expect("record kept");
+        assert_eq!(rec.status, OrderStatus::Rejected);
+        assert_eq!(rec.error.as_deref(), Some("模拟拒单"));
+        assert!((positions()[0].qty - 0.02).abs() < 1e-12);
     }
 
     /// One exchange open-orders row, for the sync tests.

@@ -349,6 +349,37 @@ pub(crate) fn build_order_action<'a>(
     (action_mp, action_json)
 }
 
+/// Parse one `statuses` entry of a place-order response (D10 §1):
+/// `filled` carries the fill (`totalSz` is the filled size — for a
+/// partial IOC, NOT the requested qty — and `avgPx` the fill price),
+/// `resting` the resting oid, `error` the exchange's own message
+/// (recorded verbatim, no wrapper), anything else is an unknown
+/// outcome — never guessed. Returns (oid, status, filled_qty,
+/// avg_px); the filled pair is (0, 0) unless the status is Filled.
+fn parse_place_status(first: &Value) -> VenueResult<(String, OrderStatus, f64, f64)> {
+    if let Some(resting) = first.get("resting") {
+        Ok((
+            resting["oid"].as_u64().unwrap_or(0).to_string(),
+            OrderStatus::Open,
+            0.0,
+            0.0,
+        ))
+    } else if let Some(filled) = first.get("filled") {
+        Ok((
+            filled["oid"].as_u64().unwrap_or(0).to_string(),
+            OrderStatus::Filled,
+            f64_from(&filled["totalSz"]),
+            f64_from(&filled["avgPx"]),
+        ))
+    } else if let Some(err) = first.get("error").and_then(|e| e.as_str()) {
+        Err(VenueError::rejected(err.to_string()))
+    } else {
+        Err(VenueError::UnknownOutcome(
+            "下单响应状态无法识别，订单状态未知".to_string(),
+        ))
+    }
+}
+
 impl HyperliquidAdapter {
     /// Resolve a catalog symbol to its asset index, using the cached
     /// meta universe (5 min TTL). The symbol is used verbatim
@@ -385,6 +416,14 @@ impl HyperliquidAdapter {
                     .collect()
             })
             .unwrap_or_default();
+        let sz_decimals: Vec<u8> = meta["universe"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .map(|u| u["szDecimals"].as_u64().unwrap_or(0) as u8)
+                    .collect()
+            })
+            .unwrap_or_default();
         if universe.is_empty() {
             return Err(VenueError::rejected(
                 "Hyperliquid 品种列表为空，无法解析交易对".to_string(),
@@ -415,6 +454,7 @@ impl HyperliquidAdapter {
         *self.asset_meta.lock().unwrap_or_else(|e| e.into_inner()) = Some(AssetMeta {
             fetched_at: Instant::now(),
             universe,
+            sz_decimals,
             dex_offset,
         });
         Ok(asset)
@@ -646,23 +686,11 @@ impl ExchangeAdapter for HyperliquidAdapter {
         let first = statuses.first().ok_or_else(|| {
             VenueError::UnknownOutcome("下单响应中没有订单状态，订单状态未知".to_string())
         })?;
-        let (oid, status) = if let Some(resting) = first.get("resting") {
-            (
-                resting["oid"].as_u64().unwrap_or(0).to_string(),
-                OrderStatus::Open,
-            )
-        } else if let Some(filled) = first.get("filled") {
-            (
-                filled["oid"].as_u64().unwrap_or(0).to_string(),
-                OrderStatus::Filled,
-            )
-        } else if let Some(err) = first.get("error").and_then(|e| e.as_str()) {
-            return Err(VenueError::rejected(format!("交易所拒绝下单：{err}")));
-        } else {
-            return Err(VenueError::UnknownOutcome(
-                "下单响应状态无法识别，订单状态未知".to_string(),
-            ));
-        };
+        let (oid, status, fill_qty, fill_px) = parse_place_status(first)?;
+        // D10: a filled response IS the fill — the returned Order
+        // carries it in quantity/price (totalSz, avgPx), not the
+        // request, so execution applies it without a query. A resting
+        // order keeps the requested qty and limit price.
         Ok(Order {
             order_id: oid,
             client_order_id: cloid,
@@ -671,8 +699,16 @@ impl ExchangeAdapter for HyperliquidAdapter {
             symbol: req.symbol,
             side: req.side,
             order_type: req.order_type,
-            quantity: req.quantity,
-            price: Some(price),
+            quantity: if status == OrderStatus::Filled {
+                fill_qty
+            } else {
+                req.quantity
+            },
+            price: Some(if status == OrderStatus::Filled {
+                fill_px
+            } else {
+                price
+            }),
             status,
             ts: now_ms(),
             trigger_px: req.trigger_px,
@@ -1082,5 +1118,40 @@ mod tests {
                 10_000
             );
         }
+    }
+
+    /// D10 §1 + (e): the three `statuses` branches and the unknown
+    /// shape. A partial IOC reports only what filled, never the
+    /// requested qty; an error is the exchange's own message,
+    /// verbatim; an unknown shape is UnknownOutcome, never guessed.
+    #[test]
+    fn place_status_parses_filled_resting_error_and_unknown() {
+        let filled =
+            serde_json::json!({"filled": {"totalSz": "0.01", "avgPx": "90000.0", "oid": 1001}});
+        let (oid, status, qty, px) = parse_place_status(&filled).expect("filled");
+        assert_eq!(oid, "1001");
+        assert_eq!(status, OrderStatus::Filled);
+        assert!((qty - 0.01).abs() < 1e-12);
+        assert!((px - 90000.0).abs() < 1e-12);
+        let partial =
+            serde_json::json!({"filled": {"totalSz": "0.004", "avgPx": "90100.0", "oid": 1002}});
+        let (_, status, qty, _) = parse_place_status(&partial).expect("partial");
+        assert_eq!(status, OrderStatus::Filled);
+        assert!((qty - 0.004).abs() < 1e-12);
+        let resting = serde_json::json!({"resting": {"oid": 1003}});
+        let (oid, status, qty, px) = parse_place_status(&resting).expect("resting");
+        assert_eq!(oid, "1003");
+        assert_eq!(status, OrderStatus::Open);
+        assert_eq!(qty, 0.0);
+        assert_eq!(px, 0.0);
+        let err = serde_json::json!({"error": "Order must have a valid price"});
+        let e = parse_place_status(&err).unwrap_err();
+        assert!(
+            matches!(e, VenueError::Rejected { ref msg, .. } if msg == "Order must have a valid price"),
+            "{e:?}"
+        );
+        let unknown = serde_json::json!({"weird": 1});
+        let e = parse_place_status(&unknown).unwrap_err();
+        assert!(matches!(e, VenueError::UnknownOutcome(_)), "{e:?}");
     }
 }
