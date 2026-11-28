@@ -24,7 +24,7 @@ import { toast } from "../store/useToastStore";
  */
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <div className="mb-4 rounded-lg border border-ds-line bg-ds-panel p-4">
+    <div className="mb-4 rounded-[10px] border border-ds-line bg-ds-panel p-4">
       <h2 className="text-[14px] font-semibold text-ds-text-1 mb-3">{title}</h2>
       {children}
     </div>

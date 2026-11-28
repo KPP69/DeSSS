@@ -200,7 +200,7 @@ export default function RiskPage() {
     <div>
       {/* Kill switch: one big toggle. Red = killing (no new orders). */}
       <div
-        className={`mb-4 rounded-lg border p-4 ${
+        className={`mb-4 rounded-[10px] border p-4 ${
           config.killSwitch
             ? "border-ds-down/60 bg-ds-down/10"
             : "border-ds-control-line bg-ds-panel"
@@ -229,7 +229,7 @@ export default function RiskPage() {
       </div>
 
       {/* Hard limits: one row per item — label + note, input, unit. */}
-      <div className="mb-4 rounded-lg border border-ds-line bg-ds-panel p-4">
+      <div className="mb-4 rounded-[10px] border border-ds-line bg-ds-panel p-4">
         <div className="mb-3 text-[13px] font-semibold text-ds-text-1">硬性限额</div>
         <div className="flex flex-col gap-3">
           {limitRow(
@@ -305,7 +305,7 @@ export default function RiskPage() {
       </div>
 
       {/* Drawdown: session equity vs the high-water mark (read-only). */}
-      <div className="mb-4 rounded-lg border border-ds-line bg-ds-panel p-4">
+      <div className="mb-4 rounded-[10px] border border-ds-line bg-ds-panel p-4">
         <div className="mb-3 text-[13px] font-semibold text-ds-text-1">回撤控制</div>
         {drawdown == null || drawdown.initialEquity == null ? (
           <div className="grid grid-cols-3 gap-3">
@@ -339,7 +339,7 @@ export default function RiskPage() {
       </div>
 
       {/* What the gateway checks, before every order. */}
-      <div className="rounded-lg border border-ds-line bg-ds-panel p-4">
+      <div className="rounded-[10px] border border-ds-line bg-ds-panel p-4">
         <div className="mb-3 text-[13px] font-semibold text-ds-text-1">下单前硬校验（全部通过才发送）</div>
         <div className="flex flex-col gap-2">
           {CHECKS.map((c) => (

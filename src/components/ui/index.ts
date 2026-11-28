@@ -12,3 +12,5 @@ export { default as Checkbox } from "./Checkbox";
 export { default as Tooltip } from "./Tooltip";
 export { default as Spinner } from "./Spinner";
 export { default as Switch } from "./Switch";
+export { default as SegmentedControl, type SegmentedOption } from "./SegmentedControl";
+export { default as RefreshButton } from "./RefreshButton";

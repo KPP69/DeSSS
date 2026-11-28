@@ -1,12 +1,12 @@
 import React, { useEffect, useLayoutEffect, useRef } from "react";
-import { Button, DataTable, Input, MultiSelectDropdown, Tooltip, trCls } from "../components/ui";
+import { Button, DataTable, Input, MultiSelectDropdown, RefreshButton, SegmentedControl, Tooltip, trCls } from "../components/ui";
 import PageState from "../components/PageState";
 import { useMarketSearch } from "../hooks/useMarketSearch";
 import { useVenueSchemas } from "../hooks/useVenueSchemas";
 import { displaySymbol } from "../lib/symbol";
 import { fmtClock } from "../lib/format";
 import type { MarketInfo, OrderBook } from "../lib/types";
-import { useDataUiStore } from "../store/useDataUiStore";
+import { useDataUiStore, type DataView } from "../store/useDataUiStore";
 import { useLiveStore } from "../store/useLiveStore";
 import { useShellActions } from "../store/useShellActions";
 import { toast } from "../store/useToastStore";
@@ -348,28 +348,15 @@ export default function DataPage() {
     register("data", {
       actions: (
         <>
-          <div className="flex rounded-lg border border-ds-line bg-ds-panel p-0.5">
-            <button
-              onClick={() => setView("signals")}
-              className={`px-3 py-1 rounded-md text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ds-focus-ring/50 ${
-                view === "signals"
-                  ? "bg-ds-accent text-ds-accent-contrast"
-                  : "text-ds-text-2 hover:text-ds-text-1"
-              }`}
-            >
-              自定义信号
-            </button>
-            <button
-              onClick={() => setView("search")}
-              className={`px-3 py-1 rounded-md text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ds-focus-ring/50 ${
-                view === "search"
-                  ? "bg-ds-accent text-ds-accent-contrast"
-                  : "text-ds-text-2 hover:text-ds-text-1"
-              }`}
-            >
-              标的查询
-            </button>
-          </div>
+          <SegmentedControl
+            ariaLabel="视图切换"
+            options={[
+              { value: "signals", label: "自定义信号" },
+              { value: "search", label: "标的查询" },
+            ]}
+            value={view}
+            onChange={(v) => setView(v as DataView)}
+          />
           <div className="w-44 shrink-0">
             <MultiSelectDropdown
               options={(schemas ?? []).map((e) => ({ value: e.id, label: e.name }))}
@@ -378,9 +365,7 @@ export default function DataPage() {
               label="交易所"
             />
           </div>
-          <Button onClick={onRefresh} loading={refreshing}>
-            刷新
-          </Button>
+          <RefreshButton onClick={onRefresh} loading={refreshing} />
         </>
       ),
     });

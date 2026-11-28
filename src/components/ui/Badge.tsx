@@ -11,7 +11,8 @@ type Tone =
   | "configured"
   | "danger";
 
-// Badge pattern: 5px dot + text, 20px tall, 5px radius, 11px text.
+// Badge pattern: 5px dot + text, 20px tall, pill (full radius, spec
+// §3.1), 11px text.
 // Semantic tones carry meaning through the dot + the colored label together
 // (the text itself always says what the state is); neutral chrome is used
 // for plain labels such as configured.
@@ -43,7 +44,7 @@ export default function Badge({
   const t = tones[tone];
   return (
     <span
-      className={`inline-flex items-center gap-1 rounded-[5px] border leading-none ${
+      className={`inline-flex items-center gap-1 rounded-full border leading-none ${
         size === "md" ? "h-6 px-2 text-xs" : "h-5 px-1.5 text-[11px]"
       } ${t.cls}`}
     >

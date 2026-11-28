@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { Button } from "../components/ui";
+import { RefreshButton, SegmentedControl } from "../components/ui";
 import {
   useTradingData,
   type CloseTarget,
@@ -38,24 +38,13 @@ export default function TradingPage() {
   return (
     <div className="flex h-full flex-col">
       <div className="mb-3 flex shrink-0 items-center justify-between">
-        <div className="flex rounded-lg border border-ds-line bg-ds-panel p-0.5">
-          {SEGMENTS.map((s) => (
-            <button
-              key={s.key}
-              onClick={() => setSegment(s.key)}
-              className={`px-3 py-1 rounded-md text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ds-focus-ring/50 ${
-                segment === s.key
-                  ? "bg-ds-accent text-ds-accent-contrast"
-                  : "text-ds-text-2 hover:text-ds-text-1"
-              }`}
-            >
-              {s.label}
-            </button>
-          ))}
-        </div>
-        <Button variant="secondary" size="sm" onClick={() => data.refresh()}>
-          刷新
-        </Button>
+        <SegmentedControl
+          ariaLabel="交易记录视图"
+          options={SEGMENTS.map((s) => ({ value: s.key, label: s.label }))}
+          value={segment}
+          onChange={(v) => setSegment(v as Segment)}
+        />
+        <RefreshButton size="sm" loading={data.manualRefreshing} onClick={data.refreshManual} />
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto">
         {segment === "positions" && (

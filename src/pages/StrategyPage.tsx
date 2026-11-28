@@ -353,7 +353,7 @@ export default function StrategyPage() {
   ) => {
     const legAccounts = accounts.filter((a) => a.exchangeId === leg.exchangeId);
     return (
-      <div className="rounded-lg border border-ds-line bg-ds-panel-2/50 p-4">
+      <div className="rounded-[10px] border border-ds-line bg-ds-panel-2/50 p-4">
         <div className="mb-3 text-[13px] font-semibold text-ds-text-1">{title}</div>
         {/* Exchange column is 130px (F4.3): wide enough for the
             longest venue name, Hyperliquid, without truncating the
@@ -422,7 +422,7 @@ export default function StrategyPage() {
   return (
     <div>
       {formOpen && formStep === "type" && !editingId && (
-        <div className="mb-5 rounded-xl border border-ds-line bg-ds-panel p-4">
+        <div className="mb-5 rounded-[10px] border border-ds-line bg-ds-panel p-4">
           <div className="mb-4 text-[13px] font-semibold text-ds-text-1">选择策略类型</div>
           <div className="space-y-2">
             {STRATEGY_TYPES.map((t) => (
@@ -436,7 +436,7 @@ export default function StrategyPage() {
                       }
                     : undefined
                 }
-                className={`flex items-center gap-3 rounded-lg border border-ds-line bg-ds-panel-2/50 px-4 py-3 ${
+                className={`flex items-center gap-3 rounded-[10px] border border-ds-line bg-ds-panel-2/50 px-4 py-3 ${
                   t.available ? "cursor-pointer hover:border-ds-accent" : "opacity-60"
                 }`}
               >
@@ -457,7 +457,7 @@ export default function StrategyPage() {
       )}
 
       {formOpen && formStep === "config" && (
-        <div className="mb-5 rounded-xl border border-ds-line bg-ds-panel p-4">
+        <div className="mb-5 rounded-[10px] border border-ds-line bg-ds-panel p-4">
           <div className="mb-4 text-[13px] font-semibold text-ds-text-1">
             {editingId ? "编辑实例" : "新建实例"} · {kindName(selectedKind ?? "spread")}
           </div>

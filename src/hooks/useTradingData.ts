@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useInvoke } from "./useInvoke";
 import { useVenueSchemas } from "./useVenueSchemas";
 import { api } from "../lib/tauri";
@@ -223,6 +223,32 @@ export function useTradingData() {
   const listsLoading = lists.loading && lists.data == null;
   const listsError = lists.error;
 
+  // Manual refresh (F5.1a): the refresh button's loading reflects
+  // ONLY a manual click — the 10s interval never sets it, and the
+  // initial page load still goes through PageState (listsLoading),
+  // not the button. A click sets the flag; the flag clears when the
+  // fetch it started has actually run (loading true) and finished
+  // (loading false). The seenLoading guard stops the flag clearing
+  // in the same render as the click, before the fetch has started.
+  const [manualRefreshing, setManualRefreshing] = useState(false);
+  const manualSeenLoadingRef = useRef(false);
+  const refreshManual = useCallback(() => {
+    manualSeenLoadingRef.current = false;
+    setManualRefreshing(true);
+    lists.refresh();
+  }, [lists.refresh]);
+  useEffect(() => {
+    if (!manualRefreshing) return;
+    if (lists.loading) {
+      manualSeenLoadingRef.current = true;
+      return;
+    }
+    if (manualSeenLoadingRef.current) {
+      manualSeenLoadingRef.current = false;
+      setManualRefreshing(false);
+    }
+  }, [manualRefreshing, lists.loading]);
+
   // Strategy instances (F4.1): a position shows the strategy whose leg
   // it is (matched by account + native symbol), or 手动 when none.
   const strategies = useInvoke(() => api.listStrategies(), []);
@@ -327,6 +353,8 @@ export function useTradingData() {
     tradeAccounts,
     listsLoading,
     listsError,
+    manualRefreshing,
+    refreshManual,
     refresh: lists.refresh,
     cancel,
     cancelingId,

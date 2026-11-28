@@ -25,7 +25,7 @@ export default function Sidebar() {
               key={i.key}
               onClick={() => setPage(i.key)}
               className={
-                "relative h-10 flex items-center px-3 text-sm rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ds-focus-ring/50 " +
+                "relative h-10 flex items-center px-3 text-[13px] rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ds-focus-ring/50 " +
                 (active
                   ? "bg-ds-accent-soft/10 text-ds-text-1 font-medium"
                   : "text-ds-text-2 hover:bg-ds-bg-2 hover:text-ds-text-1")
