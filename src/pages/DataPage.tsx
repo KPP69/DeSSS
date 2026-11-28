@@ -4,6 +4,7 @@ import PageState from "../components/PageState";
 import { useMarketSearch } from "../hooks/useMarketSearch";
 import { useVenueSchemas } from "../hooks/useVenueSchemas";
 import { displaySymbol } from "../lib/symbol";
+import { fmtClock } from "../lib/format";
 import type { MarketInfo, OrderBook } from "../lib/types";
 import { useDataUiStore } from "../store/useDataUiStore";
 import { useLiveStore } from "../store/useLiveStore";
@@ -60,10 +61,6 @@ function fmtStep(n: number | null): string {
 function fmtTime(ms: number | null): string {
   if (ms == null) return "—";
   return new Date(ms).toLocaleString("zh-CN", { hour12: false });
-}
-
-function fmtClock(ms: number): string {
-  return new Date(ms).toLocaleTimeString("zh-CN", { hour12: false });
 }
 
 /** Compact USD amount: $3.41B / $913.79M / $12.5K / $480. */

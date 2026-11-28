@@ -1,10 +1,11 @@
 import { create } from "zustand";
 
 /**
- * Toasts (F1): top-right, auto-dismiss after 3s, success / error.
- * Messages show verbatim — write-op failures pass the backend's own
- * error text, never a rewrite. At most 3 visible at once; further
- * pushes queue and are promoted (fresh 3s timer) as visible ones dismiss.
+ * Toasts (F1): below the title bar (F4.5), auto-dismiss after 3s,
+ * success / error. Messages show verbatim — write-op failures pass
+ * the backend's own error text, never a rewrite. At most 3 visible
+ * at once; further pushes queue and are promoted (fresh 3s timer) as
+ * visible ones dismiss.
  */
 export type ToastKind = "success" | "error";
 export type ToastItem = { id: number; kind: ToastKind; message: string };

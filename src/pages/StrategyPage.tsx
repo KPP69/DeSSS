@@ -5,6 +5,7 @@ import { useInvoke } from "../hooks/useInvoke";
 import { useVenueSchemas } from "../hooks/useVenueSchemas";
 import { api } from "../lib/tauri";
 import { displaySymbol } from "../lib/symbol";
+import { fmtClock } from "../lib/format";
 import type { LegRef, MarketInfo, SaveStrategyInput, SpreadParams, StrategyView } from "../lib/types";
 import { useAccountStore } from "../store/useAccountStore";
 import { useShellActions } from "../store/useShellActions";
@@ -27,11 +28,6 @@ import { useVenueStore } from "../store/useVenueStore";
  * exchange are unaffected). Deleting asks first too (irreversible;
  * positions and protection orders on the exchange are unaffected).
  */
-
-function fmtClock(ms: number | null): string {
-  if (ms == null) return "—";
-  return new Date(ms).toLocaleTimeString("zh-CN", { hour12: false });
-}
 
 type LegForm = { exchangeId: string; accountId: string; symbol: string };
 

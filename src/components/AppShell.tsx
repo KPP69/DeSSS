@@ -15,7 +15,8 @@ import { useShellActions } from "../store/useShellActions";
  *   from App; a page with no actions gets no toolbar at all (the
  *   bar collapses, it is not rendered empty)
  * - main: independently scrolling content area, px-5 py-4
- * Console drawer slides up from the bottom; toasts sit top-right.
+ * Console drawer slides up from the bottom; toasts sit below the
+ * title bar (top 64px), above content and modals.
  * Pages only provide their title, toolbar content, and content —
  * never their own chrome.
  */
