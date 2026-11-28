@@ -72,7 +72,7 @@ export default function PositionsSection({
         headers={["策略 · 交易所", "交易对", "方向", "数量", "开仓价 / 标记价", "未实现盈亏", "当前保护", "操作"]}
         minWidth={680}
         colWidths={["16%", "9%", "6%", "9%", "15%", "12%", "13%", "20%"]}
-        aligns={["left", "center", "center", "right", "right", "right", "right", "center"]}
+        aligns={["left", "left", "center", "right", "right", "right", "right", "center"]}
         emptyText="暂无真实持仓 — 连接账户后，交易所同步到的当前持仓会显示在这里。"
         onRowClick={(i) => onToggleExpand(positionKey(positions[i]))}
         onRowKeyDown={(i, e) => {
@@ -158,7 +158,7 @@ export default function PositionsSection({
               <DataTable
                 headers={["订单号", "类型", "触发价", "数量", "状态", "操作"]}
                 minWidth={640}
-                aligns={["center", "center", "right", "right", "center", "center"]}
+                aligns={["left", "center", "right", "right", "center", "center"]}
                 rows={prot.orders.map((o) => [
                   <span key="o" className="num">{o.orderId || o.clientOrderId}</span>,
                   <span key="t">

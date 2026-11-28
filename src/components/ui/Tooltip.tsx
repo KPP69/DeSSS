@@ -37,7 +37,7 @@ export default function Tooltip({
     >
       {children}
       {open && (
-        <span className="absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 z-[9999] max-w-56 whitespace-normal break-words rounded-md border border-ds-line bg-ds-panel-2 px-2 py-1 text-xs text-ds-text-1 shadow-card pointer-events-none">
+        <span className="absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 z-[9999] max-w-56 whitespace-normal break-words rounded border border-ds-line bg-ds-panel-2 px-2 py-1 text-xs text-ds-text-1 shadow-card pointer-events-none">
           {content}
         </span>
       )}

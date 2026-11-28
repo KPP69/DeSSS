@@ -260,3 +260,5 @@ export const trCls =
 export const tdClsCompact = "num text-center px-3 py-1.5 text-[13px] text-ds-text-1";
 /** Compact right-aligned variant, for amount columns in dense lists. */
 export const tdClsCompactRight = "num text-right px-3 py-1.5 text-[13px] text-ds-text-1";
+/** Compact left-aligned variant, for identifier columns in dense lists (spec §4.1). */
+export const tdClsCompactLeft = "num text-left px-3 py-1.5 text-[13px] text-ds-text-1";

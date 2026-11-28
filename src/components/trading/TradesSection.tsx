@@ -55,7 +55,7 @@ export default function TradesSection({
           headers={["时间", "账户 · 交易所", "交易对", "方向", "数量", "价格", "手续费", "来源"]}
           minWidth={680}
           colWidths={["11%", "24%", "10%", "7%", "9%", "12%", "13%", "14%"]}
-          aligns={["center", "center", "center", "center", "right", "right", "right", "center"]}
+          aligns={["right", "left", "left", "center", "right", "right", "right", "left"]}
           rows={sorted.map((f) => {
             const origin =
               originByOrder.get(f.orderId) ?? originByOrder.get(f.clientOrderId);

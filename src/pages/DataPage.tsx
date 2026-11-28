@@ -49,7 +49,7 @@ function trimZeros(s: string): string {
 }
 
 /** F4.3: 16px column spacing (px-2 each side) for the data table. */
-const TD = "num text-center px-2 py-1.5 text-[13px] text-ds-text-1";
+const TD = "num text-left px-2 py-1.5 text-[13px] text-ds-text-1";
 const TD_RIGHT = "num text-right px-2 py-1.5 text-[13px] text-ds-text-1";
 
 /** Step / notional values print without scientific notation. */
@@ -83,8 +83,8 @@ const HEADERS = [
 ];
 // Fixed column ratios, summing to 100 (960x640-safe, horizontal scroll).
 const COL_WIDTHS = ["12%", "16%", "16%", "24%", "22%", "10%"];
-// Numbers right-aligned (header and cells alike); names centered.
-const COL_ALIGNS = ["center", "center", "right", "right", "right", "right"] as const;
+// Numbers right-aligned (header and cells alike); identifiers left.
+const COL_ALIGNS = ["left", "left", "right", "right", "right", "right"] as const;
 
 /** One fragment per market (row + optional detail row), returned as
  * an array so DataTable sees each market as one row group — that is

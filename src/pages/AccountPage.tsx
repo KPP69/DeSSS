@@ -1,7 +1,7 @@
 import React, { useEffect, useLayoutEffect, useMemo, useState } from "react";
 import AccountModal from "../components/AccountModal";
 import PageState from "../components/PageState";
-import { Badge, Button, ConfirmDialog, DataTable, StatCard, Tooltip, tdClsCompact, tdClsCompactRight, trCls } from "../components/ui";
+import { Badge, Button, ConfirmDialog, DataTable, StatCard, Tooltip, tdClsCompact, tdClsCompactLeft, tdClsCompactRight, trCls } from "../components/ui";
 import { useVenueSchemas } from "../hooks/useVenueSchemas";
 import { useAccountStore } from "../store/useAccountStore";
 import type { AccountView } from "../lib/types";
@@ -193,7 +193,7 @@ export default function AccountPage() {
         minWidth={680}
         compact
         colWidths={["14%", "12%", "20%", "14%", "12%", "11%", "17%"]}
-        aligns={["center", "center", "center", "center", "right", "right", "center"]}
+        aligns={["left", "left", "left", "center", "right", "right", "center"]}
       >
         {accounts.map((a) => {
           const lv = live[a.id];
@@ -216,7 +216,7 @@ export default function AccountPage() {
               }
             }}
           >
-            <td className={tdClsCompact}>
+            <td className={tdClsCompactLeft}>
               <Tooltip content={a.label}>
                 <span className="block truncate">{a.label}</span>
               </Tooltip>
@@ -224,8 +224,8 @@ export default function AccountPage() {
                 <span className="block text-[11px] text-ds-warn">未配置凭证</span>
               )}
             </td>
-            <td className={`${tdClsCompact} leading-tight`}>{venueName(a.exchangeId)}</td>
-            <td className={`${tdClsCompact} num`}>
+            <td className={`${tdClsCompactLeft} leading-tight`}>{venueName(a.exchangeId)}</td>
+            <td className={`${tdClsCompactLeft} num`}>
               <span className="block truncate">{a.maskedIdentifier}</span>
             </td>
             <td className={tdClsCompact}>

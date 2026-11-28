@@ -525,7 +525,7 @@ export default function StrategyPage() {
         <DataTable
           headers={["启用", "A 腿", "B 腿", "参数摘要", "最近评估", "最近错误", "累计下单", "操作"]}
           colWidths={["7%", "17%", "17%", "16%", "10%", "13%", "7%", "13%"]}
-          aligns={["center", "center", "center", "center", "center", "center", "right", "center"]}
+          aligns={["center", "left", "left", "center", "right", "center", "right", "center"]}
           rows={instances.map((v) => [
             <Switch
               checked={v.enabled}

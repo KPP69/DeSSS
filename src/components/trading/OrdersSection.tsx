@@ -97,7 +97,7 @@ export default function OrdersSection({
             headers={["时间", "账户 · 交易所", "交易对", "方向", "数量", "价格", "状态", "来源", "操作"]}
             minWidth={680}
             colWidths={["11%", "18%", "10%", "6%", "10%", "11%", "9%", "13%", "12%"]}
-            aligns={["center", "center", "center", "center", "right", "right", "center", "center", "center"]}
+            aligns={["right", "left", "left", "center", "right", "right", "center", "left", "center"]}
             rows={openOrders.map((o) => [
               <span key="t" className="num">{new Date(o.createdAt).toLocaleTimeString()}</span>,
               <AccountCell key="a" accountId={o.accountId} exchangeId={o.exchangeId} labelOf={labelOf} venueName={venueName} maxW="max-w-[90px]" />,
@@ -153,10 +153,10 @@ export default function OrdersSection({
       ) : (
         <div className="mb-6">
           <DataTable
-            headers={["时间", "账户 · 交易所", "交易对", "方向", "数量", "价格", "已成交", "状态", "来源", "说明"]}
+            headers={["时间", "账户 · 交易所", "交易对", "方向", "数量 / 已成交", "价格", "状态", "来源", "说明"]}
             minWidth={680}
-            colWidths={["8%", "20%", "8%", "6%", "8%", "10%", "10%", "8%", "11%", "11%"]}
-            aligns={["center", "center", "center", "center", "right", "right", "right", "center", "center", "left"]}
+            colWidths={["8%", "20%", "8%", "6%", "14%", "10%", "8%", "11%", "15%"]}
+            aligns={["right", "left", "left", "center", "right", "right", "center", "left", "left"]}
             rows={records.map((o) => [
               <span key="t" className="num">
                 {new Date(o.createdAt).toLocaleTimeString()}
@@ -166,13 +166,15 @@ export default function OrdersSection({
               <span key="d">
                 <Badge tone={o.side === "buy" ? "up" : "down"}>{o.side === "buy" ? "买" : "卖"}</Badge>
               </span>,
-              <span key="q" className="num">{o.quantity}</span>,
-              <span key="p" className="num">{o.price ?? "—"}</span>,
-              <span key="f" className="num">
-                {o.filledQuantity > 0
-                  ? `${o.filledQuantity}${o.averageFillPrice != null ? ` @ ${o.averageFillPrice}` : ""}`
-                  : "—"}
+              <span key="q" className="num">
+                <span className="block">{o.quantity}</span>
+                <span className="block text-xs text-ds-text-2">
+                  {o.filledQuantity > 0
+                    ? `已成交 ${o.filledQuantity}${o.averageFillPrice != null ? ` @ ${o.averageFillPrice}` : ""}`
+                    : "—"}
+                </span>
               </span>,
+              <span key="p" className="num">{o.price ?? "—"}</span>,
               <span key="st">
                 <Badge tone={statusTone(o.status)}>{STATUS_LABEL[o.status] ?? o.status}</Badge>
               </span>,
