@@ -1,5 +1,5 @@
 import React, { useEffect, useLayoutEffect, useRef } from "react";
-import { Button, DataTable, Input, MultiSelectDropdown, tdClsCompact, tdClsCompactRight, trCls } from "../components/ui";
+import { Button, DataTable, Input, MultiSelectDropdown, Tooltip, trCls } from "../components/ui";
 import PageState from "../components/PageState";
 import { useMarketSearch } from "../hooks/useMarketSearch";
 import { useVenueSchemas } from "../hooks/useVenueSchemas";
@@ -8,10 +8,11 @@ import type { MarketInfo, OrderBook } from "../lib/types";
 import { useDataUiStore } from "../store/useDataUiStore";
 import { useLiveStore } from "../store/useLiveStore";
 import { useShellActions } from "../store/useShellActions";
+import { toast } from "../store/useToastStore";
 import { useVenueStore } from "../store/useVenueStore";
 
-/** A streamed book counts as live for 5s; older than that the row falls
- * back to the 2s REST values (same threshold as the backend). */
+/** A streamed book counts as live for 5s; older than that the row's
+ * bid/ask read 无实时数据 (F4.3 — the old REST fallback is gone). */
 const LIVE_MS = 5000;
 /** A quote (mark/funding, from quote_at) counts as live for 15s
  * (PR-B1); older than that the row's mark/funding read 无实时数据. */
@@ -46,16 +47,9 @@ function trimZeros(s: string): string {
   return s.replace(/0+$/, "").replace(/\.$/, "");
 }
 
-/** Short venue names for the exchange column (F4.1) — the full
- * names stay in the account page and the venue status line. */
-const SHORT_VENUE_NAMES: Record<string, string> = {
-  hyperliquid: "HL",
-  entropy: "Entropy",
-  lighter: "Lighter",
-  lighter_robinhood: "Lighter RH",
-  asterdex: "AsterDEX",
-  arcus: "Arcus",
-};
+/** F4.3: 16px column spacing (px-2 each side) for the data table. */
+const TD = "num text-center px-2 py-1.5 text-[13px] text-ds-text-1";
+const TD_RIGHT = "num text-right px-2 py-1.5 text-[13px] text-ds-text-1";
 
 /** Step / notional values print without scientific notation. */
 function fmtStep(n: number | null): string {
@@ -91,7 +85,7 @@ const HEADERS = [
   "杠杆",
 ];
 // Fixed column ratios, summing to 100 (960x640-safe, horizontal scroll).
-const COL_WIDTHS = ["16%", "18%", "16%", "18%", "20%", "12%"];
+const COL_WIDTHS = ["12%", "16%", "16%", "24%", "22%", "10%"];
 // Numbers right-aligned (header and cells alike); names centered.
 const COL_ALIGNS = ["center", "center", "right", "right", "right", "right"] as const;
 
@@ -112,21 +106,29 @@ function marketRowNodes({
   expandedKey: string | null;
   onToggle: (key: string) => void;
   venueName: (id: string) => string;
+  /** When each row first appeared on screen (F4.3): a row with no WS
+   * frame yet reads 载入中 for its first 5s, then 无实时数据. */
   firstSeenAt: Map<string, number>;
 }): React.ReactNode[] {
   return rows.map((m) => {
     const key = `${m.exchangeId}:${m.symbol}`;
-    // A fresh streamed book overrides the 2s REST bid/ask; a stale
-    // one falls back to the catalog values so a dead stream never
-    // freezes the row on an old price.
     const book = books[key];
     const liveFresh = book != null && Date.now() - book.ts <= LIVE_MS;
-    const bidPx = liveFresh ? (book.bids[0]?.[0] ?? null) : m.bidPx;
-    const askPx = liveFresh ? (book.asks[0]?.[0] ?? null) : m.askPx;
+    // F4.3 three states for the live columns (bid/ask + funding):
+    // live = a WS frame within 5s; loading = no frame yet and the row
+    // appeared under 5s ago; stale = a frame that went quiet, or no
+    // frame at all for 5s+. The REST bid/ask snapshot is never shown.
+    const seenAt = firstSeenAt.get(key);
+    const liveState: "loading" | "live" | "stale" = liveFresh
+      ? "live"
+      : book != null || (seenAt != null && Date.now() - seenAt >= LIVE_MS)
+        ? "stale"
+        : "loading";
+    const bidPx = liveFresh ? (book.bids[0]?.[0] ?? null) : null;
+    const askPx = liveFresh ? (book.asks[0]?.[0] ?? null) : null;
     // PR-B1: mark/funding freshness from quote_at (15s), not the WS
     // book: a known-old quote_at reads 无实时数据 at once; a row that
     // never had a quote write reads 载入中 for its first 15s.
-    const seenAt = firstSeenAt.get(key);
     const quoteFresh = m.quoteAt != null && Date.now() - m.quoteAt <= QUOTE_STALE_MS;
     const quoteState: "loading" | "live" | "stale" = quoteFresh
       ? "live"
@@ -160,13 +162,11 @@ function marketRowNodes({
       m.fundingApr == null
         ? "—"
         : `${m.fundingApr >= 0 ? "+" : ""}${trimZeros(m.fundingApr.toFixed(2))}%`;
-    // 2x7 detail grid (F4.1 order): row 1 (primary): 指数价 / 中间价 /
-    // 资金费率 / 价格步长 / 数量步长 / 结算币种 / 目录更新; row 2
-    // (secondary): 持仓量 / 成交额 / 下次结算 / 最小名义 / 最大杠杆 /
-    // 费率周期 / 盘口更新. Mid is always (bid + ask) / 2 from the live
-    // book — never the catalog midPx, which no longer carries a value.
-    // Leverage prints floored (13.33 → 13x); the other numbers trim
-    // trailing zeros.
+    // 2x7 detail fields (F4.1 order): block 1 — 指数价 / 中间价 /
+    // 资金费率 / 价格步长 / 数量步长 / 结算币种 / 目录更新; block 2 —
+    // 持仓量 / 成交额 / 下次结算 / 最小名义 / 最大杠杆 / 费率周期 /
+    // 盘口更新. Mid is always (bid + ask) / 2 from the live book —
+    // never the catalog midPx, which no longer carries a value.
     const detail: [string, React.ReactNode][] = [
       ["指数价", quoteState === "live" ? fmtPrice(m.indexPx, m.tickSize) : quoteStateText],
       [
@@ -208,17 +208,31 @@ function marketRowNodes({
             }
           }}
         >
-          <td className={tdClsCompact}>{venueName(m.exchangeId)}</td>
-          <td className={`${tdClsCompact} num whitespace-nowrap`}>{displaySymbol(m.symbol)}</td>
-          <td className={`${tdClsCompactRight} num whitespace-nowrap`}>
+          <td className={TD}>{venueName(m.exchangeId)}</td>
+          <td className={TD}>
+            <Tooltip content={displaySymbol(m.symbol)}>
+              <span className="inline-block max-w-[90px] truncate align-middle num">
+                {displaySymbol(m.symbol)}
+              </span>
+            </Tooltip>
+          </td>
+          <td className={`${TD_RIGHT} whitespace-nowrap`}>
             {quoteState === "live" ? fmtPrice(m.markPx, m.tickSize) : quoteStateText}
           </td>
-          <td className={`${tdClsCompactRight} num whitespace-nowrap`}>
-            <span className="text-ds-up">{fmtPrice(bidPx, m.tickSize)}</span>
-            {" / "}
-            <span className="text-ds-down">{fmtPrice(askPx, m.tickSize)}</span>
+          <td className={`${TD_RIGHT} whitespace-nowrap`}>
+            {liveState === "live" ? (
+              <>
+                <span className="text-ds-up">{fmtPrice(bidPx, m.tickSize)}</span>
+                {" / "}
+                <span className="text-ds-down">{fmtPrice(askPx, m.tickSize)}</span>
+              </>
+            ) : (
+              <span className="text-ds-text-3">
+                {liveState === "loading" ? "载入中" : "无实时数据"}
+              </span>
+            )}
           </td>
-          <td className={`${tdClsCompactRight} num whitespace-nowrap`}>
+          <td className={`${TD_RIGHT} whitespace-nowrap`}>
             {quoteState === "live" ? (
               <>
                 <span className={rateCls}>{fundingText}</span>
@@ -229,18 +243,29 @@ function marketRowNodes({
               quoteStateText
             )}
           </td>
-          <td className={`${tdClsCompactRight} num whitespace-nowrap`}>
+          <td className={`${TD_RIGHT} whitespace-nowrap`}>
             {m.maxLeverage == null ? "—" : `${Math.floor(m.maxLeverage)}x`}
           </td>
         </tr>
         {expandedKey === key && (
           <tr className="border-t border-ds-line bg-ds-panel-2/50">
             <td colSpan={HEADERS.length} className="px-4 py-3 text-left">
-              <div className="grid grid-cols-7 gap-x-2 gap-y-3 text-xs num">
-                {detail.map(([label, value], i) => (
-                  <div key={label} className="min-w-0">
-                    <div className={`break-words ${i < 7 ? "text-ds-text-1" : "text-ds-text-2"}`}>{value}</div>
-                    <div className="text-ds-text-3">{label}</div>
+              {/* F4.3: label row + value row per block (two blocks of 7
+                  columns); block 1 values primary, block 2 secondary. */}
+              <div className="space-y-3 text-xs num">
+                {[detail.slice(0, 7), detail.slice(7)].map((block, b) => (
+                  <div key={b} className="grid grid-cols-7 gap-x-2 gap-y-1">
+                    {block.map(([label]) => (
+                      <div key={label} className="text-ds-text-3">{label}</div>
+                    ))}
+                    {block.map(([label, value]) => (
+                      <div
+                        key={label}
+                        className={`min-w-0 break-words ${b === 0 ? "text-ds-text-1" : "text-ds-text-2"}`}
+                      >
+                        {value}
+                      </div>
+                    ))}
                   </div>
                 ))}
               </div>
@@ -260,7 +285,6 @@ export default function DataPage() {
   const { schemas } = useVenueSchemas();
   const names = useVenueStore((s) => s.names);
   const venueName = (id: string) => names[id] ?? id;
-  const shortVenueName = (id: string) => SHORT_VENUE_NAMES[id] ?? venueName(id);
 
   const {
     query,
@@ -280,21 +304,41 @@ export default function DataPage() {
     onRefresh,
   } = search;
 
-  // First-seen times for the quote loading grace (PR-B1): a row whose
-  // quote was never written reads 载入中 for its first 15s on screen,
-  // then 无实时数据.
-  const firstSeenRef = useRef<Map<string, number>>(new Map());
+  // First-seen times for the three-state rows (F4.3): a row with no
+  // WS frame reads 载入中 for its first 5s, then 无实时数据.
+  const firstSeenRef = useRef(new Map<string, number>());
   useEffect(() => {
     const now = Date.now();
     const seen = firstSeenRef.current;
-    for (const m of results) {
-      const k = `${m.exchangeId}:${m.symbol}`;
+    for (const r of results) {
+      const k = `${r.exchangeId}:${r.symbol}`;
       if (!seen.has(k)) seen.set(k, now);
     }
     for (const k of [...seen.keys()]) {
-      if (!results.some((m) => `${m.exchangeId}:${m.symbol}` === k)) seen.delete(k);
+      if (!results.some((r) => `${r.exchangeId}:${r.symbol}` === k)) seen.delete(k);
     }
   }, [results]);
+
+  // Refresh failures surface as a toast (F4.3): the refresh runs in
+  // the background and only reports through the venue status, so the
+  // error is toasted when it first appears (or changes) — a
+  // persisting error is never re-toasted, and success stays silent.
+  // The first observation is recorded without toasting.
+  const prevVenueErrors = useRef<Map<string, string | null> | null>(null);
+  useEffect(() => {
+    if (!venueStatus) return;
+    const cur = new Map(
+      venueStatus.venues.map((v) => [v.exchangeId, v.error ?? null] as const),
+    );
+    const prev = prevVenueErrors.current;
+    prevVenueErrors.current = cur;
+    if (prev == null) return;
+    for (const [id, err] of cur) {
+      if (err != null && prev.get(id) !== err) {
+        toast.error(`${venueName(id)} 拉取失败：${err}`);
+      }
+    }
+  }, [venueStatus, venueName]);
 
   // Toolbar (F1): view toggle + exchange filter + refresh on the
   // left, catalog update time on the right (F4.1: refresh and the
@@ -404,13 +448,13 @@ export default function DataPage() {
               <div className="text-xs text-ds-text-3 mb-2 h-4">
                 {searching ? "搜索中…" : ""}
               </div>
-              <DataTable headers={HEADERS} minWidth={680} colWidths={COL_WIDTHS} aligns={[...COL_ALIGNS]} compact>
+              <DataTable headers={HEADERS} minWidth={680} colWidths={COL_WIDTHS} aligns={[...COL_ALIGNS]} compact dense>
                 {marketRowNodes({
                   rows: results,
                   books,
                   expandedKey,
                   onToggle: (key) => setExpandedKey((cur) => (cur === key ? null : key)),
-                  venueName: shortVenueName,
+                  venueName,
                   firstSeenAt: firstSeenRef.current,
                 })}
               </DataTable>

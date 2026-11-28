@@ -62,6 +62,7 @@ export default function DataTable({
   minWidth = 720,
   children,
   compact = false,
+  dense = false,
   colWidths,
   aligns,
   onRowClick,
@@ -74,6 +75,10 @@ export default function DataTable({
   children?: React.ReactNode;
   /** Compact rows: tighter padding and smaller text (e.g. account list). */
   compact?: boolean;
+  /** Dense: 16px column spacing (px-2 each side) instead of compact's
+   * 24px — the Data page (F4.3). Only affects header + rows-path cells;
+   * hand-built children rows use their own cell classes. */
+  dense?: boolean;
   /** Fixed column widths (px or CSS length), one per header. */
   colWidths?: (number | string)[];
   /** Per-column alignment, one per header; defaults to center. */
@@ -99,7 +104,7 @@ export default function DataTable({
           {cells.map((cell, j) => (
             <td
               key={j}
-              className={`num ${alignCls[aligns?.[j] ?? "center"]} text-ds-text-1 ${compact ? "px-3 py-1.5 text-[13px]" : "px-4 py-3"}`}
+              className={`num ${alignCls[aligns?.[j] ?? "center"]} text-ds-text-1 ${compact ? (dense ? "px-2 py-1.5 text-[13px]" : "px-3 py-1.5 text-[13px]") : "px-4 py-3"}`}
             >
               {cell}
             </td>
@@ -212,7 +217,7 @@ export default function DataTable({
               <th
                 key={h}
                 className={`${alignCls[aligns?.[i] ?? "center"]} font-medium text-ds-text-2 whitespace-nowrap ${
-                  compact ? "px-3 py-1.5 text-xs" : "px-4 py-3 text-xs"
+                  compact ? (dense ? "px-2 py-1.5 text-xs" : "px-3 py-1.5 text-xs") : "px-4 py-3 text-xs"
                 } ${virtualized ? "sticky top-0 bg-ds-panel z-10" : ""}`}
               >
                 {h}

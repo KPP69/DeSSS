@@ -347,7 +347,10 @@ export default function StrategyPage() {
     return (
       <div className="rounded-lg border border-ds-line bg-ds-panel-2/50 p-4">
         <div className="mb-3 text-[13px] font-semibold text-ds-text-1">{title}</div>
-        <div className="grid grid-cols-3 gap-3">
+        {/* Exchange column is 130px (F4.3): wide enough for the
+            longest venue name, Hyperliquid, without truncating the
+            trigger. Account / symbol share the rest. */}
+        <div className="grid grid-cols-[130px_minmax(0,1fr)_minmax(0,1fr)] gap-3">
           <label className="block">
             <span className="mb-1 block text-xs text-ds-text-2">交易所</span>
             <SelectDropdown
