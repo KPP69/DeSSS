@@ -13,7 +13,9 @@ use super::{
 };
 use crate::bus::AppEvent;
 use crate::core::error::{VenueError, VenueResult};
-use crate::core::types::{AccountLive, Balance, LivePosition, Order, OrderRequest, Position};
+use crate::core::types::{
+    AccountLive, Balance, LivePosition, Order, OrderInfo, OrderRequest, Position, TradeInfo,
+};
 use crate::core::util::{f64_from, now_ms};
 use crate::venues::ExchangeAdapter;
 
@@ -109,6 +111,45 @@ fn parse_positions(v: &Value) -> Vec<LivePosition> {
     out
 }
 
+/// Map an order endpoint's non-2xx response to a `VenueError`
+/// (order §三.12): 4xx → Rejected{code, msg}; -5050 → Rejected
+/// (deposit message); 429 → RateLimited; 418 → Rejected (the
+/// 2-minute cool-down is recorded by `signed_request`); 5xx → Transport.
+fn map_order_error(status: reqwest::StatusCode, body: &str, path: &str) -> VenueError {
+    let v: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+    let code = v["code"].as_i64();
+    let msg = v["msg"].as_str().unwrap_or("").to_string();
+    if code == Some(-5050) {
+        return VenueError::Rejected {
+            code: Some(-5050),
+            msg: "该账户未入金，AsterDEX 交易不可用".to_string(),
+        };
+    }
+    match status.as_u16() {
+        429 => VenueError::RateLimited {
+            code,
+            msg: if msg.is_empty() {
+                "请求过于频繁".to_string()
+            } else {
+                msg
+            },
+        },
+        418 => VenueError::Rejected {
+            code: Some(418),
+            msg: "AsterDEX 触发 IP 限流，已冷却 2 分钟".to_string(),
+        },
+        _ if status.is_client_error() => VenueError::Rejected {
+            code,
+            msg: if msg.is_empty() {
+                body.chars().take(200).collect()
+            } else {
+                msg
+            },
+        },
+        _ => VenueError::transport(format!("AsterDEX {path} 接口返回 HTTP {status}")),
+    }
+}
+
 impl AsterdexAdapter {
     fn next_nonce(&self) -> u128 {
         let now = std::time::SystemTime::now()
@@ -179,33 +220,123 @@ impl AsterdexAdapter {
         }
         self.publish_live();
     }
-    /// One V3 signed USER_DATA GET (Agent-wallet mode). The signed string
-    /// is the endpoint params (if any) followed by `user` / `signer` /
-    /// `nonce`; the EIP-712 signature is appended last. No API-key
-    /// header — V3 authenticates by signature alone.
-    async fn signed_get_v3(&self, path: &str, endpoint_params: &str) -> Result<Value, String> {
-        let agent = &self.agent;
-        let nonce = self.next_nonce();
-        let auth = format!("user={}&signer={}&nonce={nonce}", agent.user, agent.signer);
-        let msg = if endpoint_params.is_empty() {
-            auth
-        } else {
-            format!("{endpoint_params}&{auth}")
-        };
-        let signature = sign_v3(&agent.secret, &msg)?;
-        let url = format!("{ASTER_REST_URL}{path}?{msg}&signature={signature}");
-        let resp = crate::net::send_read(|| self.http.get(&url))
-            .await
-            .map_err(|e| format!("AsterDEX {path} 请求失败：{e}"))?;
-        let status = resp.status();
+    /// One V3 signed USER_DATA GET (Agent-wallet mode): the endpoint
+    /// params (if any) followed by `user` / `signer` / `nonce`; the
+    /// EIP-712 signature is appended last. No API-key header.
+    async fn signed_get_v3(&self, path: &str, params: &str) -> Result<Value, String> {
+        let (status, body) = self
+            .signed_request(reqwest::Method::GET, path, params)
+            .await?;
         if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
             let snippet: String = body.chars().take(200).collect();
             return Err(format!("AsterDEX {path} 接口返回 HTTP {status}：{snippet}"));
         }
-        resp.json()
+        serde_json::from_str(&body).map_err(|e| format!("{path} 响应解析失败：{e}"))
+    }
+    /// The single "parameter string + signature" logic all signed
+    /// methods share (order §一.4): the endpoint params (if any)
+    /// followed by `user` / `signer` / `nonce`, signed by EIP-712.
+    /// The nonce comes from the existing strictly-increasing
+    /// allocator; a failure does not reorder it (order §一.6).
+    fn sign_params(&self, params: &str) -> Result<(String, String), String> {
+        let agent = &self.agent;
+        let nonce = self.next_nonce();
+        let auth = format!("user={}&signer={}&nonce={nonce}", agent.user, agent.signer);
+        let msg = if params.is_empty() {
+            auth
+        } else {
+            format!("{params}&{auth}")
+        };
+        let signature = sign_v3(&agent.secret, &msg)?;
+        Ok((msg, signature))
+    }
+    /// One V3 signed request: the raw (status, body). A 418 records
+    /// the 2-minute cool-down but is still returned, so the caller
+    /// maps it. Transport failures are `Err(String)`.
+    async fn signed_request(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        params: &str,
+    ) -> Result<(reqwest::StatusCode, String), String> {
+        let (msg, signature) = self.sign_params(params)?;
+        let base = format!("{ASTER_REST_URL}{path}");
+        let resp = if method == reqwest::Method::POST {
+            let body = format!("{msg}&signature={signature}");
+            crate::net::send_read(|| {
+                self.http
+                    .post(&base)
+                    .header("Content-Type", "application/x-www-form-urlencoded")
+                    .body(body.clone())
+            })
             .await
-            .map_err(|e| format!("{path} 响应解析失败：{e}"))
+        } else {
+            // GET / DELETE append the signature to the query.
+            let url = format!("{base}?{msg}&signature={signature}");
+            let is_delete = method == reqwest::Method::DELETE;
+            crate::net::send_read(|| {
+                if is_delete {
+                    self.http.delete(&url)
+                } else {
+                    self.http.get(&url)
+                }
+            })
+            .await
+        }
+        .map_err(|e| format!("AsterDEX {path} 请求失败：{e}"))?;
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        if status.as_u16() == 418 {
+            // 418 cool-down (order §三.12): the venue is unavailable
+            // for 2 minutes; order calls fail fast until it lapses.
+            let msg = "AsterDEX 触发 IP 限流（418），已冷却 2 分钟".to_string();
+            *self.cool_until.lock().unwrap_or_else(|e| e.into_inner()) =
+                Some(Instant::now() + Duration::from_secs(120));
+            *self.last_error.lock().unwrap_or_else(|e| e.into_inner()) = Some(msg.clone());
+            self.log("error", msg);
+        }
+        Ok((status, body))
+    }
+    /// One V3 signed order request (POST / DELETE / GET): errors map
+    /// to `VenueError` (order §三.12); transport / timeout /
+    /// unparseable body → Transport (outcome unknown).
+    pub(crate) async fn signed_order_v3(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        params: &str,
+    ) -> Result<Value, VenueError> {
+        let (status, body) = self
+            .signed_request(method, path, params)
+            .await
+            .map_err(VenueError::transport)?;
+        if !status.is_success() {
+            return Err(map_order_error(status, &body, path));
+        }
+        serde_json::from_str(&body)
+            .map_err(|e| VenueError::transport(format!("AsterDEX {path} 响应解析失败：{e}")))
+    }
+    /// One V3 signed POST (order §一.4): the signature is a form field.
+    pub(crate) async fn signed_post_v3(&self, path: &str, params: &str) -> VenueResult<Value> {
+        self.signed_order_v3(reqwest::Method::POST, path, params)
+            .await
+    }
+    /// One V3 signed DELETE (order §一.4): the signature is in the query.
+    pub(crate) async fn signed_delete_v3(&self, path: &str, params: &str) -> VenueResult<Value> {
+        self.signed_order_v3(reqwest::Method::DELETE, path, params)
+            .await
+    }
+    /// 418 cool-down (order §三.12): the venue is unavailable for
+    /// 2 minutes; order calls fail fast until it lapses.
+    pub(crate) fn check_cool(&self) -> VenueResult<()> {
+        let until = *self.cool_until.lock().unwrap_or_else(|e| e.into_inner());
+        if until.is_some_and(|u| Instant::now() < u) {
+            return Err(VenueError::Rejected {
+                code: Some(418),
+                msg: "AsterDEX 触发 IP 限流（418），冷却中，请 2 分钟后再试".to_string(),
+            });
+        }
+        Ok(())
     }
     /// One REST read of the account + positions (V3 EIP-712 path). The
     /// account body already carries a `positions[]` array; positionRisk
@@ -346,20 +477,27 @@ impl ExchangeAdapter for AsterdexAdapter {
     }
 
     async fn get_open_orders(&self, _account_id: &str) -> VenueResult<Vec<Order>> {
-        Err(VenueError::unsupported("查询持仓单"))
+        self.open_orders_v3().await
     }
-
-    async fn place_order(&self, _req: OrderRequest) -> VenueResult<Order> {
-        Err(VenueError::unsupported("下单"))
+    async fn place_order(&self, req: OrderRequest) -> VenueResult<Order> {
+        self.place_order_v3(req).await
     }
-
     async fn cancel_order(
         &self,
         _account_id: &str,
-        _order_id: &str,
-        _symbol: &str,
+        order_id: &str,
+        symbol: &str,
     ) -> VenueResult<()> {
-        Err(VenueError::unsupported("撤单"))
+        self.cancel_order_v3(order_id, symbol).await
+    }
+    async fn query_order_by_cloid(&self, _account_id: &str, cloid: &str) -> VenueResult<OrderInfo> {
+        self.query_order_by_cloid_v3(cloid).await
+    }
+    async fn query_order_by_oid(&self, _account_id: &str, oid: u64) -> VenueResult<OrderInfo> {
+        self.query_order_by_oid_v3(oid).await
+    }
+    async fn query_fills(&self, _account_id: &str, cloid: &str) -> VenueResult<Vec<TradeInfo>> {
+        self.query_fills_v3(cloid).await
     }
 
     async fn run(&self) {
@@ -585,5 +723,76 @@ mod tests {
         .expect("decode");
         assert_eq!(ok[0], 0xac);
         assert_eq!(ok[31], 0x80);
+    }
+
+    #[test]
+    fn order_error_mapping_deposit_rate_limit_ban_and_params() {
+        // -5050 → Rejected with the deposit message (order §三.12).
+        let e = map_order_error(
+            reqwest::StatusCode::BAD_REQUEST,
+            r#"{"code":-5050,"msg":"This function can only be used after deposit."}"#,
+            "/fapi/v3/order",
+        );
+        assert!(matches!(
+            e,
+            VenueError::Rejected {
+                code: Some(-5050),
+                ..
+            }
+        ));
+        assert!(e.pre_send());
+        assert!(e.to_string().contains("未入金"));
+        // A 4xx param error (-2010) → Rejected{code, msg}, verbatim.
+        let e = map_order_error(
+            reqwest::StatusCode::BAD_REQUEST,
+            r#"{"code":-2010,"msg":"New order rejected."}"#,
+            "/fapi/v3/order",
+        );
+        assert_eq!(
+            e,
+            VenueError::Rejected {
+                code: Some(-2010),
+                msg: "New order rejected.".to_string(),
+            }
+        );
+        assert!(e.pre_send());
+        // 429 → RateLimited (pre-send: the request was refused
+        // before acting, so it is definitely not sent).
+        let e = map_order_error(
+            reqwest::StatusCode::TOO_MANY_REQUESTS,
+            r#"{"code":-1003,"msg":"Too many requests."}"#,
+            "/fapi/v3/order",
+        );
+        assert!(matches!(
+            e,
+            VenueError::RateLimited {
+                code: Some(-1003),
+                ..
+            }
+        ));
+        assert!(e.pre_send());
+        // 418 → Rejected (the 2-minute cool-down is recorded by
+        // signed_request, not here).
+        let e = map_order_error(
+            reqwest::StatusCode::from_u16(418).unwrap(),
+            r#"{"code":-1003,"msg":"IP banned."}"#,
+            "/fapi/v3/order",
+        );
+        assert!(matches!(
+            e,
+            VenueError::Rejected {
+                code: Some(418),
+                ..
+            }
+        ));
+        assert!(e.pre_send());
+        // 5xx → Transport (outcome unknown).
+        let e = map_order_error(
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            "gateway error",
+            "/fapi/v3/order",
+        );
+        assert!(matches!(e, VenueError::Transport(_)));
+        assert!(!e.pre_send());
     }
 }

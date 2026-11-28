@@ -464,7 +464,7 @@ pub async fn place_order(deps: &ExecDeps, intent: PlaceIntent) -> Result<OrderIn
             deps.risk.record_order_outcome(false);
             Ok(reconcile_order(deps, &adapter, &info).await)
         }
-        Err(VenueError::Rejected { msg, .. }) => {
+        Err(VenueError::Rejected { msg, .. }) | Err(VenueError::RateLimited { msg, .. }) => {
             // A definite exchange rejection.
             info.transition(OrderStatus::Rejected, crate::core::util::now_ms())
                 .ok();
@@ -667,7 +667,9 @@ pub async fn cancel_order(
         // the exchange refused before acting. There is nothing on
         // the exchange to query for, so report the reason; the
         // record refreshes on the next open-orders poll.
-        Err(VenueError::Rejected { msg, .. }) => Err(msg),
+        Err(VenueError::Rejected { msg, .. }) | Err(VenueError::RateLimited { msg, .. }) => {
+            Err(msg)
+        }
         Err(VenueError::Unsupported(_)) => Err("该交易所撤单将在下一阶段接入".to_string()),
         Err(VenueError::NotConnected) => Err("账户未连接，无法撤单".to_string()),
     }

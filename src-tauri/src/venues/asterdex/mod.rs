@@ -1,4 +1,4 @@
-//! AsterDEX read-only adapter.
+//! AsterDEX adapter: V3 account reads + V3 order methods.
 //!
 //! Official endpoints (asterdex/api-docs, V3 recommended):
 //! - Market data: none. The adapter opens no WS connection at all —
@@ -10,6 +10,11 @@
 //!   `nonce` = microsecond timestamp, `signature` appended last; domain
 //!   AsterSignTransaction / 1 / chainId 1666). Pure Rust (`k256` + `sha3`),
 //!   no OpenSSL anywhere. No API-key header in V3.
+//! - Orders: POST /fapi/v3/order, DELETE /fapi/v3/order,
+//!   GET /fapi/v3/openOrders, /fapi/v3/order, /fapi/v3/userTrades —
+//!   the same EIP-712 signature (POST sends it as a form field,
+//!   GET/DELETE append it to the query). `supports_trading()` stays
+//!   false until a real-machine minimal order passes.
 //! - Multi-asset margin: the `total*` fields are USDT-only, so equity /
 //!   available / PnL are summed from `assets[]` (marginBalance /
 //!   availableBalance / unrealizedProfit) with the totals as fallback;
@@ -17,6 +22,13 @@
 //!   margin balance (USDT, USDC, USDF, USD1, ...).
 //! - No credentials at all: build fails on the missing field, so no
 //!   adapter is constructed and the account stays unconnected.
+//!
+//! Verified live 2026-11-28: host is `fapi.asterdex.com` (200;
+//! `fapi3.asterdex.com` is 403, no such constant exists); exchangeInfo
+//! carries no leverage field (0 mentions, 647 symbols) and the only
+//! leverage source (`GET /fapi/v3/leverageBrackets`) is USER_DATA, so
+//! the Data page keeps showing `—`; -5050 DEPOSIT_REQUIRED — an
+//! unfunded account's order fails with 「该账户未入金，AsterDEX 交易不可用」.
 
 //! Venue home (PR-1.3 commit 2): the adapter moved verbatim from
 //! `adapters/asterdex.rs`; the V3 catalog moved from
@@ -32,7 +44,7 @@ pub mod stream;
 use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 
@@ -40,6 +52,7 @@ use crate::bus::EventBus;
 use crate::core::market::MarketInfo;
 use crate::core::types::{AccountLive, LivePosition};
 use crate::market::reconcile::ReconcileState;
+use crate::store::orders::OrderStore;
 use crate::venues::ExchangeAdapter;
 use crate::venues::{CredentialField, CredentialKind, StreamPlan, Venue, VenueCtx};
 
@@ -81,6 +94,13 @@ pub struct AsterdexAdapter {
     last_rest_rtt: Mutex<Option<Duration>>,
     /// Last V3 nonce issued (microseconds, strictly increasing).
     last_nonce: Mutex<u128>,
+    /// 418 cool-down: a 418 (IP ban) marks the venue unavailable for
+    /// 2 minutes; signed requests fail fast until it lapses.
+    cool_until: Mutex<Option<Instant>>,
+    /// The order store: the only place a cloid's symbol lives, so
+    /// `query_order_by_cloid` / `query_order_by_oid` can resolve the
+    /// symbol the V3 order endpoints require.
+    orders: Arc<OrderStore>,
     /// Post-fill reconciliation grace (spec §3): polls skip their write
     /// while the account is inside the window.
     reconcile: Arc<ReconcileState>,
@@ -99,6 +119,7 @@ impl AsterdexAdapter {
         secret: [u8; 32],
         bus: EventBus,
         live: Arc<RwLock<HashMap<String, AccountLive>>>,
+        orders: Arc<OrderStore>,
         reconcile: Arc<ReconcileState>,
     ) -> Self {
         Self {
@@ -121,6 +142,8 @@ impl AsterdexAdapter {
             last_error: Mutex::new(None),
             last_rest_rtt: Mutex::new(None),
             last_nonce: Mutex::new(0),
+            cool_until: Mutex::new(None),
+            orders,
             reconcile,
             wake: Arc::new(tokio::sync::Notify::new()),
         }
@@ -206,6 +229,7 @@ impl Venue for AsterdexVenue {
             secret,
             ctx.bus.clone(),
             ctx.live.clone(),
+            ctx.orders.clone(),
             ctx.reconcile.clone(),
         )))
     }

@@ -21,6 +21,11 @@ pub enum VenueError {
         code: Option<i64>,
         msg: String,
     },
+    /// The exchange rate-limited the request (HTTP 429): definitely
+    /// NOT sent — the request was refused before acting. Pre-send,
+    /// like `Rejected`; the caller reports it instead of reconciling.
+    #[error("请求过于频繁：{msg}")]
+    RateLimited { code: Option<i64>, msg: String },
     /// The request was sent (or may have been sent) but no usable
     /// answer came back — timeout, transport failure, unreadable
     /// response. The outcome on the exchange is UNKNOWN: the caller
@@ -67,7 +72,10 @@ impl VenueError {
     pub fn pre_send(&self) -> bool {
         matches!(
             self,
-            VenueError::NotConnected | VenueError::Rejected { .. } | VenueError::Unsupported(_)
+            VenueError::NotConnected
+                | VenueError::Rejected { .. }
+                | VenueError::RateLimited { .. }
+                | VenueError::Unsupported(_)
         )
     }
 }
@@ -91,6 +99,11 @@ mod tests {
         }
         .pre_send());
         assert!(VenueError::unsupported("order").pre_send());
+        assert!(VenueError::RateLimited {
+            code: Some(-1003),
+            msg: "Too many requests.".to_string()
+        }
+        .pre_send());
         assert!(!VenueError::UnknownOutcome("timeout".to_string()).pre_send());
         assert!(!VenueError::transport("reset").pre_send());
     }
