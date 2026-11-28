@@ -119,6 +119,8 @@ export const api = {
     invoke<SaveStrategyResult>("save_strategy", { input }),
   setStrategyEnabled: (id: string, enabled: boolean) =>
     invoke<StrategyInstance>("set_strategy_enabled", { id, enabled }),
+  deleteStrategy: (id: string) =>
+    invoke<StrategyInstance>("delete_strategy", { id }),
   // Account center (phase 2). Credentials go to the Rust vault exactly once;
   // nothing secret is ever returned.
   listAccounts: () => invoke<AccountView[]>("list_accounts"),

@@ -3,7 +3,7 @@
 //! and storage live in `crate::strategy` so the scratch crate tests
 //! them; the commands only adapt Tauri state to those functions.
 //! Command names are the function names: `list_strategies`,
-//! `save_strategy`, `set_strategy_enabled`.
+//! `save_strategy`, `set_strategy_enabled`, `delete_strategy`.
 
 use crate::strategy::{SaveStrategyInput, SaveStrategyResult, StrategyInstance, StrategyView};
 use crate::AppState;
@@ -44,4 +44,14 @@ pub fn set_strategy_enabled(
         ]);
     }
     Ok(inst)
+}
+
+/// Delete one instance. Positions and protection orders already on
+/// the exchange are unaffected.
+#[tauri::command]
+pub fn delete_strategy(
+    state: State<'_, Arc<AppState>>,
+    id: String,
+) -> Result<StrategyInstance, String> {
+    crate::strategy::delete_strategy(&state.db, &state.streams, &id)
 }

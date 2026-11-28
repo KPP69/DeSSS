@@ -1,13 +1,13 @@
 import React from "react";
 import { useToastStore } from "../store/useToastStore";
 
-/** Toast stack, top-right (mounted once in AppShell). Click to dismiss. */
+/** Toast stack, below the title bar (title 56px + 8px, mounted once in AppShell). Click to dismiss. */
 export default function Toast() {
   const toasts = useToastStore((s) => s.toasts);
   const dismiss = useToastStore((s) => s.dismiss);
   if (toasts.length === 0) return null;
   return (
-    <div className="fixed top-3 right-4 z-[9999] flex flex-col gap-2 w-80 pointer-events-none">
+    <div className="fixed top-[64px] right-5 z-[60] flex flex-col gap-2 w-80 pointer-events-none">
       {toasts.map((t) => (
         <button
           key={t.id}

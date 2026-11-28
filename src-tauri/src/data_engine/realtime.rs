@@ -218,6 +218,12 @@ impl RealtimeEngine {
         );
     }
 
+    /// Log one line to the app log (same channel as the stream
+    /// lifecycle lines) — for callers that own no bus handle.
+    pub fn log(&self, level: &str, source: &str, message: String) {
+        self.bus.log(level, source, message);
+    }
+
     /// Release pinned keys (F4.4 add-on): drop them from the pinned set; a key not on the ui half has its stream task aborted at once. A key still shown on the Data page keeps running; each released pin logs `stream <venue> <symbol> 已释放（策略停止）`.
     pub fn release_pinned(&self, keys: Vec<StreamKey>) {
         // Locks in the same order as set_wanted (ui, pinned, tasks).

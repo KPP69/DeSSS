@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 
 use crate::core::util::now_ms;
+use crate::data_engine::realtime::RealtimeEngine;
 use crate::data_engine::DataEngine;
 use crate::market::sync::SyncManager;
 use crate::store::orders::OrderStore;
@@ -265,6 +266,36 @@ pub fn set_strategy_enabled(
     let out = slot.clone();
     store_strategies(db, &list)?;
     Ok(out)
+}
+
+/// Delete one instance (F4.5): remove it from settings, release its
+/// legs' pinned streams, and log one line. A deleted instance never
+/// trades again; positions and protection orders already on the
+/// exchange are unaffected — they belong to the exchange, not the
+/// instance. No batch delete, no soft delete.
+pub fn delete_strategy(
+    db: &DataEngine,
+    streams: &RealtimeEngine,
+    id: &str,
+) -> Result<StrategyInstance, String> {
+    let mut list = load_strategies(db)?;
+    let Some(pos) = list.iter().position(|s| s.id == id) else {
+        return Err(format!("策略不存在：{id}"));
+    };
+    let removed = list.remove(pos);
+    store_strategies(db, &list)?;
+    streams.release_pinned(vec![
+        (
+            removed.leg_a.exchange_id.clone(),
+            removed.leg_a.symbol.clone(),
+        ),
+        (
+            removed.leg_b.exchange_id.clone(),
+            removed.leg_b.symbol.clone(),
+        ),
+    ]);
+    streams.log("info", "strategy", format!("策略 {id} 已删除"));
+    Ok(removed)
 }
 
 /// Instances with their runtime stats, for the Strategy page. The
@@ -627,6 +658,9 @@ pub(crate) mod testkit {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bus::EventBus;
+    use crate::data_engine::realtime::RealtimeEngine;
+    use crate::market::catalog::MarketCatalog;
     use crate::market::sync::SyncManager;
     use std::sync::Arc;
 
@@ -809,5 +843,56 @@ mod tests {
                 .enabled
         );
         assert!(set_strategy_enabled(&db, "no-such-id", true).is_err());
+    }
+
+    /// F4.5: deleting removes the instance, releases its pinned legs
+    /// (a leg still on ui keeps its stream), logs one release line per
+    /// leg plus one delete line; an unknown id errors, never panics.
+    #[tokio::test]
+    async fn delete_strategy_releases_legs_and_logs_once() {
+        let (db, _dir) = testkit::temp_db();
+        let bus = EventBus::new(32);
+        let catalog = Arc::new(MarketCatalog::new(bus.clone()));
+        let streams = Arc::new(RealtimeEngine::new(bus.clone(), catalog, None));
+        let input = testkit::input();
+        let inst = StrategyInstance {
+            id: "strat-del".to_string(),
+            kind: input.kind,
+            leg_a: input.leg_a,
+            leg_b: input.leg_b,
+            params: testkit::params(),
+            enabled: true,
+            created_at: 0,
+        };
+        store_strategies(&db, &[inst]).expect("store");
+        let leg_a: (String, String) = ("hyperliquid".to_string(), "BTC".to_string());
+        let leg_b: (String, String) = ("entropy".to_string(), "io:BTC".to_string());
+        streams.ensure_wanted(leg_a.clone());
+        streams.ensure_wanted(leg_b.clone());
+        // The A leg is also on the Data page: its stream must survive.
+        streams.set_wanted(vec![leg_a.clone()]);
+        let removed = delete_strategy(&db, &streams, "strat-del").expect("delete");
+        assert_eq!(removed.id, "strat-del");
+        assert!(load_strategies(&db).unwrap().is_empty());
+        assert!(!streams.is_wanted(&leg_b), "released leg is gone");
+        assert!(streams.is_wanted(&leg_a), "ui leg survives the delete");
+        let msgs: Vec<String> = bus.snapshot_logs().into_iter().map(|l| l.message).collect();
+        for key in [&leg_a, &leg_b] {
+            let line = format!("stream {} {} 已释放（策略停止）", key.0, key.1);
+            assert_eq!(
+                msgs.iter().filter(|m| m.as_str() == line.as_str()).count(),
+                1,
+                "release log appears once per leg: {msgs:?}"
+            );
+        }
+        assert_eq!(
+            msgs.iter()
+                .filter(|m| m.as_str() == "策略 strat-del 已删除")
+                .count(),
+            1,
+            "delete logs one line: {msgs:?}"
+        );
+        let err = delete_strategy(&db, &streams, "no-such-id").unwrap_err();
+        assert!(err.contains("策略不存在"), "{err}");
     }
 }

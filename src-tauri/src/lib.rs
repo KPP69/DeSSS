@@ -260,7 +260,8 @@ pub fn run() {
             commands::orders::list_order_fills,
             commands::strategy::list_strategies,
             commands::strategy::save_strategy,
-            commands::strategy::set_strategy_enabled
+            commands::strategy::set_strategy_enabled,
+            commands::strategy::delete_strategy
         ])
         .run(tauri::generate_context!())
         .expect("error while running DeSSS");

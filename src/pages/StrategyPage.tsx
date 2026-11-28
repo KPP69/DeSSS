@@ -21,10 +21,11 @@ import { useVenueStore } from "../store/useVenueStore";
  * is enforced backend-side and surfaced here verbatim, never silently.
  *
  * Columns: 启用（开关）· A 腿 · B 腿 · 参数摘要 · 最近评估 ·
- * 最近错误 · 累计下单 · 操作（编辑）. Numbers are tabular; the
+ * 最近错误 · 累计下单 · 操作（编辑 · 删除）. Numbers are tabular; the
  * order count is right-aligned. Disabling an instance asks first
  * (it stops new opens and closes; protection orders already on the
- * exchange are unaffected).
+ * exchange are unaffected). Deleting asks first too (irreversible;
+ * positions and protection orders on the exchange are unaffected).
  */
 
 function fmtClock(ms: number | null): string {
@@ -170,6 +171,7 @@ export default function StrategyPage() {
   const [saving, setSaving] = useState(false);
   const [togglingId, setTogglingId] = useState<string | null>(null);
   const [pendingDisable, setPendingDisable] = useState<StrategyView | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<StrategyView | null>(null);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [formWarning, setFormWarning] = useState<string | null>(null);
 
@@ -333,6 +335,17 @@ export default function StrategyPage() {
       toast.error(e instanceof Error ? e.message : String(e));
     } finally {
       setTogglingId(null);
+    }
+  };
+
+  const onDelete = async (v: StrategyView) => {
+    try {
+      await api.deleteStrategy(v.id);
+      list.refresh();
+      toast.success("策略已删除");
+    } catch (e) {
+      // Backend failure: toast the backend's own words (F1).
+      toast.error(e instanceof Error ? e.message : String(e));
     }
   };
 
@@ -515,7 +528,7 @@ export default function StrategyPage() {
       ) : instances.length > 0 ? (
         <DataTable
           headers={["启用", "A 腿", "B 腿", "参数摘要", "最近评估", "最近错误", "累计下单", "操作"]}
-          colWidths={["8%", "18%", "18%", "18%", "10%", "14%", "7%", "7%"]}
+          colWidths={["7%", "17%", "17%", "16%", "10%", "13%", "7%", "13%"]}
           aligns={["center", "center", "center", "center", "center", "center", "right", "center"]}
           rows={instances.map((v) => [
             <Switch
@@ -529,7 +542,7 @@ export default function StrategyPage() {
             />,
             legCell(v.legA, names, accounts),
             legCell(v.legB, names, accounts),
-            <span className="whitespace-nowrap num">
+            <span className="num">
               中 {v.params.midlineBps} / 上 {v.params.upperBps} / 下 {v.params.lowerBps} bps
             </span>,
             <span className="num">{fmtClock(v.lastEvalMs)}</span>,
@@ -543,9 +556,14 @@ export default function StrategyPage() {
               "—"
             ),
             <span className="num">{v.ordersPlaced}</span>,
-            <Button size="sm" variant="ghost" onClick={() => openEdit(v)}>
-              编辑
-            </Button>,
+            <span className="flex items-center justify-center gap-1">
+              <Button size="sm" variant="ghost" onClick={() => openEdit(v)}>
+                编辑
+              </Button>
+              <Button size="sm" variant="danger" onClick={() => setPendingDelete(v)}>
+                删除
+              </Button>
+            </span>,
           ])}
         />
       ) : null}
@@ -567,6 +585,28 @@ export default function StrategyPage() {
           if (!pendingDisable) return;
           await onToggle(pendingDisable, false);
           setPendingDisable(null);
+        }}
+      />
+
+      <ConfirmDialog
+        open={pendingDelete !== null}
+        title="确认删除策略"
+        confirmText="确认删除"
+        message={
+          pendingDelete && (
+            <>
+              即将删除：{kindName(pendingDelete.kind)}（
+              {displaySymbol(pendingDelete.legA.symbol)} ↔{" "}
+              {displaySymbol(pendingDelete.legB.symbol)}）。
+              删除后不可恢复；已有仓位与其保护单在交易所不受影响。
+            </>
+          )
+        }
+        onCancel={() => setPendingDelete(null)}
+        onConfirm={async () => {
+          if (!pendingDelete) return;
+          await onDelete(pendingDelete);
+          setPendingDelete(null);
         }}
       />
     </div>
