@@ -176,10 +176,15 @@ export default function MultiSelectDropdown({
                   checked={selected.has(o.value)}
                   onChange={() => toggle(o.value)}
                   onClick={(e) => e.stopPropagation()}
-                  label={<span className={selected.has(o.value) ? "font-medium" : ""}>{o.label}</span>}
+                  className="min-w-0 flex-1"
+                  label={
+                    <span className={`flex-1 truncate ${selected.has(o.value) ? "font-medium" : ""}`}>
+                      {o.label}
+                    </span>
+                  }
                 />
                 {selected.has(o.value) && (
-                  <span className="ml-auto">
+                  <span className="shrink-0 ml-2">
                     <Badge tone="up">已选</Badge>
                   </span>
                 )}

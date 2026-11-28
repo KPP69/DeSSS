@@ -1,5 +1,4 @@
 import React from "react";
-import ThemeSwitcher from "./ThemeSwitcher";
 import { useAppStore, type PageKey } from "../store/useAppStore";
 
 const items: { key: PageKey; label: string }[] = [
@@ -41,7 +40,6 @@ export default function Sidebar() {
         })}
       </nav>
       <div className="mt-auto px-3 pb-3">
-        <ThemeSwitcher />
         <div className="mt-3 px-1 text-xs text-ds-text-3 space-y-0.5">
           <div>DeSSS v0.1.0</div>
           <div>Portable · ./data/desss.db</div>

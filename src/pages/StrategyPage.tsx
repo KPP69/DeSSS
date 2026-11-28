@@ -52,11 +52,11 @@ const PARAM_KEYS = Object.keys(DEFAULT_PARAMS) as (keyof SpreadParams)[];
 /**
  * Strategy types (F4.1): the picker shows display names only — the
  * backend knows a single kind ("spread") today and the instant spread
- * has no backend kind yet, so both rows are disabled and no instance
- * can be created until one is enabled.
+ * has no backend kind yet, so it stays disabled. Mean reversion is
+ * enabled (F4.4): the runner already runs kind "spread".
  */
 const STRATEGY_TYPES = [
-  { kind: "spread", name: "均值回归", note: "暂停使用", desc: "在 Hyperliquid 与 Entropy 之间做均值回归价差", available: false },
+  { kind: "spread", name: "均值回归", note: "可用", desc: "在 Hyperliquid 与 Entropy 之间做均值回归价差", available: true },
   { kind: "spread_instant", name: "即时价差", note: "未实现", desc: "跨所即时价差套利", available: false },
 ] as const;
 
@@ -109,18 +109,17 @@ export default function StrategyPage() {
   const tradable = (schemas ?? []).filter((s) => s.supportsTrading);
   const instances = list.data ?? [];
 
-  // Toolbar (F1): new-strategy action + running / total counts.
+  // Toolbar (F1): new-strategy action (F4.4: the running / total
+  // counts on the right are gone).
   const register = useShellActions((s) => s.register);
   const unregister = useShellActions((s) => s.unregister);
-  const running = instances.filter((v) => v.enabled).length;
   useLayoutEffect(() => {
     register("strategy", {
       actions: <Button onClick={openNew}>新建策略</Button>,
-      status: `运行中 ${running} / 共 ${instances.length}`,
     });
     return () => unregister("strategy");
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [register, unregister, instances, schemas]);
+  }, [register, unregister, schemas]);
 
   const [formOpen, setFormOpen] = useState(false);
   const [formStep, setFormStep] = useState<"type" | "config">("type");
@@ -392,7 +391,7 @@ export default function StrategyPage() {
     );
   };
 
-  const paramField = (key: keyof SpreadParams, label: string, unit: string) => (
+  const paramField = (key: keyof SpreadParams, label: string, unit: string, desc: string) => (
     <label key={key} className="block">
       <span className="mb-1 block text-xs text-ds-text-2">{label}</span>
       <span className="flex items-center gap-1.5">
@@ -407,6 +406,7 @@ export default function StrategyPage() {
         </span>
         {unit && <span className="w-8 shrink-0 text-xs text-ds-text-3">{unit}</span>}
       </span>
+      <span className="mt-1 block text-xs text-ds-text-2">{desc}</span>
     </label>
   );
 
@@ -435,7 +435,7 @@ export default function StrategyPage() {
                   <div className="text-[13px] font-semibold text-ds-text-1">{t.name}</div>
                   <div className="text-xs text-ds-text-2">{t.desc}</div>
                 </div>
-                <Badge tone={t.kind === "spread" ? "warn" : "neutral"}>{t.note}</Badge>
+                <Badge tone={t.available ? "up" : "neutral"}>{t.note}</Badge>
               </div>
             ))}
           </div>
@@ -459,19 +459,19 @@ export default function StrategyPage() {
           </div>
           <div className="mt-5 mb-3 text-[13px] font-semibold text-ds-text-1">参数</div>
           <div className="grid grid-cols-3 gap-3">
-            {paramField("midlineBps", "中线", "bps")}
-            {paramField("upperBps", "上轨", "bps")}
-            {paramField("lowerBps", "下轨", "bps")}
-            {paramField("persistSec", "持续秒数", "秒")}
-            {paramField("takeFraction", "仓位比例", "")}
-            {paramField("maxNotionalUsd", "最大名义", "USD")}
-            {paramField("feeBpsA", "A 腿费率", "bps")}
-            {paramField("feeBpsB", "B 腿费率", "bps")}
+            {paramField("midlineBps", "中线", "bps", "两所价差长期均值，需实测")}
+            {paramField("upperBps", "上轨", "bps", "偏离多少触发")}
+            {paramField("lowerBps", "下轨", "bps", "偏离多少触发")}
+            {paramField("persistSec", "持续秒数", "秒", "信号需保持多久")}
+            {paramField("takeFraction", "仓位比例", "", "吃可成交深度的比例")}
+            {paramField("maxNotionalUsd", "最大名义", "USD", "单次开仓上限")}
+            {paramField("feeBpsA", "A 腿费率", "bps", "taker 费率，计入门槛")}
+            {paramField("feeBpsB", "B 腿费率", "bps", "taker 费率，计入门槛")}
           </div>
           <div className="mt-5 mb-3 text-[13px] font-semibold text-ds-text-1">保护</div>
           <div className="grid grid-cols-3 gap-3">
-            {paramField("tpBps", "止盈", "bps")}
-            {paramField("slBps", "止损", "bps")}
+            {paramField("tpBps", "止盈", "bps", "开仓后挂的保护")}
+            {paramField("slBps", "止损", "bps", "开仓后挂的保护")}
           </div>
           <div className="mt-5 mb-3 text-[13px] font-semibold text-ds-text-1">提示</div>
           <div className="space-y-1 text-xs text-ds-text-2">
@@ -509,7 +509,7 @@ export default function StrategyPage() {
         >
           <div>
             <div className="text-[13px] font-semibold text-ds-text-1">当前没有可用策略</div>
-            <div className="mt-1">均值回归已暂停使用，即时价差尚未实现。</div>
+            <div className="mt-1">即时价差尚未实现。</div>
           </div>
         </PageState>
       ) : instances.length > 0 ? (

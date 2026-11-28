@@ -384,6 +384,10 @@ fn disable_instance(deps: &RunnerDeps, inst: &StrategyInstance, reason: &str) {
         );
         return;
     }
+    deps.exec.streams.release_pinned(vec![
+        (inst.leg_a.exchange_id.clone(), inst.leg_a.symbol.clone()),
+        (inst.leg_b.exchange_id.clone(), inst.leg_b.symbol.clone()),
+    ]);
     {
         let mut stats = deps.stats.lock().unwrap_or_else(|e| e.into_inner());
         let entry = stats.entry(inst.id.clone()).or_default();

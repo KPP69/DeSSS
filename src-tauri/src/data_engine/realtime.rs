@@ -6,10 +6,13 @@
 //!
 //! Rules:
 //! - No demand, no connection: a stream exists only while its
-//!   `(exchange_id, symbol)` pair is in the wanted set (the Data page
-//!   reconciles the set from the search hits on screen). Clearing the
-//!   query, leaving the page, or hiding a row removes the key and its
-//!   task is aborted at once — no socket lingers for an unseen symbol.
+//!   `(exchange_id, symbol)` pair is wanted — the Data page's rows
+//!   (ui) or a pinned key (strategy legs, pre-order ensures).
+//!   Clearing the query, leaving the page, or hiding a row removes
+//!   the ui key and its task is aborted at once — no socket lingers
+//!   for an unseen symbol. A pinned key survives a ui clear (F4.4):
+//!   the Data page used to kick the strategy's legs out of the
+//!   single wanted set, and vice versa.
 //! - One task per key, one socket per task. A dropped connection retries
 //!   with backoff while the key is still wanted; a task that is no
 //!   longer wanted exits instead of reconnecting.
@@ -96,7 +99,12 @@ pub struct StreamKeyInput {
 pub struct RealtimeEngine {
     bus: EventBus,
     catalog: Arc<MarketCatalog>,
-    wanted: Mutex<HashSet<StreamKey>>,
+    /// Data-page rows, replaced wholesale by `set_wanted` (F4.4).
+    ui: Mutex<HashSet<StreamKey>>,
+    /// Strategy legs + pre-order ensures, appended by
+    /// `ensure_wanted` and never removed by `set_wanted`. The
+    /// running streams are ui ∪ pinned.
+    pinned: Mutex<HashSet<StreamKey>>,
     tasks: Mutex<HashMap<StreamKey, JoinHandle<()>>>,
     /// Last accepted frame per key, in wall-clock ms.
     last_update: RwLock<HashMap<StreamKey, i64>>,
@@ -107,6 +115,9 @@ pub struct RealtimeEngine {
     /// Keys whose socket ended at least once: on the next successful
     /// dial they trigger the reconciliation above.
     dropped: Mutex<HashSet<StreamKey>>,
+    /// Last `failed:` log per key (F4.4): a dial that keeps failing
+    /// with the same error logs once, not on every retry.
+    last_failed: Mutex<HashMap<StreamKey, String>>,
 }
 
 impl RealtimeEngine {
@@ -114,35 +125,59 @@ impl RealtimeEngine {
         Self {
             bus,
             catalog,
-            wanted: Mutex::new(HashSet::new()),
+            ui: Mutex::new(HashSet::new()),
+            pinned: Mutex::new(HashSet::new()),
             tasks: Mutex::new(HashMap::new()),
             last_update: RwLock::new(HashMap::new()),
             sync,
             dropped: Mutex::new(HashSet::new()),
+            last_failed: Mutex::new(HashMap::new()),
         }
     }
 
-    /// Reconcile the wanted set with the keys on screen. New keys spawn
-    /// a stream task; removed keys have their task aborted at once and
-    /// their freshness entry dropped. Repeating the same set is a no-op.
+    /// Reconcile the ui wanted set with the keys on screen (F4.4: only
+    /// the ui half is replaced — pinned keys are untouched). New keys
+    /// spawn a stream task; removed keys have their task aborted at
+    /// once and their freshness entry dropped. Repeating the same set
+    /// is a no-op. An explicit clear (`[]`) logs one `stream 清空 N
+    /// 个订阅` line after the per-key `已断开` lines.
     pub fn set_wanted(self: &Arc<Self>, keys: Vec<StreamKey>) {
-        let wanted: HashSet<StreamKey> = keys.into_iter().collect();
-        let mut cur = self.wanted.lock().unwrap_or_else(|e| e.into_inner());
-        let removed: Vec<StreamKey> = cur.difference(&wanted).cloned().collect();
-        let added: Vec<StreamKey> = wanted.difference(&cur).cloned().collect();
-        *cur = wanted;
-        drop(cur);
+        let new_ui: HashSet<StreamKey> = keys.into_iter().collect();
+        let clearing = new_ui.is_empty();
+        let mut ui = self.ui.lock().unwrap_or_else(|e| e.into_inner());
+        let pinned = self.pinned.lock().unwrap_or_else(|e| e.into_inner());
+        let old_effective: HashSet<StreamKey> = ui.union(&pinned).cloned().collect();
+        let new_effective: HashSet<StreamKey> = new_ui.union(&pinned).cloned().collect();
+        let removed: Vec<StreamKey> = old_effective.difference(&new_effective).cloned().collect();
+        let added: Vec<StreamKey> = new_effective.difference(&old_effective).cloned().collect();
+        *ui = new_ui;
+        drop(ui);
+        drop(pinned);
         if removed.is_empty() && added.is_empty() {
             return;
         }
         let mut tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
+        let mut removed_count = 0;
         for key in removed {
             if let Some(handle) = tasks.remove(&key) {
                 handle.abort();
+                removed_count += 1;
+                self.bus.log(
+                    "info",
+                    "stream",
+                    format!("{} {} 实时流已断开", key.0, key.1),
+                );
             }
             if let Ok(mut m) = self.last_update.write() {
                 m.remove(&key);
             }
+        }
+        if clearing && removed_count > 0 {
+            self.bus.log(
+                "info",
+                "stream",
+                format!("stream 清空 {removed_count} 个订阅"),
+            );
         }
         for key in added {
             let this = Arc::clone(self);
@@ -153,26 +188,60 @@ impl RealtimeEngine {
         }
     }
 
+    /// True when the key is wanted on either half (ui ∪ pinned).
     pub fn is_wanted(&self, key: &StreamKey) -> bool {
-        self.wanted.lock().map(|m| m.contains(key)).unwrap_or(false)
+        if self.ui.lock().map(|m| m.contains(key)).unwrap_or(false) {
+            return true;
+        }
+        self.pinned.lock().map(|m| m.contains(key)).unwrap_or(false)
     }
 
-    /// Add one key to the wanted set (spawning its stream task when
-    /// new). Additive only — unlike `set_wanted` it never removes
-    /// anything, so the order path can make sure the traded symbol's
-    /// book is live without disturbing the Data page's set.
+    /// Pin one key (spawning its stream task when new). Additive only
+    /// — unlike `set_wanted` it never removes anything, so the
+    /// strategy legs and the order path can make sure a symbol's book
+    /// is live without disturbing the Data page's set, and the Data
+    /// page's clears can no longer kick them out (F4.4).
     pub fn ensure_wanted(self: &Arc<Self>, key: StreamKey) {
-        let mut cur = self.wanted.lock().unwrap_or_else(|e| e.into_inner());
-        if !cur.insert(key.clone()) {
-            return;
+        let mut pinned = self.pinned.lock().unwrap_or_else(|e| e.into_inner());
+        if !pinned.insert(key.clone()) {
+            return; // already pinned
         }
-        drop(cur);
+        drop(pinned);
         let mut tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
+        if tasks.contains_key(&key) {
+            return; // already running as a ui stream; pinning is enough
+        }
         let this = Arc::clone(self);
         tasks.insert(
             key.clone(),
             tauri::async_runtime::spawn(async move { this.run_stream(key).await }),
         );
+    }
+
+    /// Release pinned keys (F4.4 add-on): drop them from the pinned set; a key not on the ui half has its stream task aborted at once. A key still shown on the Data page keeps running; each released pin logs `stream <venue> <symbol> 已释放（策略停止）`.
+    pub fn release_pinned(&self, keys: Vec<StreamKey>) {
+        // Locks in the same order as set_wanted (ui, pinned, tasks).
+        let ui = self.ui.lock().unwrap_or_else(|e| e.into_inner());
+        let mut pinned = self.pinned.lock().unwrap_or_else(|e| e.into_inner());
+        let mut tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
+        for key in keys {
+            if !pinned.remove(&key) {
+                continue;
+            }
+            if !ui.contains(&key) {
+                if let Some(handle) = tasks.remove(&key) {
+                    handle.abort();
+                }
+                if let Ok(mut m) = self.last_update.write() {
+                    m.remove(&key);
+                }
+            }
+            self.bus.log(
+                "info",
+                "stream",
+                format!("stream {} {} 已释放（策略停止）", key.0, key.1),
+            );
+        }
     }
 
     /// True when the key has no stream or its last frame is older than
@@ -352,8 +421,19 @@ impl RealtimeEngine {
 
     /// Dial once and read frames until the socket ends. Returns when the
     /// connection drops; the caller decides whether to reconnect.
+    /// Lifecycle logs (F4.4, paired with the existing 实时流已连接):
+    /// a successful dial logs `stream <venue> <symbol> ok`; a failed
+    /// dial logs `stream <venue> <symbol> failed: <交易所原文>` once
+    /// per (key, error) — the retry loop must not flood the console.
     async fn stream_once(&self, key: &StreamKey, plan: &Plan) -> Result<(), String> {
-        let (stream, _resp) = connect_ws(&plan.url, Duration::from_secs(10), &self.bus).await?;
+        let (stream, _resp) = match connect_ws(&plan.url, Duration::from_secs(10), &self.bus).await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                self.log_failed(key, &e);
+                return Err(e);
+            }
+        };
         // Reconnected after a drop: reconcile this exchange's positions
         // against the exchange (the book stream is back, the account
         // state may have moved while it was down).
@@ -379,6 +459,11 @@ impl RealtimeEngine {
             "stream",
             format!("{} {} 实时流已连接", key.0, key.1),
         );
+        self.bus
+            .log("info", "stream", format!("stream {} {} ok", key.0, key.1));
+        if let Ok(mut last) = self.last_failed.lock() {
+            last.remove(key);
+        }
         let mut book = BookState::new();
         // Keepalive: at least one outbound frame every 2 minutes or the
         // server closes the socket (Lighter's documented rule; the
@@ -423,6 +508,22 @@ impl RealtimeEngine {
         }
     }
 
+    /// Log a dial failure once per (key, error). A later success
+    /// clears the entry (see `stream_once`), so a new failure after
+    /// a recovery logs again.
+    fn log_failed(&self, key: &StreamKey, err: &str) {
+        let mut last = self.last_failed.lock().unwrap_or_else(|e| e.into_inner());
+        if last.get(key).map(|s| s.as_str()) == Some(err) {
+            return;
+        }
+        last.insert(key.clone(), err.to_string());
+        self.bus.log(
+            "warn",
+            "stream",
+            format!("stream {} {} failed: {err}", key.0, key.1),
+        );
+    }
+
     /// Record a fresh book: freshness timestamp + publish to the bus
     /// (the forwarder emits it as `market://book`; the bus also caches
     /// it for the runtime snapshot).
@@ -439,6 +540,15 @@ impl RealtimeEngine {
     #[cfg(test)]
     pub fn inject_book(&self, key: &StreamKey, book: OrderBook) {
         self.publish(key, book);
+    }
+
+    /// Test-only seam: whether a stream task exists for the key.
+    #[cfg(test)]
+    fn has_task(&self, key: &StreamKey) -> bool {
+        self.tasks
+            .lock()
+            .map(|m| m.contains_key(key))
+            .unwrap_or(false)
     }
 
     /// Parse one text frame for the stream's exchange. Pure except for
@@ -628,6 +738,108 @@ mod tests {
         let key: StreamKey = ("hyperliquid".to_string(), "BTC".to_string());
         assert!(engine.is_stale(&key));
         assert_eq!(engine.last_update_at(&key), None);
+    }
+
+    /// F4.4: `set_wanted` replaces only the ui half — a pinned key
+    /// (strategy leg, pre-order ensure) survives a ui clear, and the
+    /// clear logs one 已断开 per aborted task plus one 清空 line.
+    #[tokio::test]
+    async fn set_wanted_only_replaces_ui_pinned_survives_clear() {
+        let bus = EventBus::new(16);
+        let catalog = Arc::new(MarketCatalog::new(bus.clone()));
+        let engine = Arc::new(RealtimeEngine::new(bus.clone(), catalog, None));
+        let leg: StreamKey = ("hyperliquid".to_string(), "BTC".to_string());
+        let row: StreamKey = ("entropy".to_string(), "ETH".to_string());
+        engine.ensure_wanted(leg.clone());
+        engine.set_wanted(vec![row.clone()]);
+        assert!(engine.is_wanted(&leg));
+        assert!(engine.is_wanted(&row));
+        engine.set_wanted(vec![]);
+        assert!(engine.is_wanted(&leg), "pinned leg survives a ui clear");
+        assert!(!engine.is_wanted(&row), "ui row is gone after the clear");
+        let msgs: Vec<String> = bus.snapshot_logs().into_iter().map(|l| l.message).collect();
+        assert!(
+            msgs.iter().any(|m| m == "entropy ETH 实时流已断开"),
+            "removed task logs 已断开: {msgs:?}"
+        );
+        assert!(
+            msgs.iter().any(|m| m == "stream 清空 1 个订阅"),
+            "explicit clear logs one 清空 line: {msgs:?}"
+        );
+        assert!(
+            !msgs
+                .iter()
+                .any(|m| m.contains("hyperliquid BTC 实时流已断开")),
+            "pinned leg must not log 已断开: {msgs:?}"
+        );
+    }
+
+    /// F4.4: a dial that keeps failing with the same error logs
+    /// `failed:` once, not on every retry.
+    #[tokio::test]
+    async fn stream_once_logs_failed_once_per_error() {
+        let bus = EventBus::new(16);
+        let catalog = Arc::new(MarketCatalog::new(bus.clone()));
+        let engine = Arc::new(RealtimeEngine::new(bus.clone(), catalog, None));
+        let key: StreamKey = ("hyperliquid".to_string(), "BTC".to_string());
+        let plan = Plan {
+            kind: StreamKind::Hyperliquid,
+            url: "wss://127.0.0.1:1".to_string(),
+            subscribe: None,
+        };
+        assert!(engine.stream_once(&key, &plan).await.is_err());
+        assert!(engine.stream_once(&key, &plan).await.is_err());
+        let failed: Vec<String> = bus
+            .snapshot_logs()
+            .into_iter()
+            .map(|l| l.message)
+            .filter(|m| m.contains("failed:"))
+            .collect();
+        assert_eq!(
+            failed.len(),
+            1,
+            "same key + same error logs once: {failed:?}"
+        );
+        assert!(failed[0].starts_with("stream hyperliquid BTC failed:"));
+    }
+
+    /// F4.4 add-on: `release_pinned` aborts a pinned-only stream, but
+    /// keeps a key the Data page still shows.
+    #[tokio::test]
+    async fn release_pinned_aborts_only_when_not_on_ui() {
+        let bus = EventBus::new(16);
+        let catalog = Arc::new(MarketCatalog::new(bus.clone()));
+        let engine = Arc::new(RealtimeEngine::new(bus.clone(), catalog, None));
+        let leg: StreamKey = ("hyperliquid".to_string(), "BTC".to_string());
+        let row: StreamKey = ("entropy".to_string(), "ETH".to_string());
+        engine.ensure_wanted(leg.clone());
+        engine.set_wanted(vec![row.clone()]);
+        engine.ensure_wanted(row.clone());
+        assert!(engine.has_task(&leg) && engine.has_task(&row));
+        // Release both pins: the leg is pinned-only (aborted), the
+        // row is still on ui (kept).
+        engine.release_pinned(vec![leg.clone(), row.clone()]);
+        assert!(!engine.is_wanted(&leg), "released pin is gone");
+        assert!(engine.is_wanted(&row), "ui key survives the release");
+        assert!(!engine.has_task(&leg), "pinned-only stream is aborted");
+        assert!(engine.has_task(&row), "ui stream is kept");
+        let msgs: Vec<String> = bus.snapshot_logs().into_iter().map(|l| l.message).collect();
+        assert!(
+            msgs.iter()
+                .any(|m| m == "stream hyperliquid BTC 已释放（策略停止）"),
+            "released pin logs 已释放: {msgs:?}"
+        );
+        assert!(
+            msgs.iter()
+                .any(|m| m == "stream entropy ETH 已释放（策略停止）"),
+            "released pin logs 已释放: {msgs:?}"
+        );
+        // Releasing a key that was never pinned is a no-op.
+        engine.release_pinned(vec![("arcus".to_string(), "BTC-USD".to_string())]);
+        assert!(!bus
+            .snapshot_logs()
+            .into_iter()
+            .any(|l| l.message.contains("arcus BTC-USD 已释放")));
     }
 
     /// Frontend/backend field alignment: the exact JSON `tauri.ts`

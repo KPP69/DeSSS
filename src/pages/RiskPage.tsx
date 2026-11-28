@@ -162,7 +162,6 @@ export default function RiskPage() {
           保存限额
         </Button>
       ),
-      status: `总开关：${config == null ? "—" : config.killSwitch ? "开" : "关"}`,
     });
     return () => unregister("risk");
     // eslint-disable-next-line react-hooks/exhaustive-deps

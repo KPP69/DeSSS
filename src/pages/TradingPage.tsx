@@ -1,6 +1,5 @@
-import React, { useLayoutEffect, useState } from "react";
+import React, { useState } from "react";
 import { Button } from "../components/ui";
-import { useShellActions } from "../store/useShellActions";
 import {
   useTradingData,
   type CloseTarget,
@@ -17,8 +16,9 @@ import TradesSection from "../components/trading/TradesSection";
  * refetches and never loses data; sections own their tables and
  * the modals own their flows. No manual order form (see the hook).
  * F4.1: two segments — 持仓 and 记录 (open orders + records +
- * fills); refresh sits at the right of the segment row, the
- * toolbar keeps only the status text. */
+ * fills); refresh sits at the right of the segment row. F4.4: the
+ * toolbar is gone (it held only the status text); the segments and
+ * refresh live in the page itself. */
 type Segment = "positions" | "records";
 
 const SEGMENTS: { key: Segment; label: string }[] = [
@@ -32,16 +32,6 @@ export default function TradingPage() {
   const [closeTarget, setCloseTarget] = useState<CloseTarget | null>(null);
   const [protectTarget, setProtectTarget] = useState<PositionRow | null>(null);
   const [expandedKey, setExpandedKey] = useState<string | null>(null);
-
-  const register = useShellActions((s) => s.register);
-  const unregister = useShellActions((s) => s.unregister);
-  useLayoutEffect(() => {
-    register("trading", {
-      status: `持仓 ${data.positions.length} · 挂单 ${data.openOrders.length}`,
-    });
-    return () => unregister("trading");
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [register, unregister, data.positions.length, data.openOrders.length]);
 
   const askClose = (p: PositionRow) => setCloseTarget(data.askClose(p));
 

@@ -20,6 +20,11 @@ type S = {
   setView: (v: DataView) => void;
   query: string;
   setQuery: (q: string) => void;
+  /** The last submitted query (F4.4): typing only edits `query`;
+   * the search, the 2s tick, the 5s quote refresh and the stream
+   * reconciliation all read this one. Empty means no search. */
+  submittedQuery: string;
+  setSubmittedQuery: (q: string) => void;
   checked: string[];
   checkedInitialized: boolean;
   setChecked: (ids: string[]) => void;
@@ -31,6 +36,8 @@ export const useDataUiStore = create<S>((set, get) => ({
   setView: (view) => set({ view }),
   query: "",
   setQuery: (query) => set({ query }),
+  submittedQuery: "",
+  setSubmittedQuery: (submittedQuery) => set({ submittedQuery }),
   checked: [],
   checkedInitialized: false,
   setChecked: (checked) => set({ checked }),

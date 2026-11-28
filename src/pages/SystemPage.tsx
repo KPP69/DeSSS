@@ -1,20 +1,19 @@
-import React, { useEffect, useLayoutEffect, useState } from "react";
+import React, { useEffect, useState } from "react";
 import { openPath } from "@tauri-apps/plugin-opener";
 import { Button, Input } from "../components/ui";
 import ThemeSwitcher from "../components/ThemeSwitcher";
 import { useInvoke } from "../hooks/useInvoke";
 import { api } from "../lib/tauri";
-import { useShellActions } from "../store/useShellActions";
 import { toast } from "../store/useToastStore";
 import { useVenueStore } from "../store/useVenueStore";
 
 /**
  * System page: four cards in two columns (one column on a narrow
- * window). Appearance reuses the sidebar's ThemeSwitcher; the proxy
- * card saves through the backend; the data / log cards show the
- * absolute paths and open them in Explorer via the opener plugin
- * (opener:default is in the app capability). No log-file count —
- * there is no backend command for it (F5).
+ * window). Appearance holds the theme switch (the only place it
+ * lives, F4.4); the proxy card saves through the backend; the data
+ * / log cards show the absolute paths and open them in Explorer via
+ * the opener plugin (opener:default is in the app capability). No
+ * log-file count — there is no backend command for it (F5).
  *
  * Proxy + catalog both come from `useInvoke` (Phase 2, I11); saving
  * the proxy is a click mutation that refreshes the proxy afterwards.
@@ -28,7 +27,6 @@ const CARD = "bg-ds-panel border border-ds-line rounded-[10px] shadow-card p-4";
 export default function SystemPage() {
   const proxy = useInvoke(() => api.getProxy(), []);
   const catalog = useInvoke(() => api.getCatalogStatus(), []);
-  const appInfo = useInvoke(() => api.getAppInfo(), []);
   const [input, setInput] = useState("");
   const [saving, setSaving] = useState(false);
   const names = useVenueStore((s) => s.names);
@@ -59,17 +57,8 @@ export default function SystemPage() {
     }
   };
 
-  // Toolbar (F1): no primary action; version on the right.
-  const register = useShellActions((s) => s.register);
-  const unregister = useShellActions((s) => s.unregister);
-  useLayoutEffect(() => {
-    register("system", {
-      status: appInfo.data ? `v${appInfo.data.version}` : "—",
-    });
-    return () => unregister("system");
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [register, unregister, appInfo.data]);
-
+  // F4.4: no toolbar on this page (it held only the version status);
+  // the theme switch lives in the 外观主题 card below.
   return (
     <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
       <div className={CARD}>

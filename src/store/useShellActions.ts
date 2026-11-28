@@ -4,11 +4,11 @@ import type { PageKey } from "./useAppStore";
 
 /**
  * The page-to-toolbar channel (F1): the current page registers its
- * toolbar content (left actions + right status) in a useEffect and
- * unregisters on unmount. AppShell only renders what is registered —
- * no page state is lifted to App.
+ * toolbar actions (left side only, F4.4 — the right-side status text
+ * is gone) in a useEffect and unregisters on unmount. AppShell only
+ * renders what is registered — no page state is lifted to App.
  */
-export type ShellContent = { actions?: ReactNode; status?: ReactNode };
+export type ShellContent = { actions?: ReactNode };
 
 type S = {
   byPage: Partial<Record<PageKey, ShellContent>>;

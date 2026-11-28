@@ -1,4 +1,4 @@
-import React, { useLayoutEffect, useState } from "react";
+import React, { useState } from "react";
 import {
   Badge,
   Button,
@@ -15,7 +15,6 @@ import {
 } from "../components/ui";
 import PageState from "../components/PageState";
 import { toast } from "../store/useToastStore";
-import { useShellActions } from "../store/useShellActions";
 
 /**
  * Component showcase (F2, item 14): every ui-kit component in every
@@ -51,13 +50,6 @@ const OPTS = [
 ];
 
 export default function UiShowcasePage() {
-  const register = useShellActions((s) => s.register);
-  const unregister = useShellActions((s) => s.unregister);
-  useLayoutEffect(() => {
-    register("_ui", { status: "开发预览 · 12 个组件 · 不进导航" });
-    return () => unregister("_ui");
-  }, [register, unregister]);
-
   const [sel, setSel] = useState("");
   const [multi, setMulti] = useState<string[]>(["hl", "en"]);
   const [checked, setChecked] = useState(true);

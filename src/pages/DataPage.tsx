@@ -289,6 +289,7 @@ export default function DataPage() {
   const {
     query,
     setQuery,
+    submittedQuery,
     checked,
     setChecked,
     results,
@@ -341,10 +342,9 @@ export default function DataPage() {
   }, [venueStatus, venueName]);
 
   // Toolbar (F1): view toggle + exchange filter + refresh on the
-  // left, catalog update time on the right (F4.1: refresh and the
-  // exchange filter moved up here; the search row keeps only the
-  // input). The dropdown menus render through a fixed portal, so
-  // the toolbar never clips them.
+  // left (F4.4: the catalog-update status on the right is gone). The
+  // dropdown menus render through a fixed portal, so the toolbar
+  // never clips them.
   const register = useShellActions((s) => s.register);
   const unregister = useShellActions((s) => s.unregister);
   useLayoutEffect(() => {
@@ -386,11 +386,10 @@ export default function DataPage() {
           </Button>
         </>
       ),
-      status: `目录更新于 ${cacheUpdatedAt != null ? fmtClock(cacheUpdatedAt) : "—"}`,
     });
     return () => unregister("data");
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [register, unregister, view, refreshing, cacheUpdatedAt, onRefresh, setView, schemas, checked, setChecked]);
+  }, [register, unregister, view, refreshing, onRefresh, setView, schemas, checked, setChecked]);
 
   return (
     <div>
@@ -398,9 +397,27 @@ export default function DataPage() {
         <PageState empty>自定义信号尚未接入 — 下一阶段将支持信号规则创建。</PageState>
       ) : (
         <>
-          {/* Search row (F4.1): only the input lives here now —
-              the exchange filter and refresh moved to the toolbar. */}
+          {/* Search row (F4.4): submit-style — typing only edits the
+              input; Enter / the magnifier button submits. The button
+              is the same height as the input (h-8) and disabled while
+              the input is empty. */}
           <div className="flex items-center gap-2 mb-3">
+            <Button
+              onClick={searchNow}
+              disabled={!query.trim()}
+              aria-label="搜索"
+              className="shrink-0 px-2.5"
+            >
+              <svg
+                className="h-4 w-4"
+                viewBox="0 0 16 16"
+                fill="none"
+                aria-hidden="true"
+              >
+                <circle cx="7" cy="7" r="4.5" stroke="currentColor" strokeWidth="1.5" />
+                <path d="M10.5 10.5 14 14" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+              </svg>
+            </Button>
             <div className="flex-1 min-w-0">
               <Input
                 value={query}
@@ -413,26 +430,6 @@ export default function DataPage() {
             </div>
           </div>
 
-          {/* Per-venue catalog status (rows / update time / not ready /
-              failed). Lives below the tool row so the row itself stays
-              static. Refreshing never blocks the table. */}
-          {venueStatus && (
-            <div className="text-xs text-ds-text-3 mb-3 num">
-              {venueStatus.venues.map((v) => {
-                const st = v.error
-                  ? "失败"
-                  : v.updatedAt == null
-                    ? "未就绪"
-                    : fmtClock(v.updatedAt);
-                return (
-                  <span key={v.exchangeId} className="mr-3">
-                    {venueName(v.exchangeId)} {v.rows}行 · {st}
-                  </span>
-                );
-              })}
-            </div>
-          )}
-
           {!searched && !searching ? (
             <PageState empty>输入 BTC、ETH、SOL、NVDA 等标的名称，查询 6 所实时对比数据。</PageState>
           ) : searching && results.length === 0 ? (
@@ -440,7 +437,7 @@ export default function DataPage() {
           ) : notReady ? (
             <PageState empty>目录未就绪，正在拉取…</PageState>
           ) : results.length === 0 ? (
-            <PageState empty>未找到包含「{query.trim()}」的标的。</PageState>
+            <PageState empty>未找到包含「{submittedQuery.trim()}」的标的。</PageState>
           ) : (
             <div className="mb-6">
               {/* Reserved line: searching must not push the table down

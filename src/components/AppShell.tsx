@@ -10,9 +10,10 @@ import { useShellActions } from "../store/useShellActions";
  * The one fixed three-zone shell, shared by all 6 pages:
  * - title bar: fixed h-14 (56px), page title left, Console button
  *   right (unread-error badge kept)
- * - toolbar: fixed h-12 (48px), left primary actions, right key
- *   status (text-xs text-ds-text-2, ml-auto) — content comes from
- *   the current page via useShellActions, never from App
+ * - toolbar: fixed h-12 (48px), left primary actions only (F4.4) —
+ *   content comes from the current page via useShellActions, never
+ *   from App; a page with no actions gets no toolbar at all (the
+ *   bar collapses, it is not rendered empty)
  * - main: independently scrolling content area, px-5 py-4
  * Console drawer slides up from the bottom; toasts sit top-right.
  * Pages only provide their title, toolbar content, and content —
@@ -51,12 +52,11 @@ export default function AppShell({
             </button>
           </div>
         </header>
-        <div className="shrink-0 h-12 flex items-center px-5 border-b border-ds-line bg-ds-bg">
-          {shell?.actions != null && <div className="flex gap-2">{shell.actions}</div>}
-          {shell?.status != null && (
-            <div className="ml-auto text-xs text-ds-text-2">{shell.status}</div>
-          )}
-        </div>
+        {shell?.actions != null && (
+          <div className="shrink-0 h-12 flex items-center px-5 border-b border-ds-line bg-ds-bg">
+            <div className="flex gap-2">{shell.actions}</div>
+          </div>
+        )}
         <main className="flex-1 min-w-0 overflow-y-auto px-5 py-4">{children}</main>
       </div>
       <ConsoleDrawer open={consoleOpen} onClose={() => setConsoleOpen(false)} />

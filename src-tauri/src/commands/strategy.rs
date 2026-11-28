@@ -36,5 +36,12 @@ pub fn set_strategy_enabled(
     id: String,
     enabled: bool,
 ) -> Result<StrategyInstance, String> {
-    crate::strategy::set_strategy_enabled(&state.db, &id, enabled)
+    let inst = crate::strategy::set_strategy_enabled(&state.db, &id, enabled)?;
+    if !enabled {
+        state.streams.release_pinned(vec![
+            (inst.leg_a.exchange_id.clone(), inst.leg_a.symbol.clone()),
+            (inst.leg_b.exchange_id.clone(), inst.leg_b.symbol.clone()),
+        ]);
+    }
+    Ok(inst)
 }

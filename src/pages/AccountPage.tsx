@@ -1,7 +1,7 @@
 import React, { useEffect, useLayoutEffect, useMemo, useState } from "react";
 import AccountModal from "../components/AccountModal";
 import PageState from "../components/PageState";
-import { Badge, Button, ConfirmDialog, DataTable, StatCard, tdClsCompact, tdClsCompactRight, trCls } from "../components/ui";
+import { Badge, Button, ConfirmDialog, DataTable, StatCard, Tooltip, tdClsCompact, tdClsCompactRight, trCls } from "../components/ui";
 import { useVenueSchemas } from "../hooks/useVenueSchemas";
 import { useAccountStore } from "../store/useAccountStore";
 import type { AccountView } from "../lib/types";
@@ -72,18 +72,17 @@ export default function AccountPage() {
   const [pendingDelete, setPendingDelete] = useState<AccountView | null>(null);
   const [busy, setBusy] = useState<{ id: string; kind: "connect" | "disconnect" } | null>(null);
 
-  // Toolbar (F1): add-account action + account / connected counts.
+  // Toolbar (F1): add-account action (F4.4: the account / connected
+  // counts on the right are gone).
   const register = useShellActions((s) => s.register);
   const unregister = useShellActions((s) => s.unregister);
-  const connected = accounts.filter((a) => live[a.id]?.status === "connected").length;
   useLayoutEffect(() => {
     register("account", {
       actions: <Button onClick={openAdd}>添加账户</Button>,
-      status: `${accounts.length} 账户 · ${connected} 已连接`,
     });
     return () => unregister("account");
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [register, unregister, openAdd, accounts, live]);
+  }, [register, unregister, openAdd]);
 
   // Top overview: sum live equity / available / PnL across accounts.
   // Hyperliquid and Entropy share one master-wallet pool (the backend
@@ -187,10 +186,11 @@ export default function AccountPage() {
       {/* Account columns, strictly locked by percentage (sum 100%):
           名称 14% / 交易所 12% / 标识 20% / 状态 14% / 权益 12% /
           可用 11% / 操作 17%. table-fixed + w-full keeps the ratios
-          at any window size; min-w-800px is the floor. */}
+          at any window size; min-w-680px is the floor (F4.4: 960-wide
+          windows fit without a horizontal scrollbar). */}
       <DataTable
         headers={HEADERS}
-        minWidth={800}
+        minWidth={680}
         compact
         colWidths={["14%", "12%", "20%", "14%", "12%", "11%", "17%"]}
         aligns={["center", "center", "center", "center", "right", "right", "center"]}
@@ -203,9 +203,23 @@ export default function AccountPage() {
             (busy?.id === a.id && busy.kind === "connect");
           const disconnecting = busy?.id === a.id && busy.kind === "disconnect";
           return (
-          <tr key={a.id} className={trCls}>
+          <tr
+            key={a.id}
+            className={trCls}
+            tabIndex={0}
+            onKeyDown={(e) => {
+              // Enter on the row itself (not on a button inside it)
+              // opens the edit modal — the same as the 编辑 button.
+              if (e.key === "Enter" && e.target === e.currentTarget) {
+                e.preventDefault();
+                openEdit(a);
+              }
+            }}
+          >
             <td className={tdClsCompact}>
-              <span className="block truncate">{a.label}</span>
+              <Tooltip content={a.label}>
+                <span className="block truncate">{a.label}</span>
+              </Tooltip>
               {!a.credentialConfigured && (
                 <span className="block text-[11px] text-ds-warn">未配置凭证</span>
               )}
