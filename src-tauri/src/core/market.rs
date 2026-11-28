@@ -17,6 +17,12 @@ use crate::core::symbol::normalize_base_symbol;
 /// the frontend renders it as "—". Bid/ask come only from a real order
 /// book (per-hit fill); a bulk proxy is never written here. `market_id`
 /// is internal only (Lighter BBO fill) and never serialized.
+///
+/// Quote fields (PR-B1) — mark, index, funding, 24h volume, open
+/// interest, 24h change — are the live half ([`Quote`]): they move on
+/// every bulk refresh or quote refresh, and `quote_at` records when
+/// they were last written. Definition fields (specs, leverage, tick
+/// sizes, settlement currency) do not move between refreshes.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct MarketInfo {
@@ -55,6 +61,16 @@ pub struct MarketInfo {
     pub volume_24h_usd: Option<f64>,
     /// Open interest in USD (None when unavailable).
     pub open_interest_usd: Option<f64>,
+    /// 24h change as a fraction (0.0123 = +1.23%): Hyperliquid from
+    /// `prevDayPx`, AsterDEX from `ticker/24hr priceChangePercent`;
+    /// None where the venue publishes no bulk source (Arcus, Lighter).
+    pub change_24h: Option<f64>,
+    /// When the quote fields above were last written (unix ms, local
+    /// clock): set by a bulk refresh or a quote refresh, never
+    /// persisted — a restart reloads instruments with `None` until
+    /// the first refresh. The frontend gates mark/funding on its age
+    /// (PR-B1: 15s).
+    pub quote_at: Option<i64>,
     /// When this row was built, unix ms.
     pub updated_at: i64,
 }
@@ -85,9 +101,9 @@ pub struct Instrument {
 
 /// A market's live fields: everything a refresh or a WS frame can
 /// move. Memory-only by design — quotes are never persisted. `bbo`
-/// is `(bid_px, ask_px)`; `change_24h` has no bulk source on any venue
-/// yet (AsterDEX `ticker/24hr` carries `priceChangePercent` — a later
-/// wiring), so it is `None` for now rather than invented.
+/// is `(bid_px, ask_px)`; `change_24h` is a fraction (0.0123 =
+/// +1.23%), wired per venue where a bulk source exists (Hyperliquid
+/// `prevDayPx`, AsterDEX `ticker/24hr priceChangePercent`).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Quote {
     pub mark_px: Option<f64>,
@@ -95,6 +111,29 @@ pub struct Quote {
     pub bid_px: Option<f64>,
     pub ask_px: Option<f64>,
     pub mid_px: Option<f64>,
+    pub funding_rate_raw: Option<f64>,
+    pub funding_1h: Option<f64>,
+    pub funding_apr: Option<f64>,
+    pub next_funding_time: Option<i64>,
+    pub volume_24h_usd: Option<f64>,
+    pub open_interest_usd: Option<f64>,
+    pub change_24h: Option<f64>,
+    /// When the quote fields above were last written (unix ms, local
+    /// clock); `None` until the first bulk or quote refresh.
+    pub quote_at: Option<i64>,
+}
+
+/// One symbol's live quote fields from a batch quote refresh (PR-B1).
+/// `symbol` is the native wire symbol. A `None` field means the venue
+/// has no bulk source for it — the stored value is left untouched on
+/// merge (never cleared to `None`). Bid/ask/mid are deliberately
+/// absent: they come only from WS frames / per-hit fills, never from
+/// a bulk quote endpoint.
+#[derive(Clone, Debug, PartialEq)]
+pub struct QuoteUpdate {
+    pub symbol: String,
+    pub mark_px: Option<f64>,
+    pub index_px: Option<f64>,
     pub funding_rate_raw: Option<f64>,
     pub funding_1h: Option<f64>,
     pub funding_apr: Option<f64>,
@@ -136,7 +175,8 @@ impl MarketInfo {
                 next_funding_time: self.next_funding_time,
                 volume_24h_usd: self.volume_24h_usd,
                 open_interest_usd: self.open_interest_usd,
-                change_24h: None,
+                change_24h: self.change_24h,
+                quote_at: self.quote_at,
             },
         )
     }
@@ -167,7 +207,27 @@ impl MarketInfo {
             next_funding_time: q.next_funding_time,
             volume_24h_usd: q.volume_24h_usd,
             open_interest_usd: q.open_interest_usd,
+            change_24h: q.change_24h,
+            quote_at: q.quote_at,
             updated_at: ins.updated_at,
+        }
+    }
+
+    /// The row's live quote fields as a [`QuoteUpdate`] (PR-B1): a
+    /// venue whose batch quote endpoint is the same response as its
+    /// bulk fetch builds its quotes by mapping its rows through here.
+    pub fn to_quote_update(&self) -> QuoteUpdate {
+        QuoteUpdate {
+            symbol: self.symbol.clone(),
+            mark_px: self.mark_px,
+            index_px: self.index_px,
+            funding_rate_raw: self.funding_rate_raw,
+            funding_1h: self.funding_1h,
+            funding_apr: self.funding_apr,
+            next_funding_time: self.next_funding_time,
+            volume_24h_usd: self.volume_24h_usd,
+            open_interest_usd: self.open_interest_usd,
+            change_24h: self.change_24h,
         }
     }
 }
@@ -271,6 +331,43 @@ mod tests {
         assert_eq!(next_hour_utc_ms(1_795_622_400_000), 1_795_626_000_000);
     }
 
+    /// PR-B1: a row maps to its quote update field for field; bid/ask
+    /// never ride along (they come from WS, never from bulk).
+    #[test]
+    fn to_quote_update_maps_live_fields_only() {
+        let row = MarketInfo {
+            exchange_id: "hyperliquid".into(),
+            symbol: "BTC".into(),
+            base_symbol: "BTC".into(),
+            market_id: None,
+            settlement_currency: "USDC".into(),
+            max_leverage: Some(40.0),
+            tick_size: Some(1.0),
+            step_size: Some(0.00001),
+            min_notional: Some(10.0),
+            bid_px: Some(58031.0),
+            ask_px: Some(58032.0),
+            mid_px: Some(58031.5),
+            mark_px: Some(58033.0),
+            index_px: Some(58056.0),
+            funding_rate_raw: Some(0.0000069845),
+            funding_interval_hours: Some(1.0),
+            funding_1h: Some(0.0000069845),
+            funding_apr: Some(6.11),
+            next_funding_time: Some(1_795_626_000_000),
+            volume_24h_usd: Some(3_411_439_784.874),
+            open_interest_usd: Some(1_997_000_000.0),
+            change_24h: Some(0.018),
+            quote_at: Some(1_700_000_000_000),
+            updated_at: 1_700_000_000_000,
+        };
+        let q = row.to_quote_update();
+        assert_eq!(q.symbol, "BTC");
+        assert_eq!(q.mark_px, Some(58033.0));
+        assert_eq!(q.funding_1h, Some(0.0000069845));
+        assert_eq!(q.change_24h, Some(0.018));
+    }
+
     /// PR-0.3: the Instrument/Quote split is lossless — assembling the
     /// pair returns the original row, field for field, on both the
     /// plain and the `io:`-prefixed (Entropy) shapes.
@@ -302,6 +399,8 @@ mod tests {
                 next_funding_time: Some(1_800_000_000_000),
                 volume_24h_usd: Some(1_234_567.0),
                 open_interest_usd: Some(9_876_543.0),
+                change_24h: Some(0.0123),
+                quote_at: Some(1_700_000_000_000),
                 updated_at: 1_700_000_000_000,
             };
             let (ins, quote) = row.split();

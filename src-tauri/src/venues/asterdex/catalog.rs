@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use super::ASTER_REST_URL;
 use crate::core::market::{
-    funding_1h_from, funding_apr_pct, get_json, num_field, str_field, MarketInfo,
+    funding_1h_from, funding_apr_pct, get_json, num_field, str_field, MarketInfo, QuoteUpdate,
 };
 use crate::core::symbol::normalize_base_symbol;
 use crate::core::util::now_ms;
@@ -86,6 +86,7 @@ fn parse_asterdex(
     book: &serde_json::Value,
     intervals: &HashMap<String, f64>,
     volumes: &HashMap<String, f64>,
+    changes: &HashMap<String, f64>,
     now_ms: i64,
 ) -> Result<Vec<MarketInfo>, String> {
     let Some(premium_list) = premium.as_array() else {
@@ -156,6 +157,9 @@ fn parse_asterdex(
             // no openInterest endpoint, so open interest stays None.
             volume_24h_usd: volumes.get(symbol).copied(),
             open_interest_usd: None,
+            // 24h change as a fraction (priceChangePercent is a percent).
+            change_24h: changes.get(symbol).copied(),
+            quote_at: Some(now_ms),
             updated_at: now_ms,
         });
     }
@@ -170,6 +174,21 @@ fn parse_asterdex_volumes(v: &serde_json::Value) -> HashMap<String, f64> {
         for t in list {
             if let (Some(s), Some(q)) = (str_field(t, "symbol"), num_field(t, "quoteVolume")) {
                 out.insert(s.to_string(), q);
+            }
+        }
+    }
+    out
+}
+
+/// AsterDEX `ticker/24hr` -> symbol -> 24h change as a fraction
+/// (`priceChangePercent` is a percent: 1.23 means +1.23%).
+fn parse_asterdex_changes(v: &serde_json::Value) -> HashMap<String, f64> {
+    let mut out = HashMap::new();
+    if let Some(list) = v.as_array() {
+        for t in list {
+            if let (Some(s), Some(p)) = (str_field(t, "symbol"), num_field(t, "priceChangePercent"))
+            {
+                out.insert(s.to_string(), p / 100.0);
             }
         }
     }
@@ -242,9 +261,9 @@ pub(crate) async fn fetch_asterdex(http: &reqwest::Client) -> Result<Vec<MarketI
             *INTERVALS.lock().unwrap_or_else(|e| e.into_inner()) = Some(intervals);
         }
     }
-    let volumes = match ticker24 {
-        Ok(v) => parse_asterdex_volumes(&v),
-        Err(_) => HashMap::new(),
+    let (volumes, changes) = match ticker24 {
+        Ok(v) => (parse_asterdex_volumes(&v), parse_asterdex_changes(&v)),
+        Err(_) => (HashMap::new(), HashMap::new()),
     };
     let intervals = INTERVALS
         .lock()
@@ -252,9 +271,82 @@ pub(crate) async fn fetch_asterdex(http: &reqwest::Client) -> Result<Vec<MarketI
         .clone()
         .unwrap_or_default();
     match (premium, book) {
-        (Ok(p), Ok(b)) => parse_asterdex(&specs, &p, &b, &intervals, &volumes, now_ms()),
+        (Ok(p), Ok(b)) => parse_asterdex(&specs, &p, &b, &intervals, &volumes, &changes, now_ms()),
         (Err(e), _) | (_, Err(e)) => Err(format!("asterdex 全量行情刷新失败：{e}")),
     }
+}
+
+/// Batch quote refresh (PR-B1): premiumIndex + ticker/24hr only — no
+/// exchangeInfo (specs, hourly-cached), no bookTicker (bid/ask come
+/// from WS, never from bulk), no fundingInfo (intervals change rarely;
+/// the cached map is used, and a symbol never seen in it keeps its
+/// funding unknown, same rule as the bulk path). Returns one
+/// [`QuoteUpdate`] per premiumIndex symbol; the merge ignores symbols
+/// with no catalog row.
+pub(crate) async fn fetch_asterdex_quotes(
+    http: &reqwest::Client,
+) -> Result<Vec<QuoteUpdate>, String> {
+    let premium_url = format!("{ASTER_REST_URL}/fapi/v3/premiumIndex");
+    let ticker_url = format!("{ASTER_REST_URL}/fapi/v3/ticker/24hr");
+    let (premium, ticker24) =
+        tokio::join!(get_json(http, &premium_url), get_json(http, &ticker_url),);
+    let intervals = INTERVALS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+        .unwrap_or_default();
+    let volumes = match &ticker24 {
+        Ok(v) => parse_asterdex_volumes(v),
+        Err(_) => HashMap::new(),
+    };
+    let changes = match &ticker24 {
+        Ok(v) => parse_asterdex_changes(v),
+        Err(_) => HashMap::new(),
+    };
+    let premium = premium.map_err(|e| format!("asterdex 报价刷新失败：{e}"))?;
+    parse_asterdex_quotes(&premium, &intervals, &volumes, &changes)
+}
+
+/// Parse premiumIndex + ticker/24hr into quote updates (pure,
+/// fixture-tested). No specs filter: the merge ignores premium entries
+/// with no catalog row (stale/delisted), so the specs map is not needed.
+fn parse_asterdex_quotes(
+    premium: &serde_json::Value,
+    intervals: &HashMap<String, f64>,
+    volumes: &HashMap<String, f64>,
+    changes: &HashMap<String, f64>,
+) -> Result<Vec<QuoteUpdate>, String> {
+    let Some(list) = premium.as_array() else {
+        return Err("premiumIndex 返回结构异常（应为数组）".into());
+    };
+    let mut out = Vec::new();
+    for p in list {
+        let Some(symbol) = str_field(p, "symbol") else {
+            continue;
+        };
+        let funding_raw = num_field(p, "lastFundingRate");
+        let interval = intervals.get(symbol).copied().filter(|h| *h > 0.0);
+        let funding_1h = match (funding_raw, interval) {
+            (Some(raw), Some(h)) => Some(funding_1h_from(raw, h)),
+            _ => None,
+        };
+        out.push(QuoteUpdate {
+            symbol: symbol.to_string(),
+            mark_px: num_field(p, "markPrice"),
+            index_px: num_field(p, "indexPrice"),
+            funding_rate_raw: funding_raw,
+            funding_1h,
+            funding_apr: funding_1h.map(funding_apr_pct),
+            next_funding_time: p
+                .get("nextFundingTime")
+                .and_then(|n| n.as_i64())
+                .filter(|t| *t > 0),
+            volume_24h_usd: volumes.get(symbol).copied(),
+            open_interest_usd: None,
+            change_24h: changes.get(symbol).copied(),
+        });
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -276,6 +368,42 @@ mod tests {
         assert_eq!(map.get("BTCUSDT"), Some(&587866473.21));
         assert_eq!(map.get("ETHUSDT"), Some(&123456.0));
         assert!(!map.contains_key("NOPEUSDT"));
+    }
+
+    /// PR-B1: the quotes-only parse (premiumIndex + ticker/24hr):
+    /// mark/funding/volume/change per symbol; a symbol missing from
+    /// the interval map keeps its funding unknown but its mark still
+    /// updates; OI is always None (no V3 endpoint).
+    #[test]
+    fn parse_asterdex_quotes_fixture() {
+        let premium = json(
+            r#"[{"symbol":"BTCUSDT","markPrice":"58038.2","indexPrice":"58059.68","lastFundingRate":"0.00009616","nextFundingTime":1795622400000},
+                {"symbol":"ETHUSDT","markPrice":"1641.0","indexPrice":"1641.5","lastFundingRate":"0.00008","nextFundingTime":1795622400000},
+                {"symbol":"NOPEUSDT","markPrice":"1.0","indexPrice":"1.0","lastFundingRate":"0.0","nextFundingTime":1795622400000}]"#,
+        );
+        let ticker = json(
+            r#"[{"symbol":"BTCUSDT","quoteVolume":"587866473.21","priceChangePercent":"1.23"},
+                {"symbol":"ETHUSDT","quoteVolume":"123456.0","priceChangePercent":"-0.5"}]"#,
+        );
+        let mut intervals = HashMap::new();
+        intervals.insert("BTCUSDT".to_string(), 8.0);
+        // ETH has no interval: funding stays unknown, mark still updates.
+        let volumes = parse_asterdex_volumes(&ticker);
+        let changes = parse_asterdex_changes(&ticker);
+        let rows = parse_asterdex_quotes(&premium, &intervals, &volumes, &changes).unwrap();
+        assert_eq!(rows.len(), 3);
+        let btc = rows.iter().find(|r| r.symbol == "BTCUSDT").unwrap();
+        assert_eq!(btc.mark_px, Some(58038.2));
+        assert_eq!(btc.index_px, Some(58059.68));
+        assert!((btc.funding_1h.unwrap() - 0.00009616 / 8.0).abs() < 1e-12);
+        assert_eq!(btc.volume_24h_usd, Some(587866473.21));
+        assert!((btc.change_24h.unwrap() - 0.0123).abs() < 1e-12);
+        assert_eq!(btc.open_interest_usd, None);
+        let eth = rows.iter().find(|r| r.symbol == "ETHUSDT").unwrap();
+        assert_eq!(eth.mark_px, Some(1641.0));
+        assert_eq!(eth.funding_1h, None);
+        assert_eq!(eth.funding_apr, None);
+        assert!((eth.change_24h.unwrap() - (-0.005)).abs() < 1e-12);
     }
 
     #[test]
@@ -313,6 +441,7 @@ mod tests {
             &book,
             &intervals,
             &volumes,
+            &HashMap::new(),
             1_795_622_400_000,
         )
         .unwrap();
@@ -654,12 +783,14 @@ mod tests {
 ]"#,
         );
         let volumes = parse_asterdex_volumes(&ticker);
+        let changes = parse_asterdex_changes(&ticker);
         let rows = parse_asterdex(
             &specs,
             &premium,
             &book,
             &intervals,
             &volumes,
+            &changes,
             1_795_716_271_300,
         )
         .unwrap();
@@ -714,6 +845,7 @@ mod tests {
             &specs,
             &premium,
             &book,
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             1_795_622_400_000,

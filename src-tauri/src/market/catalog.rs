@@ -84,7 +84,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use crate::bus::EventBus;
-use crate::core::market::{Instrument, MarketInfo, Quote};
+use crate::core::market::{Instrument, MarketInfo, Quote, QuoteUpdate};
 use crate::net::shared_http_client;
 
 /// Cached rows are fresh for 30s: a search inside that window serves the
@@ -99,6 +99,11 @@ pub const REFRESH_TIMEOUT: Duration = Duration::from_secs(5);
 /// this long (manual refresh bypasses it). One failure never retries
 /// on every keystroke.
 pub const ERROR_BACKOFF: Duration = Duration::from_secs(60);
+/// After a failed *quote* refresh, automatic quote refreshes skip the
+/// exchange for this long (manual refresh bypasses it). Shorter than
+/// the bulk 60s — quotes are the live path, and the Data page calls
+/// every 5s.
+pub const QUOTE_ERROR_BACKOFF: Duration = Duration::from_secs(30);
 /// The WS-staleness fallback covers at most this many of a search's
 /// top rows, once, in the background.
 pub const FALLBACK_TOP_N: usize = 5;
@@ -117,6 +122,19 @@ enum RefreshOutcome {
     Failed,
 }
 
+/// Per-venue result of a batch quote refresh (PR-B1), for the
+/// `refresh_quotes` command: whether the venue's quotes are fresh
+/// after the call, how many rows moved, and the failure text when one
+/// applies (backoff skips report the backoff, not a fetch error).
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuoteVenueResult {
+    pub exchange_id: String,
+    pub ok: bool,
+    pub rows: usize,
+    pub error: Option<String>,
+}
+
 pub struct MarketCatalog {
     http: reqwest::Client,
     bus: EventBus,
@@ -129,6 +147,13 @@ pub struct MarketCatalog {
     /// When each exchange last failed a refresh (unix `Instant`):
     /// automatic refreshes skip it inside [`ERROR_BACKOFF`].
     error_at: Mutex<HashMap<String, Instant>>,
+    /// When each exchange last failed a *quote* refresh (unix
+    /// `Instant`): automatic quote refreshes skip it inside
+    /// [`QUOTE_ERROR_BACKOFF`]. Separate from `error_at` — a quote
+    /// failure must not surface as a catalog error.
+    quote_error_at: Mutex<HashMap<String, Instant>>,
+    /// Latest quote-refresh failure text per exchange (deduped log).
+    last_quote_errors: Mutex<HashMap<String, String>>,
     /// Last time the 5s-staleness fallback was claimed, to keep the
     /// 2s search tick from spawning one fallback task per tick.
     last_fallback: Mutex<Option<Instant>>,
@@ -157,6 +182,8 @@ impl MarketCatalog {
             data: RwLock::new(HashMap::new()),
             last_errors: Mutex::new(HashMap::new()),
             error_at: Mutex::new(HashMap::new()),
+            quote_error_at: Mutex::new(HashMap::new()),
+            last_quote_errors: Mutex::new(HashMap::new()),
             last_fallback: Mutex::new(None),
             fetched_at: Mutex::new(HashMap::new()),
             last_success_at: Mutex::new(None),
@@ -482,6 +509,200 @@ impl MarketCatalog {
         }
     }
 
+    /// Merge one venue's batch quote updates into the in-memory rows
+    /// (PR-B1). Memory-only — SQLite `instruments` are untouched, and
+    /// `updated_at` (the "目录更新于" time) is untouched too. Only the
+    /// quote fields move; definition fields and bid/ask/mid are left
+    /// alone. A `None` field in an update leaves the stored value in
+    /// place (never cleared). Rows missing from the update keep their
+    /// old `quote_at` — they age out and the frontend shows
+    /// 无实时数据. `quote_at` is set to `now_ms` only for rows where at
+    /// least one quote field actually moved. Returns the number of
+    /// rows updated.
+    pub(crate) fn apply_quotes(
+        &self,
+        exchange_id: &str,
+        updates: Vec<QuoteUpdate>,
+        now_ms: i64,
+    ) -> usize {
+        let mut data = self.data.write().unwrap_or_else(|e| e.into_inner());
+        let mut updated = 0;
+        for u in updates {
+            let Some(row) = data.get_mut(&(exchange_id.to_string(), u.symbol.clone())) else {
+                continue;
+            };
+            let mut moved = false;
+            if let Some(v) = u.mark_px {
+                row.mark_px = Some(v);
+                moved = true;
+            }
+            if let Some(v) = u.index_px {
+                row.index_px = Some(v);
+                moved = true;
+            }
+            if let Some(v) = u.funding_rate_raw {
+                row.funding_rate_raw = Some(v);
+                moved = true;
+            }
+            if let Some(v) = u.funding_1h {
+                row.funding_1h = Some(v);
+                moved = true;
+            }
+            if let Some(v) = u.funding_apr {
+                row.funding_apr = Some(v);
+                moved = true;
+            }
+            if let Some(v) = u.next_funding_time {
+                row.next_funding_time = Some(v);
+                moved = true;
+            }
+            if let Some(v) = u.volume_24h_usd {
+                row.volume_24h_usd = Some(v);
+                moved = true;
+            }
+            if let Some(v) = u.open_interest_usd {
+                row.open_interest_usd = Some(v);
+                moved = true;
+            }
+            if let Some(v) = u.change_24h {
+                row.change_24h = Some(v);
+                moved = true;
+            }
+            if moved {
+                row.quote_at = Some(now_ms);
+                updated += 1;
+            }
+        }
+        updated
+    }
+
+    /// True when the exchange failed a quote refresh inside
+    /// [`QUOTE_ERROR_BACKOFF`]: automatic quote refreshes skip it
+    /// (manual refresh bypasses this).
+    fn quote_in_backoff(&self, exchange_id: &str) -> bool {
+        self.quote_error_at
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(exchange_id)
+            .map(|t| t.elapsed() < QUOTE_ERROR_BACKOFF)
+            .unwrap_or(false)
+    }
+
+    /// Log a quote-refresh failure as a console warning, but only when
+    /// the message changed since the last failure for this exchange —
+    /// a persistently failing exchange must not spam the console on
+    /// every 5s tick. Separate from the bulk `last_errors`: a quote
+    /// failure must not surface as a catalog error.
+    fn log_quote_error(&self, exchange_id: &str, message: String) {
+        let mut last = self
+            .last_quote_errors
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let changed = last.get(exchange_id).map(|m| m.as_str()) != Some(message.as_str());
+        if changed {
+            last.insert(exchange_id.to_string(), message.clone());
+            self.bus.log("warn", "市场数据", message);
+        }
+    }
+
+    fn log_quote_ok(&self, exchange_id: &str) {
+        let mut last = self
+            .last_quote_errors
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        last.remove(exchange_id);
+        self.quote_error_at
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(exchange_id);
+    }
+
+    /// Record a quote-refresh failure: arm the 30s backoff and log one
+    /// deduped warning line.
+    fn record_quote_failure(&self, exchange_id: &str, e: String) -> QuoteVenueResult {
+        self.quote_error_at
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(exchange_id.to_string(), Instant::now());
+        self.log_quote_error(exchange_id, format!("{exchange_id} 报价刷新失败：{e}"));
+        QuoteVenueResult {
+            exchange_id: exchange_id.to_string(),
+            ok: false,
+            rows: 0,
+            error: Some(e),
+        }
+    }
+
+    /// One exchange's batch quote refresh (PR-B1): under the exchange's
+    /// refresh lock (so a quote refresh serializes with a bulk refresh
+    /// of the same venue), with a [`REFRESH_TIMEOUT`] timeout. No log
+    /// line on success; a failure logs one deduped warning line and
+    /// arms the 30s backoff.
+    async fn refresh_quotes_one(&self, exchange_id: &str, force: bool) -> QuoteVenueResult {
+        let lock = self.refresh_lock(exchange_id);
+        let _guard = lock.lock().await;
+        if !force && self.quote_in_backoff(exchange_id) {
+            return QuoteVenueResult {
+                exchange_id: exchange_id.to_string(),
+                ok: false,
+                rows: 0,
+                error: Some("退避中：上次报价刷新失败未满 30 秒".to_string()),
+            };
+        }
+        let Some(v) = crate::venues::all().iter().find(|v| v.id() == exchange_id) else {
+            return QuoteVenueResult {
+                exchange_id: exchange_id.to_string(),
+                ok: false,
+                rows: 0,
+                error: Some("未知交易所".to_string()),
+            };
+        };
+        let now = crate::core::util::now_ms();
+        match tokio::time::timeout(REFRESH_TIMEOUT, v.fetch_quotes(&self.http)).await {
+            Ok(Ok(updates)) => {
+                self.log_quote_ok(exchange_id);
+                let rows = self.apply_quotes(exchange_id, updates, now);
+                QuoteVenueResult {
+                    exchange_id: exchange_id.to_string(),
+                    ok: true,
+                    rows,
+                    error: None,
+                }
+            }
+            Ok(Err(e)) => self.record_quote_failure(exchange_id, e),
+            Err(_) => self.record_quote_failure(exchange_id, "报价刷新超时（5s）".to_string()),
+        }
+    }
+
+    /// Batch quote refresh for the requested exchanges (PR-B1): one
+    /// batch endpoint per venue, fetched concurrently under each
+    /// venue's own lock, merged memory-only (SQLite untouched,
+    /// `updated_at` untouched). A venue failing leaves its rows in
+    /// place (their `quote_at` ages out and the frontend shows
+    /// 无实时数据）. Unknown ids are ignored. When at least one row
+    /// moved, the page is told to re-search once via `CatalogUpdated`.
+    pub async fn refresh_quotes(
+        &self,
+        exchange_ids: &[String],
+        force: bool,
+    ) -> Vec<QuoteVenueResult> {
+        use futures_util::future::join_all;
+        let wanted: Vec<&str> = crate::venues::all()
+            .iter()
+            .map(|v| v.id())
+            .filter(|id| exchange_ids.iter().any(|x| x == id))
+            .collect();
+        if wanted.is_empty() {
+            return Vec::new();
+        }
+        let results = join_all(wanted.iter().map(|id| self.refresh_quotes_one(id, force))).await;
+        let moved: usize = results.iter().map(|r| r.rows).sum();
+        if moved > 0 {
+            self.bus.publish(crate::bus::AppEvent::CatalogUpdated);
+        }
+        results
+    }
+
     /// Timestamp (unix ms) of the last refresh cycle in which at least one
     /// exchange actually succeeded, if any. Attempt time is never recorded.
     pub fn last_success_at(&self) -> Option<i64> {
@@ -667,6 +888,8 @@ mod tests {
                 next_funding_time: None,
                 volume_24h_usd: None,
                 open_interest_usd: None,
+                change_24h: None,
+                quote_at: None,
                 updated_at: 0,
             }],
         );
@@ -694,6 +917,8 @@ mod tests {
                 next_funding_time: None,
                 volume_24h_usd: None,
                 open_interest_usd: None,
+                change_24h: None,
+                quote_at: None,
                 updated_at: 0,
             }],
         );
@@ -796,6 +1021,8 @@ mod tests {
                 next_funding_time: None,
                 volume_24h_usd: None,
                 open_interest_usd: None,
+                change_24h: None,
+                quote_at: None,
                 updated_at: 0,
             }],
         );
@@ -861,6 +1088,8 @@ mod tests {
                 next_funding_time: None,
                 volume_24h_usd: None,
                 open_interest_usd: None,
+                change_24h: None,
+                quote_at: None,
                 updated_at: 0,
             }],
         );
@@ -918,6 +1147,8 @@ mod tests {
             next_funding_time: None,
             volume_24h_usd: Some(1_000_000.0),
             open_interest_usd: Some(2_000_000.0),
+            change_24h: Some(0.0123),
+            quote_at: Some(1_700_000_000_000),
             updated_at: 1_700_000_000_000,
         };
         // Seed via one catalog, then cold-load via a fresh one.
@@ -941,6 +1172,7 @@ mod tests {
         assert_eq!(hits[0].tick_size, Some(1.0));
         assert_eq!(hits[0].max_leverage, Some(40.0));
         assert_eq!(hits[0].mark_px, None);
+        assert_eq!(hits[0].quote_at, None);
         let t0 = std::time::Instant::now();
         let hits2 = cold.search("BTC", &all);
         let hot_ms = t0.elapsed().as_millis();
@@ -949,5 +1181,146 @@ mod tests {
         assert!(load_ms + first_ms < 200, "cold first search under 200ms");
         assert!(hot_ms < 100, "hot search under 100ms");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// One stored row for the PR-B1 quote tests: a stale quote
+    /// (quote_at = `quote_at`) with a live mark, so a merge has
+    /// something to move and something to leave alone.
+    fn quote_row(symbol: &str, mark_px: f64, quote_at: i64) -> MarketInfo {
+        MarketInfo {
+            exchange_id: "hyperliquid".into(),
+            symbol: symbol.into(),
+            base_symbol: symbol.into(),
+            market_id: None,
+            settlement_currency: "USDC".into(),
+            max_leverage: Some(40.0),
+            tick_size: Some(1.0),
+            step_size: Some(0.00001),
+            min_notional: Some(10.0),
+            bid_px: None,
+            ask_px: None,
+            mid_px: None,
+            mark_px: Some(mark_px),
+            index_px: Some(58056.0),
+            funding_rate_raw: Some(0.0000069845),
+            funding_interval_hours: Some(1.0),
+            funding_1h: Some(0.0000069845),
+            funding_apr: Some(6.11),
+            next_funding_time: Some(1_795_626_000_000),
+            volume_24h_usd: Some(3_411_439_784.874),
+            open_interest_usd: Some(1_997_000_000.0),
+            change_24h: None,
+            quote_at: Some(quote_at),
+            updated_at: 1_700_000_000_000,
+        }
+    }
+
+    /// PR-B1: a batch quote merge writes the quote fields + quote_at,
+    /// leaves definition fields, bid/ask and updated_at alone, and
+    /// ignores unknown symbols and rows missing from the update.
+    #[test]
+    fn quotes_merge_writes_fields_and_quote_at() {
+        let catalog = MarketCatalog::new(EventBus::new(16));
+        catalog.store(
+            "hyperliquid",
+            vec![
+                quote_row("BTC", 58033.0, 1_700_000_000_000),
+                quote_row("ETH", 2000.0, 1_700_000_000_000),
+            ],
+        );
+        let now = 1_700_000_100_000;
+        let moved = catalog.apply_quotes(
+            "hyperliquid",
+            vec![
+                QuoteUpdate {
+                    symbol: "BTC".into(),
+                    mark_px: Some(59000.0),
+                    index_px: None, // no index in this update: untouched
+                    funding_rate_raw: Some(0.00001),
+                    funding_1h: Some(0.00001),
+                    funding_apr: Some(8.76),
+                    next_funding_time: None,
+                    volume_24h_usd: Some(3_500_000_000.0),
+                    open_interest_usd: None, // untouched
+                    change_24h: Some(0.02),
+                },
+                QuoteUpdate {
+                    symbol: "NOPE".into(), // no such row: ignored
+                    mark_px: Some(1.0),
+                    index_px: None,
+                    funding_rate_raw: None,
+                    funding_1h: None,
+                    funding_apr: None,
+                    next_funding_time: None,
+                    volume_24h_usd: None,
+                    open_interest_usd: None,
+                    change_24h: None,
+                },
+            ],
+            now,
+        );
+        assert_eq!(moved, 1);
+        let btc = catalog.search("BTC", &["hyperliquid".to_string()]);
+        let btc = &btc[0];
+        assert_eq!(btc.mark_px, Some(59000.0));
+        assert_eq!(btc.index_px, Some(58056.0));
+        assert_eq!(btc.funding_1h, Some(0.00001));
+        assert_eq!(btc.open_interest_usd, Some(1_997_000_000.0));
+        assert_eq!(btc.change_24h, Some(0.02));
+        assert_eq!(btc.quote_at, Some(now));
+        // Definition fields and updated_at never move on a quote merge.
+        assert_eq!(btc.tick_size, Some(1.0));
+        assert_eq!(btc.updated_at, 1_700_000_000_000);
+        // ETH was not in the update: its quote stays exactly as stored.
+        let eth = catalog.search("ETH", &["hyperliquid".to_string()]);
+        assert_eq!(eth[0].mark_px, Some(2000.0));
+        assert_eq!(eth[0].quote_at, Some(1_700_000_000_000));
+    }
+
+    /// PR-B1: a quote update whose every field is None moves nothing
+    /// and does not refresh quote_at — a venue answering without any
+    /// usable quote must not make the row look fresh.
+    #[test]
+    fn quotes_merge_all_none_moves_nothing() {
+        let catalog = MarketCatalog::new(EventBus::new(16));
+        catalog.store(
+            "hyperliquid",
+            vec![quote_row("BTC", 58033.0, 1_700_000_000_000)],
+        );
+        let moved = catalog.apply_quotes(
+            "hyperliquid",
+            vec![QuoteUpdate {
+                symbol: "BTC".into(),
+                mark_px: None,
+                index_px: None,
+                funding_rate_raw: None,
+                funding_1h: None,
+                funding_apr: None,
+                next_funding_time: None,
+                volume_24h_usd: None,
+                open_interest_usd: None,
+                change_24h: None,
+            }],
+            1_700_000_100_000,
+        );
+        assert_eq!(moved, 0);
+        let btc = catalog.search("BTC", &["hyperliquid".to_string()]);
+        assert_eq!(btc[0].quote_at, Some(1_700_000_000_000));
+    }
+
+    /// PR-B1: a recorded quote failure arms the 30s backoff, and the
+    /// per-venue quote refresh then skips without touching the network.
+    #[tokio::test]
+    async fn quotes_backoff_after_failure() {
+        let catalog = MarketCatalog::new(EventBus::new(16));
+        assert!(!catalog.quote_in_backoff("hyperliquid"));
+        let r = catalog.record_quote_failure("hyperliquid", "boom".to_string());
+        assert!(!r.ok);
+        assert_eq!(r.error.as_deref(), Some("boom"));
+        assert!(catalog.quote_in_backoff("hyperliquid"));
+        let skipped = catalog.refresh_quotes_one("hyperliquid", false).await;
+        assert!(!skipped.ok);
+        assert_eq!(skipped.rows, 0);
+        assert!(skipped.error.as_deref().unwrap().contains("退避"));
     }
 }

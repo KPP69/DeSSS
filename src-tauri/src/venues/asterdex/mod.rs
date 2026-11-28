@@ -214,6 +214,13 @@ impl Venue for AsterdexVenue {
         catalog::fetch_asterdex(http).await
     }
 
+    async fn fetch_quotes(
+        &self,
+        http: &reqwest::Client,
+    ) -> Result<Vec<crate::core::market::QuoteUpdate>, String> {
+        catalog::fetch_asterdex_quotes(http).await
+    }
+
     fn stream(&self, symbol: &str, _market_id: Option<u64>) -> Result<StreamPlan, String> {
         Ok(stream::stream_plan(symbol))
     }

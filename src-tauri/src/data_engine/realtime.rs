@@ -763,6 +763,8 @@ mod tests {
             next_funding_time: None,
             volume_24h_usd: None,
             open_interest_usd: None,
+            change_24h: None,
+            quote_at: None,
             updated_at: 0,
         };
         catalog.store("lighter", vec![row]);

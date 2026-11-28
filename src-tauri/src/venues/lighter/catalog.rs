@@ -100,6 +100,8 @@ fn parse_lighter(
             next_funding_time: Some(next_funding),
             volume_24h_usd: num_field(r, "daily_quote_token_volume"),
             open_interest_usd: num_field(r, "open_interest_usd"),
+            change_24h: None,
+            quote_at: Some(now_ms),
             updated_at: now_ms,
         });
     }

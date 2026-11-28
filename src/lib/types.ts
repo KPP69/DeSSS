@@ -109,11 +109,18 @@ export type MarketInfo = {
   nextFundingTime: number | null;
   volume24hUsd: number | null;
   openInterestUsd: number | null;
+  change24h: number | null;
+  /** When the quote fields were last written, unix ms (PR-B1); null
+   * until the first bulk or quote refresh (e.g. after a restart). */
+  quoteAt: number | null;
   updatedAt: number;
 };
 
 /** Result of a manual catalog refresh: cached rows + refresh timestamp. */
 export type CatalogRefresh = { count: number; updatedAt: number };
+
+/** Per-venue result of a batch quote refresh (PR-B1). */
+export type QuoteVenueResult = { exchangeId: string; ok: boolean; rows: number; error: string | null };
 
 /** Per-venue catalog status (PR-0.3): row count, newest row time, last error. */
 export type VenueCatalogStatus = { exchangeId: string; updatedAt: number | null; rows: number; error: string | null };

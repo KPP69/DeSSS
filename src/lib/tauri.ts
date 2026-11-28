@@ -1,6 +1,6 @@
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { AppInfo, AccountView, CredentialMap, OrderBook, AccountLive, LogEntry, RuntimeSnapshot, ProxyState, MarketInfo, CatalogRefresh, CatalogStatus, RiskConfig, DrawdownStatus, OrderInfo, TradeInfo, VenueSchema, StrategyView, StrategyInstance, SaveStrategyInput, SaveStrategyResult } from "./types";
+import type { AppInfo, AccountView, CredentialMap, OrderBook, AccountLive, LogEntry, RuntimeSnapshot, ProxyState, MarketInfo, CatalogRefresh, QuoteVenueResult, CatalogStatus, RiskConfig, DrawdownStatus, OrderInfo, TradeInfo, VenueSchema, StrategyView, StrategyInstance, SaveStrategyInput, SaveStrategyResult } from "./types";
 
 // Tauri 框架级英文报错翻译成中文（实机事故 2026-11-26：下单失败只显示
 // "invalid args input for command place_order: missing field account_id"，
@@ -66,6 +66,11 @@ export const api = {
     invoke<MarketInfo[]>("search_market_info", { query, exchangeIds }),
   refreshMarketCatalog: (exchangeIds: string[]) =>
     invoke<CatalogRefresh>("refresh_market_catalog", { exchangeIds }),
+  // Batch quote refresh (PR-B1): one batch endpoint per venue, merged
+  // memory-only. The Data page calls it every 5s while visible
+  // (force=false); the refresh button forces it (force=true).
+  refreshQuotes: (exchangeIds: string[], force: boolean) =>
+    invoke<QuoteVenueResult[]>("refresh_quotes", { exchangeIds, force }),
   getCatalogStatus: () => invoke<CatalogStatus>("get_catalog_status"),
   // Realtime streams (phase 5A §2): reconcile the backend's wanted set
   // with the symbols on screen. Empty list = unsubscribe everything.

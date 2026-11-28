@@ -57,6 +57,12 @@ fn parse_hyperliquid(
         let sz_decimals = u.get("szDecimals").and_then(|n| n.as_i64()).unwrap_or(0);
         let mark_px = num_field(ctx, "markPx");
         let funding = num_field(ctx, "funding");
+        // 24h change from the previous day's close (fraction); absent
+        // when the venue omits prevDayPx — never derived from anything else.
+        let change_24h = match (mark_px, num_field(ctx, "prevDayPx")) {
+            (Some(m), Some(p)) if p != 0.0 => Some(m / p - 1.0),
+            _ => None,
+        };
         // No bid/ask in the bulk response: `impactPxs` is an
         // execution-price proxy, never top-of-book, and must not be shown
         // as the BBO. Bid/ask stay None until the per-hit `l2Book` fill;
@@ -92,6 +98,8 @@ fn parse_hyperliquid(
             next_funding_time: Some(next_funding),
             volume_24h_usd: num_field(ctx, "dayNtlVlm"),
             open_interest_usd,
+            change_24h,
+            quote_at: Some(now_ms),
             updated_at: now_ms,
         });
     }
@@ -204,6 +212,20 @@ mod tests {
         // Non-positive price falls back to the decimals constraint:
         // szDecimals 5 -> at most 1 price decimal -> tick 0.1.
         assert!((hyperliquid_tick_size(0.0, 5) - 0.1).abs() < 1e-12);
+    }
+
+    /// PR-B1: 24h change from prevDayPx (fraction), and quote_at is
+    /// stamped with the fetch time. Without prevDayPx the change
+    /// stays None — never derived from anything else.
+    #[test]
+    fn parse_hyperliquid_change_24h_from_prev_day() {
+        let v = json(
+            r#"[{"universe":[{"name":"BTC","szDecimals":5,"maxLeverage":40}]},[{"markPx":"58033.0","oraclePx":"58056.0","funding":"0.0000069845","openInterest":"100.0","dayNtlVlm":"1000.0","prevDayPx":"57000.0"}]]"#,
+        );
+        let rows = parse_hyperliquid(&v, "hyperliquid", 1_795_622_400_000).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!((rows[0].change_24h.unwrap() - (58033.0 / 57000.0 - 1.0)).abs() < 1e-12);
+        assert_eq!(rows[0].quote_at, Some(1_795_622_400_000));
     }
 }
 

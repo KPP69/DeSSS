@@ -4,6 +4,18 @@ import type { CatalogStatus, MarketInfo } from "../lib/types";
 import { useDataUiStore } from "../store/useDataUiStore";
 import { useInvoke } from "./useInvoke";
 
+/** Minimum quote-refresh interval per venue (PR-B1): Lighter / RH
+ * 15s, Hyperliquid / Entropy / AsterDEX / Arcus 5s. Unknown ids
+ * default to 5s. */
+const QUOTE_INTERVAL_MS: Record<string, number> = {
+  hyperliquid: 5_000,
+  entropy: 5_000,
+  lighter: 15_000,
+  lighter_robinhood: 15_000,
+  asterdex: 5_000,
+  arcus: 5_000,
+};
+
 /**
  * Data page search state (Phase 2, I11), moved out of DataPage
  * unchanged in behavior:
@@ -135,6 +147,29 @@ export function useMarketSearch() {
     return () => clearInterval(t);
   }, [view, query, checked, runSearch]);
 
+  // Batch quote refresh (PR-B1): one 5s tick for all venues; each
+  // venue is requested only when its own minimum interval has passed
+  // since its last request (Lighter / RH 15s, the rest 5s). The
+  // last-request times live in a ref, so re-runs of this effect
+  // (query/checked changes) never reset a venue's clock. Same
+  // visibility condition as the 2s search tick, so leaving the page
+  // stops the calls at once.
+  const lastQuoteAt = useRef<Map<string, number>>(new Map());
+  useEffect(() => {
+    if (view !== "search" || !query.trim()) return;
+    const t = setInterval(() => {
+      const now = Date.now();
+      const due = checked.filter((id) => {
+        const last = lastQuoteAt.current.get(id) ?? 0;
+        return now - last >= (QUOTE_INTERVAL_MS[id] ?? 5_000);
+      });
+      if (due.length === 0) return;
+      for (const id of due) lastQuoteAt.current.set(id, now);
+      void api.refreshQuotes(due, false);
+    }, 5000);
+    return () => clearInterval(t);
+  }, [view, query, checked]);
+
   // Reconcile the realtime streams with the rows on screen: whenever the
   // hits change, the backend subscribes exactly those pairs. Clearing
   // the query or leaving the view unsubscribes everything at once; the
@@ -166,7 +201,10 @@ export function useMarketSearch() {
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
     try {
+      // Force both the catalog (as before) and the quotes: the
+      // button must show fresh numbers now, not at the next 5s tick.
       const r = await api.refreshMarketCatalog(checked);
+      await api.refreshQuotes(checked, true);
       if (r.updatedAt > 0) setCacheUpdatedAt(r.updatedAt);
       status.refresh();
       if (query.trim()) await runSearch(query, checked);

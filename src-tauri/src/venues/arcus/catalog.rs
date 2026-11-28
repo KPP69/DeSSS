@@ -75,6 +75,8 @@ fn parse_arcus(v: &serde_json::Value, now_ms: i64) -> Result<Vec<MarketInfo>, St
             next_funding_time: next_funding,
             volume_24h_usd: num_field(m, "volume24hNotional"),
             open_interest_usd,
+            change_24h: None,
+            quote_at: Some(now_ms),
             updated_at: now_ms,
         });
     }

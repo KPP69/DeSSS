@@ -299,6 +299,17 @@ impl Venue for LighterVenue {
         catalog::fetch_lighter(http, self.network).await
     }
 
+    async fn fetch_quotes(
+        &self,
+        http: &reqwest::Client,
+    ) -> Result<Vec<crate::core::market::QuoteUpdate>, String> {
+        // The batch quote endpoints are the same orderBookDetails +
+        // funding-rates responses as the bulk fetch (mark_price IS in
+        // orderBookDetails — not last_trade_price). Map the rows.
+        let rows = catalog::fetch_lighter(http, self.network).await?;
+        Ok(rows.iter().map(|r| r.to_quote_update()).collect())
+    }
+
     fn stream(&self, symbol: &str, market_id: Option<u64>) -> Result<StreamPlan, String> {
         stream::stream_plan(symbol, self.network, market_id)
     }

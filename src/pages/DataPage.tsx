@@ -1,4 +1,4 @@
-import React, { useLayoutEffect } from "react";
+import React, { useEffect, useLayoutEffect, useRef } from "react";
 import { Button, DataTable, Input, MultiSelectDropdown, tdClsCompact, tdClsCompactRight, trCls } from "../components/ui";
 import PageState from "../components/PageState";
 import { useMarketSearch } from "../hooks/useMarketSearch";
@@ -13,6 +13,9 @@ import { useVenueStore } from "../store/useVenueStore";
 /** A streamed book counts as live for 5s; older than that the row falls
  * back to the 2s REST values (same threshold as the backend). */
 const LIVE_MS = 5000;
+/** A quote (mark/funding, from quote_at) counts as live for 15s
+ * (PR-B1); older than that the row's mark/funding read 无实时数据. */
+const QUOTE_STALE_MS = 15_000;
 
 /**
  * Data page: on-demand symbol search over the bulk market catalog (phase 4).
@@ -102,12 +105,14 @@ function marketRowNodes({
   expandedKey,
   onToggle,
   venueName,
+  firstSeenAt,
 }: {
   rows: MarketInfo[];
   books: Record<string, OrderBook>;
   expandedKey: string | null;
   onToggle: (key: string) => void;
   venueName: (id: string) => string;
+  firstSeenAt: Map<string, number>;
 }): React.ReactNode[] {
   return rows.map((m) => {
     const key = `${m.exchangeId}:${m.symbol}`;
@@ -118,6 +123,19 @@ function marketRowNodes({
     const liveFresh = book != null && Date.now() - book.ts <= LIVE_MS;
     const bidPx = liveFresh ? (book.bids[0]?.[0] ?? null) : m.bidPx;
     const askPx = liveFresh ? (book.asks[0]?.[0] ?? null) : m.askPx;
+    // PR-B1: mark/funding freshness from quote_at (15s), not the WS
+    // book: a known-old quote_at reads 无实时数据 at once; a row that
+    // never had a quote write reads 载入中 for its first 15s.
+    const seenAt = firstSeenAt.get(key);
+    const quoteFresh = m.quoteAt != null && Date.now() - m.quoteAt <= QUOTE_STALE_MS;
+    const quoteState: "loading" | "live" | "stale" = quoteFresh
+      ? "live"
+      : m.quoteAt != null || (seenAt != null && Date.now() - seenAt >= QUOTE_STALE_MS)
+        ? "stale"
+        : "loading";
+    const quoteStateText = (
+      <span className="text-ds-text-3">{quoteState === "loading" ? "载入中" : "无实时数据"}</span>
+    );
     const rateCls =
       m.funding1h == null
         ? ""
@@ -149,8 +167,8 @@ function marketRowNodes({
     // book — never the catalog midPx, which no longer carries a value.
     // Leverage prints floored (13.33 → 13x); the other numbers trim
     // trailing zeros.
-    const detail: [string, string][] = [
-      ["指数价", fmtPrice(m.indexPx, m.tickSize)],
+    const detail: [string, React.ReactNode][] = [
+      ["指数价", quoteState === "live" ? fmtPrice(m.indexPx, m.tickSize) : quoteStateText],
       [
         "中间价",
         liveFresh && book.bids[0]?.[0] != null && book.asks[0]?.[0] != null
@@ -159,17 +177,19 @@ function marketRowNodes({
       ],
       [
         "资金费率",
-        m.fundingRateRaw == null
-          ? "—"
-          : `${m.fundingRateRaw >= 0 ? "+" : ""}${trimZeros((m.fundingRateRaw * 100).toFixed(4))}%`,
+        quoteState === "live"
+          ? m.fundingRateRaw == null
+            ? "—"
+            : `${m.fundingRateRaw >= 0 ? "+" : ""}${trimZeros((m.fundingRateRaw * 100).toFixed(4))}%`
+          : quoteStateText,
       ],
       ["价格步长", fmtStep(m.tickSize)],
       ["数量步长", fmtStep(m.stepSize)],
       ["结算币种", m.settlementCurrency],
       ["目录更新", fmtClock(m.updatedAt)],
-      ["持仓量", fmtUsdCompact(m.openInterestUsd)],
-      ["成交额", fmtUsdCompact(m.volume24hUsd)],
-      ["下次结算", fmtTime(m.nextFundingTime)],
+      ["持仓量", quoteState === "live" ? fmtUsdCompact(m.openInterestUsd) : quoteStateText],
+      ["成交额", quoteState === "live" ? fmtUsdCompact(m.volume24hUsd) : quoteStateText],
+      ["下次结算", quoteState === "live" ? fmtTime(m.nextFundingTime) : quoteStateText],
       ["最小名义", m.minNotional == null ? "—" : `$${fmtStep(m.minNotional)}`],
       ["最大杠杆", m.maxLeverage == null ? "—" : `${Math.floor(m.maxLeverage)}x`],
       ["费率周期", m.fundingIntervalHours == null ? "—" : `${m.fundingIntervalHours}h`],
@@ -190,16 +210,24 @@ function marketRowNodes({
         >
           <td className={tdClsCompact}>{venueName(m.exchangeId)}</td>
           <td className={`${tdClsCompact} num whitespace-nowrap`}>{displaySymbol(m.symbol)}</td>
-          <td className={`${tdClsCompactRight} num whitespace-nowrap`}>{fmtPrice(m.markPx, m.tickSize)}</td>
+          <td className={`${tdClsCompactRight} num whitespace-nowrap`}>
+            {quoteState === "live" ? fmtPrice(m.markPx, m.tickSize) : quoteStateText}
+          </td>
           <td className={`${tdClsCompactRight} num whitespace-nowrap`}>
             <span className="text-ds-up">{fmtPrice(bidPx, m.tickSize)}</span>
             {" / "}
             <span className="text-ds-down">{fmtPrice(askPx, m.tickSize)}</span>
           </td>
           <td className={`${tdClsCompactRight} num whitespace-nowrap`}>
-            <span className={rateCls}>{fundingText}</span>
-            {" / "}
-            <span className={aprCls}>{aprText}</span>
+            {quoteState === "live" ? (
+              <>
+                <span className={rateCls}>{fundingText}</span>
+                {" / "}
+                <span className={aprCls}>{aprText}</span>
+              </>
+            ) : (
+              quoteStateText
+            )}
           </td>
           <td className={`${tdClsCompactRight} num whitespace-nowrap`}>
             {m.maxLeverage == null ? "—" : `${Math.floor(m.maxLeverage)}x`}
@@ -251,6 +279,22 @@ export default function DataPage() {
     searchNow,
     onRefresh,
   } = search;
+
+  // First-seen times for the quote loading grace (PR-B1): a row whose
+  // quote was never written reads 载入中 for its first 15s on screen,
+  // then 无实时数据.
+  const firstSeenRef = useRef<Map<string, number>>(new Map());
+  useEffect(() => {
+    const now = Date.now();
+    const seen = firstSeenRef.current;
+    for (const m of results) {
+      const k = `${m.exchangeId}:${m.symbol}`;
+      if (!seen.has(k)) seen.set(k, now);
+    }
+    for (const k of [...seen.keys()]) {
+      if (!results.some((m) => `${m.exchangeId}:${m.symbol}` === k)) seen.delete(k);
+    }
+  }, [results]);
 
   // Toolbar (F1): view toggle + exchange filter + refresh on the
   // left, catalog update time on the right (F4.1: refresh and the
@@ -367,6 +411,7 @@ export default function DataPage() {
                   expandedKey,
                   onToggle: (key) => setExpandedKey((cur) => (cur === key ? null : key)),
                   venueName: shortVenueName,
+                  firstSeenAt: firstSeenRef.current,
                 })}
               </DataTable>
               <div className="text-xs text-ds-text-3 mt-2">

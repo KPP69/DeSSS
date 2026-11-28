@@ -105,6 +105,23 @@ pub async fn refresh_market_catalog(
     })
 }
 
+/// Batch quote refresh for the checked exchanges (PR-B1): one batch
+/// endpoint per venue, merged memory-only (SQLite instruments and the
+/// "目录更新于" timestamp are untouched). Returns per-venue ok/rows/
+/// error. `force` (the refresh button) bypasses the 30s failure
+/// backoff; the Data page's 5s loop passes false. Unlike the catalog
+/// refresh this awaits the fetches (each capped at 5s, venues
+/// concurrent), so the caller knows the outcome; the page re-searches
+/// when `CatalogUpdated` arrives.
+#[tauri::command]
+pub async fn refresh_quotes(
+    state: State<'_, Arc<AppState>>,
+    exchange_ids: Vec<String>,
+    force: bool,
+) -> Result<Vec<crate::market::catalog::QuoteVenueResult>, String> {
+    Ok(state.catalog.refresh_quotes(&exchange_ids, force).await)
+}
+
 /// Per-venue catalog status for the System page and the Data page
 /// refresh button: row count, newest row time ("目录更新于"), and
 /// the last refresh error, plus the log directory path. Sync

@@ -245,6 +245,7 @@ pub fn run() {
             commands::system::set_proxy,
             commands::market::search_market_info,
             commands::market::refresh_market_catalog,
+            commands::market::refresh_quotes,
             commands::market::get_catalog_status,
             commands::market::get_venue_schemas,
             commands::market::set_stream_symbols,

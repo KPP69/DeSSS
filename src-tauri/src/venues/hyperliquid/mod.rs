@@ -299,6 +299,16 @@ impl Venue for HyperliquidVenue {
         catalog::fetch_hyperliquid(http, self.dex).await
     }
 
+    async fn fetch_quotes(
+        &self,
+        http: &reqwest::Client,
+    ) -> Result<Vec<crate::core::market::QuoteUpdate>, String> {
+        // The batch quote endpoint is the same metaAndAssetCtxs
+        // response as the bulk fetch: map its rows to quote updates.
+        let rows = catalog::fetch_hyperliquid(http, self.dex).await?;
+        Ok(rows.iter().map(|r| r.to_quote_update()).collect())
+    }
+
     fn stream(&self, symbol: &str, _market_id: Option<u64>) -> Result<StreamPlan, String> {
         Ok(stream::stream_plan(symbol))
     }

@@ -156,6 +156,20 @@ pub trait Venue: Send + Sync {
     ) -> Result<Arc<dyn ExchangeAdapter>, String>;
     /// Fetch this venue's market catalog.
     async fn catalog(&self, http: &reqwest::Client) -> Result<Vec<MarketInfo>, String>;
+    /// Batch quote refresh (PR-B1): one call returning the live quote
+    /// fields for the venue's symbols (mark, funding, OI, 24h change —
+    /// never bid/ask, which come only from WS). Default: unsupported —
+    /// the venue's rows keep their catalog-time quotes until the next
+    /// bulk refresh. A venue whose batch quote endpoint is the same
+    /// response as its bulk fetch maps its rows through
+    /// [`MarketInfo::to_quote_update`].
+    async fn fetch_quotes(
+        &self,
+        http: &reqwest::Client,
+    ) -> Result<Vec<crate::core::market::QuoteUpdate>, String> {
+        let _ = http;
+        Err("该所不支持批量报价刷新".to_string())
+    }
     /// The stream plan for this symbol (URL + subscribe + parser).
     /// Err when the plan cannot be built yet: a missing catalog
     /// market id is transient — the engine retries it (PR-1.3
