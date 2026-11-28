@@ -313,6 +313,11 @@ export function useTradingData() {
         order.symbol,
       );
       setCancelResult(info);
+      // A failed cancel shows inline (cancelResult.error, unchanged)
+      // AND toasts the backend text verbatim, once per cancel call —
+      // the toast lives here, not in render, so a re-render or the
+      // 10s refresh can never re-toast the same failure.
+      if (info.error) toast.error(info.error);
     } catch (e) {
       toast.error(e instanceof Error ? e.message : String(e));
     } finally {

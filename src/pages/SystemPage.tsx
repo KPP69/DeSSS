@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { openPath } from "@tauri-apps/plugin-opener";
 import { Button, Input } from "../components/ui";
+import PageState from "../components/PageState";
 import ThemeSwitcher from "../components/ThemeSwitcher";
 import { useInvoke } from "../hooks/useInvoke";
 import { api } from "../lib/tauri";
@@ -85,18 +86,30 @@ export default function SystemPage() {
             保存
           </Button>
         </div>
-        {proxy.data && (
+        {proxy.loading && !proxy.data ? (
+          <div className="mt-2">
+            <PageState loading loadingText="加载代理设置…" />
+          </div>
+        ) : proxy.error && !proxy.data ? (
+          <div className="mt-2">
+            <PageState error={`代理设置加载失败：${proxy.error}`} onRetry={() => proxy.refresh()} />
+          </div>
+        ) : proxy.data ? (
           <div className="text-[13px] text-ds-text-3 mt-2 num">
             当前生效：{proxy.data.effective ?? "未使用代理（直连）"}
           </div>
-        )}
+        ) : null}
       </div>
       <div className={CARD}>
         <div className="text-base font-semibold text-ds-text-1 mb-1">数据目录</div>
         <div className="text-[13px] text-ds-text-2 mb-3 leading-relaxed">
           品种目录落库保存，搜索不走网络；后台每 12 小时刷新一次。
         </div>
-        {catalog.data ? (
+        {catalog.loading && !catalog.data ? (
+          <PageState loading loadingText="加载中…" />
+        ) : catalog.error && !catalog.data ? (
+          <PageState error={`目录状态加载失败：${catalog.error}`} onRetry={() => catalog.refresh()} />
+        ) : catalog.data ? (
           <>
             <div className="text-[13px] text-ds-text-2 leading-relaxed num">
               {catalog.data.venues.map((v) => (
@@ -126,16 +139,18 @@ export default function SystemPage() {
               打开目录
             </Button>
           </>
-        ) : (
-          <div className="text-[13px] text-ds-text-3">加载中…</div>
-        )}
+        ) : null}
       </div>
       <div className={CARD}>
         <div className="text-base font-semibold text-ds-text-1 mb-1">日志</div>
         <div className="text-[13px] text-ds-text-2 mb-3 leading-relaxed">
           运行日志按大小轮转保存，遇到问题时把日志发给开发者。
         </div>
-        {catalog.data ? (
+        {catalog.loading && !catalog.data ? (
+          <PageState loading loadingText="加载中…" />
+        ) : catalog.error && !catalog.data ? (
+          <PageState error={`目录状态加载失败：${catalog.error}`} onRetry={() => catalog.refresh()} />
+        ) : catalog.data ? (
           <>
             <div className="text-[13px] text-ds-text-3 num break-all">
               日志目录：{catalog.data.logDir}
@@ -149,9 +164,7 @@ export default function SystemPage() {
               打开目录
             </Button>
           </>
-        ) : (
-          <div className="text-[13px] text-ds-text-3">加载中…</div>
-        )}
+        ) : null}
       </div>
     </div>
   );

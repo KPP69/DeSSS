@@ -293,6 +293,8 @@ export default function DataPage() {
     searched,
     searching,
     notReady,
+    searchError,
+    retrySearch,
     refreshing,
     cacheUpdatedAt,
     venueStatus,
@@ -418,6 +420,8 @@ export default function DataPage() {
             <PageState loading loadingText="搜索中…" />
           ) : notReady ? (
             <PageState empty>目录未就绪，正在拉取…</PageState>
+          ) : searchError ? (
+            <PageState error={`搜索失败：${searchError}`} onRetry={retrySearch} />
           ) : results.length === 0 ? (
             <PageState empty>未找到包含「{submittedQuery.trim()}」的标的。</PageState>
           ) : (

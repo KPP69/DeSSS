@@ -15,5 +15,5 @@ export function useVenueSchemas() {
   useEffect(() => {
     void fetchSchemas();
   }, [fetchSchemas]);
-  return { schemas, loading, error };
+  return { schemas, loading, error, fetchSchemas };
 }

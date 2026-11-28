@@ -40,7 +40,13 @@ export function useLiveStream() {
         snap.books.forEach((b) => useLiveStore.getState().setBook(b));
         useConsoleStore.getState().addLogs(snap.logs ?? []);
       })
-      .catch(() => {});
+      .catch((e) => {
+        // The snapshot only accelerates the first paint — a failure
+        // must not toast or block the UI, just one console line.
+        console.error(
+          `启动快照加载失败：${e instanceof Error ? e.message : String(e)}`,
+        );
+      });
     return () => {
       cancelled = true;
       unbook?.();

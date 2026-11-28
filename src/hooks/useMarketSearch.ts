@@ -58,6 +58,12 @@ export function useMarketSearch() {
   const [searched, setSearched] = useState(false);
   const [searching, setSearching] = useState(false);
   const [notReady, setNotReady] = useState(false);
+  // A non-notReady search failure (timeout, backend error): kept
+  // separate from the empty state so the page can show PageState
+  // error + retry instead of "未找到标的". Only set by a fresh
+  // search — the 2s tick never blanks the screen on a transient
+  // failure, same as notReady.
+  const [searchError, setSearchError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [cacheUpdatedAt, setCacheUpdatedAt] = useState<number | null>(null);
   const [expandedKey, setExpandedKey] = useState<string | null>(null);
@@ -76,6 +82,7 @@ export function useMarketSearch() {
         setResults([]);
         setSearched(false);
         setSearching(false);
+        setSearchError(null);
         return;
       }
       const id = ++reqId.current;
@@ -86,6 +93,7 @@ export function useMarketSearch() {
           setResults(rows);
           setSearched(true);
           setNotReady(false);
+          setSearchError(null);
           if (mode === "fresh") setExpandedKey(null);
           if (rows.length > 0) {
             setCacheUpdatedAt(Math.max(...rows.map((r) => r.updatedAt)));
@@ -96,7 +104,13 @@ export function useMarketSearch() {
           const msg = e instanceof Error ? e.message : String(e);
           setResults([]);
           setSearched(true);
-          setNotReady(msg.includes("目录未就绪"));
+          if (msg.includes("目录未就绪")) {
+            setNotReady(true);
+            setSearchError(null);
+          } else {
+            setNotReady(false);
+            setSearchError(msg);
+          }
         }
       } finally {
         if (reqId.current === id) setSearching(false);
@@ -205,6 +219,12 @@ export function useMarketSearch() {
     void runSearch(q, checked);
   }, [query, checked, runSearch, setSubmittedQuery]);
 
+  /** PageState error retry: re-run the current submitted query (not
+   * the input box, which the user may have edited since submitting). */
+  const retrySearch = useCallback(() => {
+    if (submittedQuery.trim()) void runSearch(submittedQuery, checked, "fresh");
+  }, [submittedQuery, checked, runSearch]);
+
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
     try {
@@ -232,6 +252,8 @@ export function useMarketSearch() {
     searched,
     searching,
     notReady,
+    searchError,
+    retrySearch,
     refreshing,
     cacheUpdatedAt,
     venueStatus,

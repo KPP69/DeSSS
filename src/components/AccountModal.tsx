@@ -68,7 +68,7 @@ export default function AccountModal({ open, editing, onClose }: Props) {
   const create = useAccountStore((s) => s.create);
   const update = useAccountStore((s) => s.update);
   const isEdit = editing !== null;
-  const { schemas, loading: schemasLoading } = useVenueSchemas();
+  const { schemas, loading: schemasLoading, error: schemasError, fetchSchemas } = useVenueSchemas();
 
   const [label, setLabel] = useState("");
   const [exchangeId, setExchangeId] = useState("");
@@ -186,7 +186,7 @@ export default function AccountModal({ open, editing, onClose }: Props) {
           <Button variant="secondary" onClick={close}>
             取消
           </Button>
-          <Button onClick={submit} loading={submitting} disabled={!def && !isEdit}>
+          <Button onClick={submit} loading={submitting} disabled={!def}>
             {isEdit ? "保存修改" : "添加账户"}
           </Button>
         </>
@@ -238,7 +238,21 @@ export default function AccountModal({ open, editing, onClose }: Props) {
 
         {/* Right column: per-exchange credential form, schema-driven */}
         <div className="space-y-4 min-w-0">
-          {!def ? (
+          {schemasError && !schemas ? (
+            <div>
+              <p className="text-xs text-ds-down leading-relaxed">
+                交易所信息加载失败：{schemasError}
+              </p>
+              <Button
+                variant="secondary"
+                size="sm"
+                className="mt-2"
+                onClick={() => void fetchSchemas()}
+              >
+                重试
+              </Button>
+            </div>
+          ) : !def ? (
             <p className="text-xs text-ds-text-3">交易所信息加载中…</p>
           ) : (
             fields.map((f) => (
