@@ -33,8 +33,26 @@ function priceDecimals(tick: number | null): number {
 
 function fmtPrice(px: number | null, tick: number | null): string {
   if (px == null || px === 0) return "—";
-  return px.toFixed(priceDecimals(tick));
+  return trimZeros(px.toFixed(priceDecimals(tick)));
 }
+
+/** Trim trailing zeros after the decimal point (F4.1): 90000.00 →
+ * 90000, 0.0100 → 0.01. Applied before any % suffix is added. */
+function trimZeros(s: string): string {
+  if (!s.includes(".")) return s;
+  return s.replace(/0+$/, "").replace(/\.$/, "");
+}
+
+/** Short venue names for the exchange column (F4.1) — the full
+ * names stay in the account page and the venue status line. */
+const SHORT_VENUE_NAMES: Record<string, string> = {
+  hyperliquid: "HL",
+  entropy: "Entropy",
+  lighter: "Lighter",
+  lighter_robinhood: "Lighter RH",
+  asterdex: "AsterDEX",
+  arcus: "Arcus",
+};
 
 /** Step / notional values print without scientific notation. */
 function fmtStep(n: number | null): string {
@@ -66,14 +84,13 @@ const HEADERS = [
   "品种",
   "标记价",
   "买/卖",
-  "资金费",
-  "年化",
+  "资金费 / 年化",
   "杠杆",
 ];
 // Fixed column ratios, summing to 100 (960x640-safe, horizontal scroll).
-const COL_WIDTHS = ["14%", "16%", "14%", "16%", "14%", "13%", "13%"];
+const COL_WIDTHS = ["16%", "18%", "16%", "18%", "20%", "12%"];
 // Numbers right-aligned (header and cells alike); names centered.
-const COL_ALIGNS = ["center", "center", "right", "right", "right", "right", "right"] as const;
+const COL_ALIGNS = ["center", "center", "right", "right", "right", "right"] as const;
 
 /** One fragment per market (row + optional detail row), returned as
  * an array so DataTable sees each market as one row group — that is
@@ -120,43 +137,43 @@ function marketRowNodes({
     const fundingText =
       m.funding1h == null
         ? "—"
-        : `${m.funding1h >= 0 ? "+" : ""}${(m.funding1h * 100).toFixed(4)}%`;
+        : `${m.funding1h >= 0 ? "+" : ""}${trimZeros((m.funding1h * 100).toFixed(4))}%`;
     const aprText =
       m.fundingApr == null
         ? "—"
-        : `${m.fundingApr >= 0 ? "+" : ""}${m.fundingApr.toFixed(2)}%`;
-    // 2x7 detail grid (Phase 3.1, commit 2): value above label, one
-    // cell per field, row-major — row 1: 指数价 / 持仓量 / 资金费率 /
-    // 价格步长 / 最小名义 / 费率周期 / 盘口更新; row 2: 中间价 / 成交额 /
-    // 下次结算 / 数量步长 / 最大杠杆 / 结算币种 / 目录更新. Mid is
-    // always (bid + ask) / 2 from the live book — never the catalog
-    // midPx, which no longer carries a value. The two rows use the
-    // primary / secondary text colors.
+        : `${m.fundingApr >= 0 ? "+" : ""}${trimZeros(m.fundingApr.toFixed(2))}%`;
+    // 2x7 detail grid (F4.1 order): row 1 (primary): 指数价 / 中间价 /
+    // 资金费率 / 价格步长 / 数量步长 / 结算币种 / 目录更新; row 2
+    // (secondary): 持仓量 / 成交额 / 下次结算 / 最小名义 / 最大杠杆 /
+    // 费率周期 / 盘口更新. Mid is always (bid + ask) / 2 from the live
+    // book — never the catalog midPx, which no longer carries a value.
+    // Leverage prints floored (13.33 → 13x); the other numbers trim
+    // trailing zeros.
     const detail: [string, string][] = [
       ["指数价", fmtPrice(m.indexPx, m.tickSize)],
-      ["持仓量", fmtUsdCompact(m.openInterestUsd)],
-      [
-        "资金费率",
-        m.fundingRateRaw == null
-          ? "—"
-          : `${m.fundingRateRaw >= 0 ? "+" : ""}${(m.fundingRateRaw * 100).toFixed(4)}%`,
-      ],
-      ["价格步长", fmtStep(m.tickSize)],
-      ["最小名义", m.minNotional == null ? "—" : `$${fmtStep(m.minNotional)}`],
-      ["费率周期", m.fundingIntervalHours == null ? "—" : `${m.fundingIntervalHours}h`],
-      ["盘口更新", liveFresh ? fmtClock(book.ts) : "—"],
       [
         "中间价",
         liveFresh && book.bids[0]?.[0] != null && book.asks[0]?.[0] != null
           ? fmtPrice((book.bids[0][0] + book.asks[0][0]) / 2, m.tickSize)
           : "—",
       ],
-      ["成交额", fmtUsdCompact(m.volume24hUsd)],
-      ["下次结算", fmtTime(m.nextFundingTime)],
+      [
+        "资金费率",
+        m.fundingRateRaw == null
+          ? "—"
+          : `${m.fundingRateRaw >= 0 ? "+" : ""}${trimZeros((m.fundingRateRaw * 100).toFixed(4))}%`,
+      ],
+      ["价格步长", fmtStep(m.tickSize)],
       ["数量步长", fmtStep(m.stepSize)],
-      ["最大杠杆", m.maxLeverage == null ? "—" : `${m.maxLeverage}x`],
       ["结算币种", m.settlementCurrency],
       ["目录更新", fmtClock(m.updatedAt)],
+      ["持仓量", fmtUsdCompact(m.openInterestUsd)],
+      ["成交额", fmtUsdCompact(m.volume24hUsd)],
+      ["下次结算", fmtTime(m.nextFundingTime)],
+      ["最小名义", m.minNotional == null ? "—" : `$${fmtStep(m.minNotional)}`],
+      ["最大杠杆", m.maxLeverage == null ? "—" : `${Math.floor(m.maxLeverage)}x`],
+      ["费率周期", m.fundingIntervalHours == null ? "—" : `${m.fundingIntervalHours}h`],
+      ["盘口更新", liveFresh ? fmtClock(book.ts) : "—"],
     ];
     return (
       <React.Fragment key={key}>
@@ -179,10 +196,13 @@ function marketRowNodes({
             {" / "}
             <span className="text-ds-down">{fmtPrice(askPx, m.tickSize)}</span>
           </td>
-          <td className={`${tdClsCompactRight} num whitespace-nowrap ${rateCls}`}>{fundingText}</td>
-          <td className={`${tdClsCompactRight} num whitespace-nowrap ${aprCls}`}>{aprText}</td>
           <td className={`${tdClsCompactRight} num whitespace-nowrap`}>
-            {m.maxLeverage == null ? "—" : `${m.maxLeverage}x`}
+            <span className={rateCls}>{fundingText}</span>
+            {" / "}
+            <span className={aprCls}>{aprText}</span>
+          </td>
+          <td className={`${tdClsCompactRight} num whitespace-nowrap`}>
+            {m.maxLeverage == null ? "—" : `${Math.floor(m.maxLeverage)}x`}
           </td>
         </tr>
         {expandedKey === key && (
@@ -212,6 +232,7 @@ export default function DataPage() {
   const { schemas } = useVenueSchemas();
   const names = useVenueStore((s) => s.names);
   const venueName = (id: string) => names[id] ?? id;
+  const shortVenueName = (id: string) => SHORT_VENUE_NAMES[id] ?? venueName(id);
 
   const {
     query,
@@ -231,8 +252,11 @@ export default function DataPage() {
     onRefresh,
   } = search;
 
-  // Toolbar (F1): view toggle + refresh on the left, catalog
-  // update time on the right.
+  // Toolbar (F1): view toggle + exchange filter + refresh on the
+  // left, catalog update time on the right (F4.1: refresh and the
+  // exchange filter moved up here; the search row keeps only the
+  // input). The dropdown menus render through a fixed portal, so
+  // the toolbar never clips them.
   const register = useShellActions((s) => s.register);
   const unregister = useShellActions((s) => s.unregister);
   useLayoutEffect(() => {
@@ -261,6 +285,14 @@ export default function DataPage() {
               标的查询
             </button>
           </div>
+          <div className="w-44 shrink-0">
+            <MultiSelectDropdown
+              options={(schemas ?? []).map((e) => ({ value: e.id, label: e.name }))}
+              values={checked}
+              onChange={setChecked}
+              label="交易所"
+            />
+          </div>
           <Button onClick={onRefresh} loading={refreshing}>
             刷新
           </Button>
@@ -270,7 +302,7 @@ export default function DataPage() {
     });
     return () => unregister("data");
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [register, unregister, view, refreshing, cacheUpdatedAt, onRefresh, setView]);
+  }, [register, unregister, view, refreshing, cacheUpdatedAt, onRefresh, setView, schemas, checked, setChecked]);
 
   return (
     <div>
@@ -278,11 +310,8 @@ export default function DataPage() {
         <PageState empty>自定义信号尚未接入 — 下一阶段将支持信号规则创建。</PageState>
       ) : (
         <>
-          {/* Absolutely static tool row: the search input stretches, the
-              exchange dropdown and the refresh button are fixed-width —
-              nothing is ever inserted here, so no click, loading state or
-              cache timestamp can push a control sideways. The cache time
-              lives in the results footer below the table instead. */}
+          {/* Search row (F4.1): only the input lives here now —
+              the exchange filter and refresh moved to the toolbar. */}
           <div className="flex items-center gap-2 mb-3">
             <div className="flex-1 min-w-0">
               <Input
@@ -293,19 +322,6 @@ export default function DataPage() {
                 }}
                 placeholder="输入 BTC、ETH、SOL、NVDA 等标的名称，查询 6 所实时对比数据"
               />
-            </div>
-            <div className="w-44 shrink-0">
-              <MultiSelectDropdown
-                options={(schemas ?? []).map((e) => ({ value: e.id, label: e.name }))}
-                values={checked}
-                onChange={setChecked}
-                label="交易所"
-              />
-            </div>
-            <div className="shrink-0">
-              <Button onClick={onRefresh} loading={refreshing}>
-                刷新
-              </Button>
             </div>
           </div>
 
@@ -339,16 +355,18 @@ export default function DataPage() {
             <PageState empty>未找到包含「{query.trim()}」的标的。</PageState>
           ) : (
             <div className="mb-6">
-              {searching && (
-                <div className="text-xs text-ds-text-3 mb-2">搜索中…</div>
-              )}
-              <DataTable headers={HEADERS} minWidth={720} colWidths={COL_WIDTHS} aligns={[...COL_ALIGNS]} compact>
+              {/* Reserved line: searching must not push the table down
+                  when it appears (F4.1 jitter fix). */}
+              <div className="text-xs text-ds-text-3 mb-2 h-4">
+                {searching ? "搜索中…" : ""}
+              </div>
+              <DataTable headers={HEADERS} minWidth={680} colWidths={COL_WIDTHS} aligns={[...COL_ALIGNS]} compact>
                 {marketRowNodes({
                   rows: results,
                   books,
                   expandedKey,
                   onToggle: (key) => setExpandedKey((cur) => (cur === key ? null : key)),
-                  venueName,
+                  venueName: shortVenueName,
                 })}
               </DataTable>
               <div className="text-xs text-ds-text-3 mt-2">

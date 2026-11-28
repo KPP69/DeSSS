@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { useInvoke } from "./useInvoke";
 import { useVenueSchemas } from "./useVenueSchemas";
 import { api } from "../lib/tauri";
-import type { OrderBook, OrderInfo } from "../lib/types";
+import type { OrderBook, OrderInfo, StrategyView } from "../lib/types";
 import { useAccountStore } from "../store/useAccountStore";
 import { useLiveStore } from "../store/useLiveStore";
 import { toast } from "../store/useToastStore";
@@ -223,8 +223,21 @@ export function useTradingData() {
   const listsLoading = lists.loading && lists.data == null;
   const listsError = lists.error;
 
+  // Strategy instances (F4.1): a position shows the strategy whose leg
+  // it is (matched by account + native symbol), or 手动 when none.
+  const strategies = useInvoke(() => api.listStrategies(), []);
+  const strategyFor = (accountId: string, symbol: string): StrategyView | null =>
+    (strategies.data ?? []).find(
+      (v) =>
+        (v.legA.accountId === accountId && v.legA.symbol === symbol) ||
+        (v.legB.accountId === accountId && v.legB.symbol === symbol),
+    ) ?? null;
+
   useEffect(() => {
-    const t = setInterval(() => lists.refresh(), 10_000);
+    const t = setInterval(() => {
+      lists.refresh();
+      strategies.refresh();
+    }, 10_000);
     return () => clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -310,6 +323,7 @@ export function useTradingData() {
     degraded: Object.values(live).some((a) => a.degraded),
     labelOf,
     venueName,
+    strategyFor,
     tradeAccounts,
     listsLoading,
     listsError,

@@ -14,16 +14,21 @@ export function AccountCell({
   exchangeId,
   labelOf,
   venueName,
+  // Truncation cap: the Tooltip wrapper shrink-wraps, so the span
+  // needs its own width — sized to the column at the 680px table
+  // floor (F4.1: no horizontal scroll at the 960px window).
+  maxW = "max-w-[160px]",
 }: {
   accountId: string;
   exchangeId: string;
   labelOf: (accountId: string) => string;
   venueName: (id: string) => string;
+  maxW?: string;
 }) {
   const text = `${labelOf(accountId)} · ${venueName(exchangeId)}`;
   return (
     <Tooltip content={text}>
-      <span className="inline-block max-w-[160px] truncate align-middle">{text}</span>
+      <span className={`inline-block ${maxW} truncate align-middle`}>{text}</span>
     </Tooltip>
   );
 }
@@ -90,12 +95,12 @@ export default function OrdersSection({
         <div className="mb-6">
           <DataTable
             headers={["时间", "账户 · 交易所", "交易对", "方向", "数量", "价格", "状态", "来源", "操作"]}
-            minWidth={960}
-            colWidths={["9%", "20%", "9%", "6%", "9%", "11%", "9%", "13%", "14%"]}
+            minWidth={680}
+            colWidths={["11%", "18%", "10%", "6%", "10%", "11%", "9%", "13%", "12%"]}
             aligns={["center", "center", "center", "center", "right", "right", "center", "center", "center"]}
             rows={openOrders.map((o) => [
               <span key="t" className="num">{new Date(o.createdAt).toLocaleTimeString()}</span>,
-              <AccountCell key="a" accountId={o.accountId} exchangeId={o.exchangeId} labelOf={labelOf} venueName={venueName} />,
+              <AccountCell key="a" accountId={o.accountId} exchangeId={o.exchangeId} labelOf={labelOf} venueName={venueName} maxW="max-w-[90px]" />,
               <span key="s" className="num">{displaySymbol(o.symbol)}</span>,
               <span key="d">
                 <Badge tone={o.side === "buy" ? "up" : "down"}>{o.side === "buy" ? "买" : "卖"}</Badge>
@@ -149,14 +154,14 @@ export default function OrdersSection({
         <div className="mb-6">
           <DataTable
             headers={["时间", "账户 · 交易所", "交易对", "方向", "数量", "价格", "已成交", "状态", "来源", "说明"]}
-            minWidth={960}
+            minWidth={680}
             colWidths={["8%", "20%", "8%", "6%", "8%", "10%", "10%", "8%", "11%", "11%"]}
             aligns={["center", "center", "center", "center", "right", "right", "right", "center", "center", "left"]}
             rows={records.map((o) => [
               <span key="t" className="num">
                 {new Date(o.createdAt).toLocaleTimeString()}
               </span>,
-              <AccountCell key="a" accountId={o.accountId} exchangeId={o.exchangeId} labelOf={labelOf} venueName={venueName} />,
+              <AccountCell key="a" accountId={o.accountId} exchangeId={o.exchangeId} labelOf={labelOf} venueName={venueName} maxW="max-w-[104px]" />,
               <span key="s" className="num">{displaySymbol(o.symbol)}</span>,
               <span key="d">
                 <Badge tone={o.side === "buy" ? "up" : "down"}>{o.side === "buy" ? "买" : "卖"}</Badge>

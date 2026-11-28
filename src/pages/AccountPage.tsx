@@ -139,19 +139,19 @@ export default function AccountPage() {
     if (ok) toast.success(`账户「${a.label}」已断开`);
   };
 
-  if (loading && accounts.length === 0) {
-    return <PageState loading loadingText="加载账户…" />;
-  }
-  if (listError && accounts.length === 0) {
-    return (
+  // The modal lives outside the state branches (P0, F4.1): it used to
+  // render only in the table branch, so "添加账户" did nothing on an
+  // empty account list — openAdd set the flag and nothing observed it.
+  // `body` picks the state view; exactly one modal is mounted below.
+  const body =
+    loading && accounts.length === 0 ? (
+      <PageState loading loadingText="加载账户…" />
+    ) : listError && accounts.length === 0 ? (
       <PageState
         error={`账户列表加载失败：${listError}`}
         onRetry={() => void fetchAll()}
       />
-    );
-  }
-  if (accounts.length === 0) {
-    return (
+    ) : accounts.length === 0 ? (
       <PageState
         empty
         action={<Button onClick={openAdd}>添加账户</Button>}
@@ -161,10 +161,7 @@ export default function AccountPage() {
           <div className="mt-1">添加第一个账户，凭证只加密保存在本机。</div>
         </div>
       </PageState>
-    );
-  }
-
-  return (
+    ) : (
     <div>
       <div className="grid grid-cols-3 gap-3 mb-4">
         <StatCard
@@ -289,8 +286,6 @@ export default function AccountPage() {
         })}
       </DataTable>
 
-      <AccountModal open={modalOpen} editing={editing} onClose={closeModal} />
-
       <ConfirmDialog
         open={pendingDelete !== null}
         title="确认删除账户"
@@ -314,5 +309,12 @@ export default function AccountPage() {
         }}
       />
     </div>
+  );
+
+  return (
+    <>
+      {body}
+      <AccountModal open={modalOpen} editing={editing} onClose={closeModal} />
+    </>
   );
 }

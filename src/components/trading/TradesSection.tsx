@@ -53,7 +53,7 @@ export default function TradesSection({
       ) : (
         <DataTable
           headers={["时间", "账户 · 交易所", "交易对", "方向", "数量", "价格", "手续费", "来源"]}
-          minWidth={800}
+          minWidth={680}
           colWidths={["11%", "24%", "10%", "7%", "9%", "12%", "13%", "14%"]}
           aligns={["center", "center", "center", "center", "right", "right", "right", "center"]}
           rows={sorted.map((f) => {
@@ -61,7 +61,7 @@ export default function TradesSection({
               originByOrder.get(f.orderId) ?? originByOrder.get(f.clientOrderId);
             return [
               <span key="t" className="num">{new Date(f.timestamp).toLocaleTimeString()}</span>,
-              <AccountCell key="a" accountId={f.accountId} exchangeId={f.exchangeId} labelOf={labelOf} venueName={venueName} />,
+              <AccountCell key="a" accountId={f.accountId} exchangeId={f.exchangeId} labelOf={labelOf} venueName={venueName} maxW="max-w-[130px]" />,
               <span key="s" className="num">{displaySymbol(f.symbol)}</span>,
               <span key="d">
                 <Badge tone={f.side === "buy" ? "up" : "down"}>{f.side === "buy" ? "买" : "卖"}</Badge>

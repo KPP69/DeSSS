@@ -1,7 +1,7 @@
 import React from "react";
 import { Badge, Button, DataTable, EmptyState } from "../ui";
 import { displaySymbol } from "../../lib/symbol";
-import type { OrderBook, OrderInfo } from "../../lib/types";
+import type { OrderBook, OrderInfo, StrategyView } from "../../lib/types";
 import {
   bookFresh,
   protectionFor,
@@ -18,7 +18,10 @@ import {
  * press Enter on it to expand its protection orders; the 平仓 /
  * 保护 buttons stop the row click so they never expand by accident.
  * Amounts are right-aligned, header and cells alike. Above 200
- * positions the table virtualizes (DataTable).
+ * positions the table virtualizes (DataTable). F4.1: the first
+ * column shows the strategy (or 手动) plus the exchange pair, the
+ * mark price shares the entry-price column, and the table fits the
+ * 960px window without horizontal scrolling (minWidth 680).
  */
 export default function PositionsSection({
   positions,
@@ -28,6 +31,7 @@ export default function PositionsSection({
   degraded,
   labelOf,
   venueName,
+  strategyFor,
   expandedKey,
   onToggleExpand,
   onClose,
@@ -43,6 +47,7 @@ export default function PositionsSection({
   degraded: boolean;
   labelOf: (accountId: string) => string;
   venueName: (id: string) => string;
+  strategyFor: (accountId: string, symbol: string) => StrategyView | null;
   expandedKey: string | null;
   onToggleExpand: (key: string) => void;
   onClose: (p: PositionRow) => void;
@@ -64,10 +69,10 @@ export default function PositionsSection({
         <div className="text-xs text-ds-text-3 mb-2">数据降级：REST 兜底</div>
       )}
       <DataTable
-        headers={["账户 · 交易所", "交易对", "方向", "数量", "开仓价", "标记价", "未实现盈亏", "当前保护", "操作"]}
-        minWidth={1020}
-        colWidths={["16%", "10%", "7%", "10%", "11%", "11%", "12%", "14%", "9%"]}
-        aligns={["left", "center", "center", "right", "right", "right", "right", "right", "center"]}
+        headers={["策略 · 交易所", "交易对", "方向", "数量", "开仓价 / 标记价", "未实现盈亏", "当前保护", "操作"]}
+        minWidth={680}
+        colWidths={["16%", "9%", "6%", "9%", "15%", "12%", "13%", "20%"]}
+        aligns={["left", "center", "center", "right", "right", "right", "right", "center"]}
         emptyText="暂无真实持仓 — 连接账户后，交易所同步到的当前持仓会显示在这里。"
         onRowClick={(i) => onToggleExpand(positionKey(positions[i]))}
         onRowKeyDown={(i, e) => {
@@ -80,13 +85,21 @@ export default function PositionsSection({
           const prot = protectionFor(p.accountId, p.symbol, openOrders, p);
           const act = canAct(p);
           const key = positionKey(p);
+          const strategy = strategyFor(p.accountId, p.symbol);
           const parts: string[] = [];
           if (prot.tp != null) parts.push(`止盈 ${prot.tp}${prot.tpCount > 1 ? ` ×${prot.tpCount}` : ""}`);
           if (prot.sl != null) parts.push(`止损 ${prot.sl}${prot.slCount > 1 ? ` ×${prot.slCount}` : ""}`);
           const protectionText = parts.length > 0 ? parts.join(" / ") : "无";
           return [
             <span key="a">
-              {labelOf(p.accountId)} · {venueName(p.adapterId)}
+              <span className="block">
+                {strategy ? `策略 ${strategy.id.slice(0, 8)}` : "手动"}
+              </span>
+              <span className="block text-xs text-ds-text-2">
+                {strategy
+                  ? `${venueName(strategy.legA.exchangeId)} ↔ ${venueName(strategy.legB.exchangeId)}`
+                  : venueName(p.adapterId)}
+              </span>
             </span>,
             <span key="s" className="num">{displaySymbol(p.symbol)}</span>,
             <span key="d">
@@ -95,8 +108,10 @@ export default function PositionsSection({
               </Badge>
             </span>,
             <span key="q" className="num">{p.qty}</span>,
-            <span key="ep" className="num">{p.entryPrice.toFixed(2)}</span>,
-            <span key="mp" className="num">{p.markPrice.toFixed(2)}</span>,
+            <span key="px" className="num">
+              <span className="block">{p.entryPrice.toFixed(2)}</span>
+              <span className="block text-xs text-ds-text-2">{p.markPrice.toFixed(2)}</span>
+            </span>,
             <span
               key="p"
               className={`num ${p.unrealizedPnl > 0 ? "text-ds-up" : p.unrealizedPnl < 0 ? "text-ds-down" : ""}`}
@@ -172,6 +187,7 @@ export default function PositionsSection({
               />
             );
           })()}
+          <div className="mt-2 text-xs text-ds-text-3">策略监控：未设置</div>
         </div>
       )}
     </div>

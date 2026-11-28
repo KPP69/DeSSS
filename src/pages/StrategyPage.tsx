@@ -1,10 +1,11 @@
-import React, { useEffect, useLayoutEffect, useState } from "react";
-import { Button, Checkbox, ConfirmDialog, DataTable, Input, SelectDropdown, Switch, Tooltip } from "../components/ui";
+import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { Badge, Button, Checkbox, ConfirmDialog, DataTable, Input, SelectDropdown, Switch, Tooltip } from "../components/ui";
 import PageState from "../components/PageState";
 import { useInvoke } from "../hooks/useInvoke";
 import { useVenueSchemas } from "../hooks/useVenueSchemas";
 import { api } from "../lib/tauri";
-import type { LegRef, SaveStrategyInput, SpreadParams, StrategyView } from "../lib/types";
+import { displaySymbol } from "../lib/symbol";
+import type { LegRef, MarketInfo, SaveStrategyInput, SpreadParams, StrategyView } from "../lib/types";
 import { useAccountStore } from "../store/useAccountStore";
 import { useShellActions } from "../store/useShellActions";
 import { toast } from "../store/useToastStore";
@@ -47,6 +48,27 @@ const DEFAULT_PARAMS: SpreadParams = {
 };
 
 const PARAM_KEYS = Object.keys(DEFAULT_PARAMS) as (keyof SpreadParams)[];
+
+/**
+ * Strategy types (F4.1): the picker shows display names only — the
+ * backend knows a single kind ("spread") today and the instant spread
+ * has no backend kind yet, so both rows are disabled and no instance
+ * can be created until one is enabled.
+ */
+const STRATEGY_TYPES = [
+  { kind: "spread", name: "均值回归", note: "暂停使用", desc: "在 Hyperliquid 与 Entropy 之间做均值回归价差", available: false },
+  { kind: "spread_instant", name: "即时价差", note: "未实现", desc: "跨所即时价差套利", available: false },
+] as const;
+
+const KIND_NAMES: Record<string, string> = {
+  spread: "均值回归",
+  spread_instant: "即时价差",
+};
+const kindName = (kind: string) => KIND_NAMES[kind] ?? kind;
+
+/** Native wire symbol for a display name (Entropy carries the io: prefix). */
+const toNativeSymbol = (exchangeId: string, display: string) =>
+  exchangeId === "entropy" ? `io:${display}` : display;
 
 function legCell(
   leg: LegRef,
@@ -101,7 +123,36 @@ export default function StrategyPage() {
   }, [register, unregister, instances, schemas]);
 
   const [formOpen, setFormOpen] = useState(false);
+  const [formStep, setFormStep] = useState<"type" | "config">("type");
+  const [selectedKind, setSelectedKind] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
+  // Symbol intersection (F4.1): display names both legs share, from the
+  // catalog. The backend refuses empty queries and never dumps the whole
+  // market over IPC, so the list is built by sweeping a-z0-9 — every
+  // base starts with a letter or digit — and intersecting the two sets.
+  // Cached per exchange; a sweep is one parallel batch of local reads.
+  const [symbolOptions, setSymbolOptions] = useState<string[] | null>(null);
+  const [symbolsLoading, setSymbolsLoading] = useState(false);
+  const symbolCache = useRef(new Map<string, string[]>());
+
+  const fetchVenueSymbols = async (exchangeId: string): Promise<string[]> => {
+    const cached = symbolCache.current.get(exchangeId);
+    if (cached) return cached;
+    const probes = "abcdefghijklmnopqrstuvwxyz0123456789".split("");
+    const lists = await Promise.all(
+      probes.map((q) =>
+        api.searchMarketInfo(q, [exchangeId]).catch(() => [] as MarketInfo[]),
+      ),
+    );
+    const set = new Set<string>();
+    for (const rows of lists) {
+      for (const r of rows) set.add(displaySymbol(r.symbol));
+    }
+    const out = [...set].sort();
+    symbolCache.current.set(exchangeId, out);
+    return out;
+  };
+
   const [legA, setLegA] = useState<LegForm>({ exchangeId: "hyperliquid", accountId: "", symbol: "BTC" });
   const [legB, setLegB] = useState<LegForm>({ exchangeId: "entropy", accountId: "", symbol: "io:BTC" });
   const [params, setParams] = useState<Record<keyof SpreadParams, string>>({
@@ -123,10 +174,37 @@ export default function StrategyPage() {
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [formWarning, setFormWarning] = useState<string | null>(null);
 
+  // Load the symbol intersection once the config step is shown for a leg pair.
+  useEffect(() => {
+    if (!formOpen || formStep !== "config") return;
+    const a = legA.exchangeId;
+    const b = legB.exchangeId;
+    if (!a || !b) {
+      setSymbolOptions(null);
+      return;
+    }
+    let cancelled = false;
+    setSymbolsLoading(true);
+    (async () => {
+      const [sa, sb] = await Promise.all([fetchVenueSymbols(a), fetchVenueSymbols(b)]);
+      if (cancelled) return;
+      const setB = new Set(sb);
+      setSymbolOptions(sa.filter((s) => setB.has(s)));
+      setSymbolsLoading(false);
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [formOpen, formStep, legA.exchangeId, legB.exchangeId]);
+
   const openNew = () => {
     setEditingId(null);
+    setSelectedKind(null);
+    setFormStep("type");
+    setSymbolOptions(null);
     setLegA({ exchangeId: tradable[0]?.id ?? "hyperliquid", accountId: "", symbol: "BTC" });
-    setLegB({ exchangeId: tradable[1]?.id ?? tradable[0]?.id ?? "entropy", accountId: "", symbol: "io:BTC" });
+    setLegB({ exchangeId: tradable[1]?.id ?? tradable[0]?.id ?? "entropy", accountId: "", symbol: "BTC" });
     setParams({
       midlineBps: String(DEFAULT_PARAMS.midlineBps),
       upperBps: String(DEFAULT_PARAMS.upperBps),
@@ -147,8 +225,11 @@ export default function StrategyPage() {
 
   const openEdit = (v: StrategyView) => {
     setEditingId(v.id);
-    setLegA({ ...v.legA });
-    setLegB({ ...v.legB });
+    setSelectedKind(v.kind);
+    setFormStep("config");
+    setSymbolOptions(null);
+    setLegA({ ...v.legA, symbol: displaySymbol(v.legA.symbol) });
+    setLegB({ ...v.legB, symbol: displaySymbol(v.legB.symbol) });
     setParams({
       midlineBps: String(v.params.midlineBps),
       upperBps: String(v.params.upperBps),
@@ -178,13 +259,21 @@ export default function StrategyPage() {
       ? "midline 未标定，建议先录数据校准"
       : null;
 
+  const noIntersection = symbolOptions !== null && symbolOptions.length === 0;
+
   const onSave = async () => {
-    if (saving) return;
+    if (saving || noIntersection) return;
     const errors: Record<string, string> = {};
     if (!legA.accountId) errors.legA = "A 腿请选择账户。";
-    if (!legA.symbol.trim()) errors.legA = "A 腿请填写品种。";
+    if (!legA.symbol.trim()) errors.legA = "A 腿请选择品种。";
+    else if (symbolOptions !== null && !symbolOptions.includes(legA.symbol.trim())) {
+      errors.legA = "A 腿品种不在两所交集中。";
+    }
     if (!legB.accountId) errors.legB = "B 腿请选择账户。";
-    if (!legB.symbol.trim()) errors.legB = "B 腿请填写品种。";
+    if (!legB.symbol.trim()) errors.legB = "B 腿请选择品种。";
+    else if (symbolOptions !== null && !symbolOptions.includes(legB.symbol.trim())) {
+      errors.legB = "B 腿品种不在两所交集中。";
+    }
     const parsed = {} as Record<keyof SpreadParams, number>;
     for (const k of PARAM_KEYS) {
       const n = Number(params[k]);
@@ -208,9 +297,9 @@ export default function StrategyPage() {
     setFieldErrors({});
     const input: SaveStrategyInput = {
       id: editingId,
-      kind: "spread",
-      legA: { ...legA, symbol: legA.symbol.trim() },
-      legB: { ...legB, symbol: legB.symbol.trim() },
+      kind: selectedKind ?? "spread",
+      legA: { ...legA, symbol: toNativeSymbol(legA.exchangeId, legA.symbol.trim()) },
+      legB: { ...legB, symbol: toNativeSymbol(legB.exchangeId, legB.symbol.trim()) },
       params: parsed,
       enabled,
     };
@@ -264,7 +353,7 @@ export default function StrategyPage() {
             <SelectDropdown
               options={tradable.map((s) => ({ value: s.id, label: s.name }))}
               value={leg.exchangeId}
-              onChange={(v) => setLeg({ ...leg, exchangeId: v, accountId: "" })}
+              onChange={(v) => setLeg({ ...leg, exchangeId: v, accountId: "", symbol: "" })}
             />
           </label>
           <label className="block">
@@ -278,14 +367,19 @@ export default function StrategyPage() {
           </label>
           <label className="block">
             <span className="mb-1 block text-xs text-ds-text-2">品种</span>
-            <Input
+            <SelectDropdown
+              options={(symbolOptions ?? []).map((s) => ({ value: s, label: s }))}
               value={leg.symbol}
-              onChange={(e) => setLeg({ ...leg, symbol: e.target.value })}
-              placeholder="BTC"
+              onChange={(v) => setLeg({ ...leg, symbol: v })}
+              placeholder={
+                symbolsLoading
+                  ? "加载品种…"
+                  : symbolOptions !== null && symbolOptions.length === 0
+                    ? "两所无共同品种"
+                    : "请选择品种"
+              }
+              disabled={symbolsLoading || symbolOptions === null || symbolOptions.length === 0}
             />
-            {leg.exchangeId === "entropy" && (
-              <span className="mt-1 block text-xs text-ds-text-2">Entropy 品种带 io: 前缀，如 io:BTC</span>
-            )}
           </label>
         </div>
         {fieldErrors[errorKey] && (
@@ -315,10 +409,45 @@ export default function StrategyPage() {
 
   return (
     <div>
-      {formOpen && (
+      {formOpen && formStep === "type" && !editingId && (
+        <div className="mb-5 rounded-xl border border-ds-line bg-ds-panel p-4">
+          <div className="mb-4 text-[13px] font-semibold text-ds-text-1">选择策略类型</div>
+          <div className="space-y-2">
+            {STRATEGY_TYPES.map((t) => (
+              <div
+                key={t.kind}
+                onClick={
+                  t.available
+                    ? () => {
+                        setSelectedKind(t.kind);
+                        setFormStep("config");
+                      }
+                    : undefined
+                }
+                className={`flex items-center gap-3 rounded-lg border border-ds-line bg-ds-panel-2/50 px-4 py-3 ${
+                  t.available ? "cursor-pointer hover:border-ds-accent" : "opacity-60"
+                }`}
+              >
+                <div className="min-w-0 flex-1">
+                  <div className="text-[13px] font-semibold text-ds-text-1">{t.name}</div>
+                  <div className="text-xs text-ds-text-2">{t.desc}</div>
+                </div>
+                <Badge tone={t.kind === "spread" ? "warn" : "neutral"}>{t.note}</Badge>
+              </div>
+            ))}
+          </div>
+          <div className="mt-4 flex gap-2">
+            <Button variant="secondary" onClick={() => setFormOpen(false)}>
+              取消
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {formOpen && formStep === "config" && (
         <div className="mb-5 rounded-xl border border-ds-line bg-ds-panel p-4">
           <div className="mb-4 text-[13px] font-semibold text-ds-text-1">
-            {editingId ? "编辑实例" : "新建实例"}
+            {editingId ? "编辑实例" : "新建实例"} · {kindName(selectedKind ?? "spread")}
           </div>
           <div className="mb-4 text-[13px] font-semibold text-ds-text-1">两条腿</div>
           <div className="grid grid-cols-2 gap-4">
@@ -345,6 +474,7 @@ export default function StrategyPage() {
           <div className="space-y-1 text-xs text-ds-text-2">
             <p>止盈 / 止损为 0 表示不挂保护单；保护单为 reduce-only 触发单。</p>
             <p>仓位比例 (0, 1]：每轮最多用该比例的名义开仓。</p>
+            {noIntersection && <p className="text-ds-warn">两所无共同品种，无法保存。</p>}
             {midlineWarning && <p className="text-ds-warn">{midlineWarning}</p>}
             {formWarning && <p className="text-ds-warn">{formWarning}</p>}
           </div>
@@ -355,7 +485,7 @@ export default function StrategyPage() {
             onChange={(e) => setEnabled(e.target.checked)}
           />
           <div className="mt-4 flex gap-2">
-            <Button onClick={onSave} loading={saving}>
+            <Button onClick={onSave} loading={saving} disabled={noIntersection}>
               保存
             </Button>
             <Button variant="secondary" onClick={() => setFormOpen(false)}>
@@ -375,8 +505,8 @@ export default function StrategyPage() {
           action={<Button onClick={openNew}>新建策略</Button>}
         >
           <div>
-            <div className="text-[13px] font-semibold text-ds-text-1">暂无策略</div>
-            <div className="mt-1">新建一个均值回归策略，跑在 Hyperliquid 与 Entropy 之间。</div>
+            <div className="text-[13px] font-semibold text-ds-text-1">当前没有可用策略</div>
+            <div className="mt-1">均值回归已暂停使用，即时价差尚未实现。</div>
           </div>
         </PageState>
       ) : instances.length > 0 ? (
